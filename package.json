@@ -1,0 +1,13 @@
+{
+  "name": "@daiops/agent-runner",
+  "version": "0.3.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "dependencies": {}
+}

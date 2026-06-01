@@ -1,0 +1,8 @@
+.git
+.github
+*.test.js
+README.md
+LOCAL_DEV.md
+node_modules
+.env
+.env.*
