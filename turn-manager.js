@@ -49,6 +49,8 @@ const SERVER_RESULT_BLOCK_TYPES = new Set([
 // 등재되지 않은 모델은 ANTHROPIC_DEFAULT_OUTPUT_LIMIT 사용 (미래 모델은 더 작은 capacity일
 // 가능성이 낮으므로 안전).
 export const ANTHROPIC_OUTPUT_LIMITS = Object.freeze({
+  // Claude 4.8
+  'claude-opus-4-8': 128_000,
   // Claude 4.7
   'claude-opus-4-7': 128_000,
   // Claude 4.6
@@ -74,14 +76,14 @@ export const ANTHROPIC_OUTPUT_LIMITS = Object.freeze({
 
 export const ANTHROPIC_DEFAULT_OUTPUT_LIMIT = 128_000
 
-/** Adaptive thinking 지원 세대 — 4.6/4.7. 매칭은 점·하이픈 양쪽 모두 시도(OpenRouter 호환). */
-export const ADAPTIVE_THINKING_SUBSTRINGS = Object.freeze(['4-6', '4.6', '4-7', '4.7'])
+/** Adaptive thinking 지원 세대 — 4.6/4.7/4.8. 매칭은 점·하이픈 양쪽 모두 시도(OpenRouter 호환). */
+export const ADAPTIVE_THINKING_SUBSTRINGS = Object.freeze(['4-6', '4.6', '4-7', '4.7', '4-8', '4.8'])
 
 /** xhigh effort 지원 세대 — 4.7+. 미지원 모델에서 xhigh 요청 시 'max'로 다운그레이드. */
-export const XHIGH_EFFORT_SUBSTRINGS = Object.freeze(['4-7', '4.7'])
+export const XHIGH_EFFORT_SUBSTRINGS = Object.freeze(['4-7', '4.7', '4-8', '4.8'])
 
 /** sampling param(temperature/top_p/top_k) 거부 세대 — 4.7+. 비기본값 전송 시 400. */
-export const NO_SAMPLING_PARAMS_SUBSTRINGS = Object.freeze(['4-7', '4.7'])
+export const NO_SAMPLING_PARAMS_SUBSTRINGS = Object.freeze(['4-7', '4.7', '4-8', '4.8'])
 
 /** Adaptive effort 매핑. legacy 'minimal'은 'low'로. */
 const ADAPTIVE_EFFORT_MAP = Object.freeze({
