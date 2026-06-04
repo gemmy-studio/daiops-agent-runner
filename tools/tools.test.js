@@ -31,13 +31,15 @@ describe('buildToolEnv — 내부 시크릿 스크럽', () => {
     }
   })
 
-  it('extra로 넘긴 값은 덮어쓰되 denylist는 여전히 제거', () => {
+  it('extra로 넘긴 일반 키는 덮어쓰되, denylist 키는 extra라도 제거', () => {
     const prev = { ...process.env }
     process.env.AGENT_RUNNER_TOKEN = 'secret-token'
     try {
       const env = buildToolEnv({ FOO: 'bar', AGENT_RUNNER_TOKEN: 'override-attempt' })
       assert.equal(env.FOO, 'bar')
-      assert.equal(env.AGENT_RUNNER_TOKEN, 'override-attempt') // extra는 명시적이므로 통과 (호출자 책임)
+      // Phase B 격리: extra(세션 secret)는 LLM이 요청한 신뢰 불가 입력이므로 denylist를 적용한다.
+      // 내부 시크릿(AGENT_RUNNER_TOKEN/LLM_PROXY_URL)이 secret 경유로 자식에 우회 주입되는 것을 막는다.
+      assert.equal(env.AGENT_RUNNER_TOKEN, undefined)
     } finally {
       process.env = prev
     }

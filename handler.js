@@ -8,6 +8,7 @@
 
 import { createHash } from 'node:crypto'
 import { ApprovalManager } from './approval-manager.js'
+import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './tools/request-secret.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState } from './event-buffer.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
 import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail } from './retry-utils.js'
@@ -632,6 +633,9 @@ export async function handleChat(rawParams, res, req) {
   const abortController = new AbortController()
   const approvalManager = new ApprovalManager()
   const approvalTimeoutMs = params.approval_timeout_seconds * 1000
+  // Phase B — 세션 secret store. 본체 process.env를 오염시키지 않고(OpenHuman 격리) 도구 자식
+  // 프로세스 env로만 주입한다(getToolEnv → llm-wrapper runTool → buildToolEnv extra → Bash 자식).
+  const sessionSecrets = new Map()
   // res를 세션 맵에 저장 — emitSseEvent + T5 resume이 swap 가능.
   // heartbeatStop은 finally에서 호출. T5 resume이 res를 swap해도 heartbeat tick이
   // activeSessions.get(sessionId)?.res로 매번 조회하므로 자동으로 새 res로 흐름.
@@ -675,6 +679,11 @@ export async function handleChat(rawParams, res, req) {
      *    cloud가 SSE plan_request 수신 → 사용자 결재 → POST /v1/approval/:id로 resolve.
      */
     const canUseTool = async (toolName, input) => {
+      // request_secret(Phase B)은 정책 게이트를 적용하지 않는다 — 도구 자체가 사용자 결재(secret_request)로
+      // 안전성을 확보하고, 값은 LLM에 노출되지 않고 env로만 주입된다. 실행은 runTool→onRequestSecret이 담당.
+      if (toolName === 'request_secret') {
+        return { behavior: 'allow' }
+      }
       const decision = evaluatePolicy(params.policy, toolName, input, true)
 
       if (decision.kind === 'allow') {
@@ -736,6 +745,76 @@ export async function handleChat(rawParams, res, req) {
       return { behavior: 'allow', updatedInput: applyCacheRedirectCorrection(toolName, input) }
     }
 
+    /**
+     * request_secret 도구 실행 (Phase B) — llm-wrapper runTool이 ctx.onRequestSecret으로 위임.
+     * env에 이미 있으면 즉시 "사용 가능", 없으면 secret_request로 사용자에게 요청(in-flight pause).
+     * 사용자가 값을 제공하면 process.env[KEY]에 주입 → 후속 Bash 등의 buildToolEnv가 즉시 픽업.
+     * 값(평문)은 LLM에 절대 반환하지 않는다 — 결과는 핸들 텍스트만. SSE에도 평문 미포함.
+     */
+    const onRequestSecret = async (input) => {
+      const keyName = typeof input?.key_name === 'string' ? input.key_name.trim() : ''
+      const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
+      if (!isValidSecretKey(keyName)) {
+        return {
+          content: `request_secret: key_name '${keyName}'이(가) 유효하지 않아요. 대문자로 시작하는 영대문자/숫자/밑줄만 허용해요 (예: STRIPE_API_KEY).`,
+          is_error: true,
+        }
+      }
+      // 예약어(시스템 실행흐름·내부 인프라 시크릿)는 거부 — 격리의 2차 가드(자식 Bash 무결성·토큰 노출 방지).
+      if (isReservedKey(keyName)) {
+        return {
+          content: `'${keyName}'은(는) 시스템 예약 환경변수라 등록할 수 없어요. 다른 이름을 쓰거나, 정말 필요하면 관리자에게 직접 설정을 요청하세요.`,
+          is_error: true,
+        }
+      }
+
+      // 이미 이 세션에 주입돼 있으면 즉시 사용 가능 (값은 노출하지 않음).
+      if (sessionSecrets.has(keyName)) {
+        emitSseEvent(sessionId, 'secret_used', { key_name: keyName })
+        return { content: `'${keyName}'은(는) 이미 사용 가능해요. Bash 등에서 $${keyName}로 참조하세요. (값은 보안상 비공개)` }
+      }
+
+      // 없으면 사용자에게 요청 — in-flight pause. SSE secret_request에는 평문이 포함되지 않는다.
+      const record = approvalManager.create(
+        { toolName: 'request_secret', commandSummary: keyName, reason: reason || `'${keyName}' 환경변수가 필요해요`, sessionId },
+        approvalTimeoutMs,
+      )
+      approvalRouting.set(record.id, sessionId)
+
+      emitSseEvent(sessionId, 'secret_request', {
+        key_name: keyName,
+        reason: reason || `'${keyName}' 환경변수가 필요해요`,
+        session_id: sessionId,
+        approval_id: record.id,
+      })
+
+      const result = await approvalManager.waitForDecision(record, approvalTimeoutMs)
+      approvalRouting.delete(record.id)
+
+      if (!result) {
+        return {
+          content: `'${keyName}' 입력 대기 시간이 초과됐어요. 사용자에게 다시 요청하거나, 설정의 환경변수 메뉴에서 직접 등록하도록 안내하세요.`,
+          is_error: true,
+        }
+      }
+      if (result.secretAction === 'skip' || result.kind === 'deny') {
+        return {
+          content: `사용자가 '${keyName}' 입력을 건너뛰었어요. 이 키 없이 가능한 다른 방법을 시도하거나, 대안을 사용자에게 물어보세요.`,
+        }
+      }
+      const value = typeof result.value === 'string' ? result.value : ''
+      if (!value) {
+        return { content: `'${keyName}' 값이 비어 있어 등록하지 못했어요.`, is_error: true }
+      }
+      // 세션 store에 주입 → getToolEnv를 통해 도구 자식 프로세스 env로만 흐른다(본체 process.env 불변).
+      // cloud는 별도로 vault(AES-256-GCM) + .integrations.env에 영속화(다음 sandbox 재시작 시 BASH_ENV로 자식 주입).
+      sessionSecrets.set(keyName, value)
+      emitSseEvent(sessionId, 'secret_resolved', { key_name: keyName })
+      return {
+        content: `'${keyName}'이(가) 등록돼서 이제 사용 가능해요. Bash 등에서 $${keyName}로 참조하세요. (값은 보안상 비공개라 다시 표시되지 않아요)`,
+      }
+    }
+
     // SDK maxTurns는 절대 상한(brake)만 담당. 실제 통제는 자체 turnCount + plan_request 결재.
     // 결재 거부 시 abortController.abort()로 중단. SDK가 먼저 끝나면 자체 카운터의
     // 결재 기회를 잃으므로 충분히 크게.
@@ -770,6 +849,9 @@ export async function handleChat(rawParams, res, req) {
       maxTurns: SDK_HARD_MAX_TURNS,
       abortController,
       canUseTool,
+      // request_secret(Phase B) 도구 노출 — LLM이 필요한 환경변수를 사용자에게 요청할 수 있게.
+      // llm-wrapper가 options.tools를 LLM 요청 tools[]에 머지하고, runTool은 onRequestSecret으로 라우팅.
+      tools: [REQUEST_SECRET_TOOL],
     }
 
     // 자체 turn 카운터: assistant 메시지 수신마다 +1. budget 도달 시 silent 자동 연장
@@ -812,6 +894,9 @@ export async function handleChat(rawParams, res, req) {
             partialEmittedThisTurn = true
             emitSseEvent(sessionId, 'text_delta', { delta })
           },
+          onRequestSecret,
+          // Phase B 격리 — 세션 secret을 도구 자식 프로세스 env로만 전달(본체 process.env 미오염).
+          getToolEnv: () => Object.fromEntries(sessionSecrets),
         },
       ),
       {

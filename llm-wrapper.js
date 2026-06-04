@@ -183,8 +183,20 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
 
   // runTool: 빌트인은 자체 실행, MCP는 turn-manager가 routing(자기 registry에서 처리).
   const runTool = async (name, input, runCtx) => {
+    // request_secret(Phase B): handler가 주입한 onRequestSecret 콜백으로 위임 — 결재 대기 + env 주입.
+    // 값(평문)은 LLM에 노출되지 않고, 결과는 "$KEY 사용 가능" 핸들 텍스트만 반환된다.
+    if (name === 'request_secret') {
+      if (typeof ctx.onRequestSecret === 'function') return ctx.onRequestSecret(input)
+      return { content: 'request_secret: 이 환경에서는 secret 요청이 지원되지 않습니다.', is_error: true }
+    }
     if (isBuiltinTool(name)) {
-      return runBuiltinTool(name, input, { cwd: opts.cwd, signal: runCtx?.signal ?? combinedSignal })
+      // Phase B 격리: 세션 secret을 자식 프로세스 env로만 주입(본체 process.env 미오염).
+      // ctx.getToolEnv()가 {KEY:value} 맵을 반환하면 buildToolEnv(extra)로 Bash 등 자식에 머지된다.
+      return runBuiltinTool(name, input, {
+        cwd: opts.cwd,
+        signal: runCtx?.signal ?? combinedSignal,
+        env: typeof ctx.getToolEnv === 'function' ? ctx.getToolEnv() : undefined,
+      })
     }
     // MCP 프리픽스도 아니고 빌트인도 아니면 turn-manager가 에러 처리.
     if (isMcpToolName(name)) {

@@ -28,6 +28,9 @@ import { randomUUID } from 'node:crypto'
  * @property {ApprovalDecisionKind} kind
  * @property {string} [allowlistEntry]  - allow_always 시 추가할 패턴 (Bash bin 또는 file_path)
  * @property {string} [feedback]        - deny 시 수정 지시(선택)
+ * @property {'provide'|'skip'} [secretAction] - secret_request(Phase B) 해소 종류: 값 제공 또는 건너뛰기
+ * @property {string} [value]           - secretAction='provide' 시 사용자가 입력한 secret 평문.
+ *                                        agent-runner 내부 전용(process.env 주입). LLM/SSE에 절대 노출하지 않음.
  */
 
 /**

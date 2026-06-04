@@ -155,6 +155,51 @@ const server = createServer(async (req, res) => {
     return
   }
 
+  // POST /v1/secret/:id — secret_request 해소 (Phase B). /v1/approval/:id 미러.
+  // body: { action: 'provide', value: '<평문>' } 또는 { action: 'skip' }.
+  // 같은 approvalRouting/ApprovalManager.resolve 경로 재사용 — decision에 secretAction/value를 실어 보낸다.
+  // 값(평문)은 cloud→agent-runner(sandbox preview URL, bearer+preview token, HTTPS) 경계에서만 흐른다.
+  if (req.method === 'POST' && url.pathname.startsWith('/v1/secret/')) {
+    const secretId = url.pathname.slice('/v1/secret/'.length)
+    if (!secretId) {
+      sendJson(res, 400, { error: 'secret id required' })
+      return
+    }
+    try {
+      const raw = await parseBody(req)
+      const body = raw ? JSON.parse(raw) : {}
+      const action = String(body.action ?? (typeof body.value === 'string' ? 'provide' : ''))
+      if (action !== 'provide' && action !== 'skip') {
+        sendJson(res, 400, { error: 'action must be provide|skip' })
+        return
+      }
+      let decision
+      if (action === 'skip') {
+        // 건너뛰기 — kind:'deny'로 매핑하되 secretAction으로 의도를 구분(onRequestSecret이 분기).
+        decision = { kind: 'deny', secretAction: 'skip' }
+      } else {
+        const value = typeof body.value === 'string' ? body.value : ''
+        if (!value) {
+          sendJson(res, 400, { error: 'value required when action=provide' })
+          return
+        }
+        decision = { kind: 'allow_once', secretAction: 'provide', value }
+      }
+      const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
+      const ok = resolveApproval(secretId, decision, resolvedBy)
+      if (!ok) {
+        sendJson(res, 409, { error: 'secret request already resolved or not found', secret_id: secretId })
+        return
+      }
+      sendJson(res, 200, { ok: true, secret_id: secretId })
+    } catch (err) {
+      // 평문 value가 본문에 있을 수 있으므로 에러 메시지를 응답에 노출하지 않는다 (서버 로그만).
+      console.error('[agent-runner] /v1/secret error', err instanceof Error ? err.stack || err.message : err)
+      sendJson(res, 500, { error: 'Internal error' })
+    }
+    return
+  }
+
   sendJson(res, 404, { error: 'Not found' })
 })
 

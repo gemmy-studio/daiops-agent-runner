@@ -42,7 +42,11 @@ export function buildToolEnv(extra = {}) {
     base[k] = v
   }
   for (const [k, v] of Object.entries(extra)) {
-    if (v !== undefined) base[k] = v
+    // extra(세션 secret 등 명시 주입)에도 denylist를 적용한다. Phase B 격리에서 세션 secret이
+    // 자식 env로 흐르므로, 내부 인프라 시크릿(AGENT_RUNNER_TOKEN/LLM_PROXY_URL)이 secret 경유로
+    // 우회 주입되는 것을 막는 심층 방어 (1차는 request-secret.isReservedKey 거부).
+    if (TOOL_ENV_DENYLIST.includes(k) || v === undefined) continue
+    base[k] = v
   }
   return base
 }
