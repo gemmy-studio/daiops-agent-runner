@@ -7,6 +7,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './tools/request-secret.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState } from './event-buffer.js'
@@ -20,6 +21,33 @@ import { logError } from './logger.js'
  * 자세한 contract는 ./CONTRACT.md §1-1 참조.
  */
 const DEFAULT_CWD = '/workspace'
+
+/**
+ * Phase B — 워크스페이스 secret store. 모듈 레벨(= agent-runner 프로세스 = 샌드박스/워크스페이스 1개
+ * 수명)이라 handleChat(턴)마다 새로 만들지 않는다. 한 번 제공된 secret이 같은 샌드박스의 후속 턴에서도
+ * 유지돼 "이미 사용 가능"으로 인식된다(턴마다 재요청되던 갭 해소). getToolEnv가 이 맵을 도구 자식 env로 주입.
+ * agent-runner 한 프로세스는 한 워크스페이스만 서빙하므로 워크스페이스 스코프(교차 유출 없음).
+ */
+const workspaceSecrets = new Map()
+
+/** 재시작 시 vault→writeWorkspaceEnv가 주입하는 파일. Bash가 BASH_ENV로 source해 자식 env로 export. */
+const INTEGRATIONS_ENV_PATH = '/workspace/.integrations.env'
+
+/**
+ * 키가 .integrations.env(재시작 시 vault 주입분)에 export돼 있는지 확인. 있으면 Bash 자식이 BASH_ENV로
+ * 이미 보유하므로 request_secret 재요청이 불필요하다. keyName은 isValidSecretKey(^[A-Z][A-Z0-9_]*$)로
+ * 검증된 뒤에만 호출되므로 정규식 인젝션 안전.
+ * @param {string} keyName
+ * @returns {Promise<boolean>}
+ */
+async function isKeyInIntegrationsEnv(keyName) {
+  try {
+    const content = await readFile(INTEGRATIONS_ENV_PATH, 'utf8')
+    return new RegExp(`^(?:export\\s+)?${keyName}=`, 'm').test(content)
+  } catch {
+    return false
+  }
+}
 
 /**
  * cloud(params.model) 미전달 시 fallback.
@@ -633,9 +661,8 @@ export async function handleChat(rawParams, res, req) {
   const abortController = new AbortController()
   const approvalManager = new ApprovalManager()
   const approvalTimeoutMs = params.approval_timeout_seconds * 1000
-  // Phase B — 세션 secret store. 본체 process.env를 오염시키지 않고(OpenHuman 격리) 도구 자식
-  // 프로세스 env로만 주입한다(getToolEnv → llm-wrapper runTool → buildToolEnv extra → Bash 자식).
-  const sessionSecrets = new Map()
+  // Phase B — secret store는 모듈 레벨 workspaceSecrets(프로세스 수명)로 승격됨. 턴(handleChat)마다
+  // 새로 만들지 않아 한 번 제공된 secret이 후속 턴에서도 유지된다(getToolEnv가 도구 자식 env로 주입).
   // res를 세션 맵에 저장 — emitSseEvent + T5 resume이 swap 가능.
   // heartbeatStop은 finally에서 호출. T5 resume이 res를 swap해도 heartbeat tick이
   // activeSessions.get(sessionId)?.res로 매번 조회하므로 자동으로 새 res로 흐름.
@@ -768,8 +795,9 @@ export async function handleChat(rawParams, res, req) {
         }
       }
 
-      // 이미 이 세션에 주입돼 있으면 즉시 사용 가능 (값은 노출하지 않음).
-      if (sessionSecrets.has(keyName)) {
+      // 이미 사용 가능하면 즉시 반환(턴 넘어 재요청 방지): (a) 이 프로세스에서 받은 적 있거나(workspaceSecrets),
+      // (b) 재시작 시 vault→.integrations.env로 주입돼 Bash가 BASH_ENV로 이미 보유 중이거나. 값은 노출하지 않음.
+      if (workspaceSecrets.has(keyName) || (await isKeyInIntegrationsEnv(keyName))) {
         emitSseEvent(sessionId, 'secret_used', { key_name: keyName })
         return { content: `'${keyName}'은(는) 이미 사용 가능해요. Bash 등에서 $${keyName}로 참조하세요. (값은 보안상 비공개)` }
       }
@@ -808,7 +836,7 @@ export async function handleChat(rawParams, res, req) {
       }
       // 세션 store에 주입 → getToolEnv를 통해 도구 자식 프로세스 env로만 흐른다(본체 process.env 불변).
       // cloud는 별도로 vault(AES-256-GCM) + .integrations.env에 영속화(다음 sandbox 재시작 시 BASH_ENV로 자식 주입).
-      sessionSecrets.set(keyName, value)
+      workspaceSecrets.set(keyName, value)
       emitSseEvent(sessionId, 'secret_resolved', { key_name: keyName })
       return {
         content: `'${keyName}'이(가) 등록돼서 이제 사용 가능해요. Bash 등에서 $${keyName}로 참조하세요. (값은 보안상 비공개라 다시 표시되지 않아요)`,
@@ -896,7 +924,7 @@ export async function handleChat(rawParams, res, req) {
           },
           onRequestSecret,
           // Phase B 격리 — 세션 secret을 도구 자식 프로세스 env로만 전달(본체 process.env 미오염).
-          getToolEnv: () => Object.fromEntries(sessionSecrets),
+          getToolEnv: () => Object.fromEntries(workspaceSecrets),
         },
       ),
       {
