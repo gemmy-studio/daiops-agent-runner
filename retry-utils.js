@@ -44,8 +44,13 @@ export function jitteredBackoff(attempt, opts = {}) {
  * - 'timeout'      : "timeout", "timed out", "ETIMEDOUT", "ECONNRESET" — retry
  * - 'billing'      : 402, "credit", "quota exhausted" — fatal
  * - 'auth'         : 401/403 — fatal
+ * - 'context_overflow' : 400 + "prompt is too long"/"context length" — fatal (새 대화 유도)
  * - 'bad_request'  : 400 (format/validation) — fatal
+ * - 'proxy_unreachable' : LLM proxy/터널 다운 (ERR_NGROK_3200, 404 offline) — fatal (인프라 결함)
  * - 'unknown'      : 분류 실패 — *retry 안 함* (보수적)
+ *
+ * proxy_unreachable·context_overflow는 daiops 고유(cloud LLM proxy + 긴 대화 구조)로,
+ * hermes/openclaw 분류기에는 없으나 같은 "구조화 코드 전달" 원칙을 따른다.
  *
  * @param {unknown} err
  * @returns {{reason: string, retryable: boolean, status?: number}}
@@ -59,10 +64,20 @@ export function classifyLlmError(err) {
   const message = String(e.message ?? err ?? '').toLowerCase()
   const name = String(e.name ?? '').toLowerCase()
 
+  // LLM proxy/dev 터널 다운 — status보다 먼저. ngrok 재시작으로 baked URL이 stale가 되면
+  // proxy가 404 "endpoint ... is offline (ERR_NGROK_3200)"를 반환. retry해도 같은 죽은 URL이라 무의미.
+  if (/err_ngrok|ngrok-free|is offline|endpoint .* is offline|tunnel .* not found/.test(message)) {
+    return { reason: 'proxy_unreachable', retryable: false, status }
+  }
+
   // 상태 코드 우선 (Anthropic SDK는 .status 노출)
   if (status === 429) return { reason: 'rate_limit', retryable: true, status }
   if (status === 402) return { reason: 'billing', retryable: false, status }
   if (status === 401 || status === 403) return { reason: 'auth', retryable: false, status }
+  // context window 초과 — 400의 한 갈래. bad_request보다 먼저 매칭해 사용자에게 "새 대화" 유도.
+  if (status === 400 && /prompt is too long|context length|context window|maximum.*tokens|too many tokens/.test(message)) {
+    return { reason: 'context_overflow', retryable: false, status }
+  }
   if (status === 400) return { reason: 'bad_request', retryable: false, status }
   if (status === 503 || status === 529) return { reason: 'overloaded', retryable: true, status }
   if (status === 500 || status === 502 || status === 504) return { reason: 'server_error', retryable: true, status }
@@ -88,6 +103,33 @@ export function classifyLlmError(err) {
   }
 
   return { reason: 'unknown', retryable: false }
+}
+
+/** 시크릿 패턴 — 에러 detail을 cloud로 보내기 전 마스킹 (openhuman sanitize_api_error 차용) */
+const SECRET_PATTERNS = [
+  /sk-[a-zA-Z0-9_-]{8,}/g, // OpenAI/Anthropic 키
+  /eyJ[a-zA-Z0-9_=-]+\.[a-zA-Z0-9_=-]+\.[a-zA-Z0-9_=-]+/g, // JWT
+  /ghp_[a-zA-Z0-9]{20,}/g, // GitHub PAT
+  /AKIA[0-9A-Z]{16}/g, // AWS access key
+]
+
+/**
+ * 에러를 cloud로 보낼 안전한 한 줄 요약으로 변환.
+ * - message + body(있으면)를 합쳐 시크릿 마스킹 후 maxLen 절단.
+ * - 스택·원문 전체는 포함하지 않는다 (handler.js catch에서 로그로만).
+ *
+ * @param {unknown} err
+ * @param {number} [maxLen]
+ * @returns {string}
+ */
+export function sanitizeErrorDetail(err, maxLen = 200) {
+  const e = /** @type {{message?: string, body?: unknown}} */ (err && typeof err === 'object' ? err : {})
+  const body = typeof e.body === 'string' ? e.body : ''
+  let detail = String(e.message ?? err ?? '')
+  if (body && !detail.includes(body)) detail = `${detail} ${body}`
+  detail = detail.replace(/\s+/g, ' ').trim()
+  for (const pat of SECRET_PATTERNS) detail = detail.replace(pat, '[REDACTED]')
+  return detail.slice(0, maxLen)
 }
 
 /**

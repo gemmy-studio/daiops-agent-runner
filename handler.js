@@ -10,7 +10,8 @@ import { createHash } from 'node:crypto'
 import { ApprovalManager } from './approval-manager.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState } from './event-buffer.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
-import { asyncIteratorWithFirstYieldRetry } from './retry-utils.js'
+import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail } from './retry-utils.js'
+import { logError } from './logger.js'
 
 /**
  * 샌드박스 기본 작업 디렉토리.
@@ -995,11 +996,17 @@ export async function handleChat(rawParams, res, req) {
       total_output_tokens: totalOutputTokens,
     })
   } catch (err) {
-    // 원문 에러는 서버 로그로만 — 클라이언트에는 상세(LLM API body·스택)를 노출하지 않는다.
-    console.error('[agent-runner] SDK execution error', err instanceof Error ? err.stack || err.message : err)
+    // T1: 원문 스택·body는 errors.log(영속)에만. cloud로는 "분류 코드 + 시크릿 마스킹한 한 줄 요약"만 보낸다.
+    // (레퍼런스 3사 공통 원칙: 원문 금지, 분류 코드는 필수.) message는 기존 호환을 위해 고정 유지.
+    const cls = classifyLlmError(err)
+    const detail = sanitizeErrorDetail(err)
+    logError('[agent-runner] SDK execution error', `category=${cls.reason}`, err instanceof Error ? err.stack || err.message : err)
     emitSseEvent(sessionId, 'error', {
       code: 'sdk_error',
+      category: cls.reason,
+      status: cls.status,
       message: 'Agent execution failed.',
+      detail,
       recoverable: false,
     })
     emitSseEvent(sessionId, 'done', { content: '', session_id: sessionId })

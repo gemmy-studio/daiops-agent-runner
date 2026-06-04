@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   jitteredBackoff,
   classifyLlmError,
+  sanitizeErrorDetail,
   withJitteredRetry,
   asyncIteratorWithFirstYieldRetry,
   DEFAULT_BACKOFF,
@@ -65,6 +66,20 @@ describe('classifyLlmError', () => {
     assert.equal(c.reason, 'bad_request')
     assert.equal(c.retryable, false)
   })
+  it('ngrok 404 offline → proxy_unreachable fatal (이번 사고 케이스)', () => {
+    const c = classifyLlmError(
+      Object.assign(new Error('Anthropic API 404: The endpoint 9d55.ngrok-free.app is offline.\n\nERR_NGROK_3200'), {
+        status: 404,
+      }),
+    )
+    assert.equal(c.reason, 'proxy_unreachable')
+    assert.equal(c.retryable, false)
+  })
+  it('400 + prompt too long → context_overflow (bad_request보다 우선)', () => {
+    const c = classifyLlmError({ status: 400, message: 'prompt is too long: 250000 tokens > 200000 maximum' })
+    assert.equal(c.reason, 'context_overflow')
+    assert.equal(c.retryable, false)
+  })
   it('ETIMEDOUT → timeout retryable', () => {
     const c = classifyLlmError({ code: 'ETIMEDOUT' })
     assert.equal(c.reason, 'timeout')
@@ -84,6 +99,21 @@ describe('classifyLlmError', () => {
     const c = classifyLlmError(new Error('weird unexpected'))
     assert.equal(c.reason, 'unknown')
     assert.equal(c.retryable, false)
+  })
+})
+
+describe('sanitizeErrorDetail', () => {
+  it('시크릿(sk-/JWT/ghp_)을 [REDACTED]로 마스킹', () => {
+    const d = sanitizeErrorDetail(new Error('failed with key sk-ant-abc123XYZ_456 and token ghp_abcdefghij0123456789'))
+    assert.ok(!d.includes('sk-ant-abc123'))
+    assert.ok(!d.includes('ghp_abcdefghij'))
+    assert.ok(d.includes('[REDACTED]'))
+  })
+  it('message + body 합쳐 200자 절단', () => {
+    const long = 'x'.repeat(500)
+    const d = sanitizeErrorDetail(Object.assign(new Error('boom'), { body: long }))
+    assert.ok(d.length <= 200)
+    assert.ok(d.startsWith('boom'))
   })
 })
 
