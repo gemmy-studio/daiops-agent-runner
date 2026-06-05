@@ -284,6 +284,59 @@ export function hasUnquotedShellMetachar(command) {
   return false
 }
 
+// ── SEC-T3: sticky allowlist 안전성 (hermes approval.py 패턴 이식). cloud policy.ts와 동일 ──
+
+const ANSI_REGEX = new RegExp(
+  '[\\u001B\\u009B][[\\]()#;?]*' +
+    '(?:(?:(?:;[-a-zA-Z\\d/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d/#&.:=?%@~_]*)*)?' +
+    '|(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~])',
+  'g',
+)
+
+/** 위험 명령 탐지 전 정규화(ANSI/null 제거 + NFKC) — 난독화 우회 차단. */
+function normalizeCommandForDetection(command) {
+  return String(command ?? '')
+    .replace(ANSI_REGEX, '')
+    .replace(new RegExp('\\u0000', 'g'), '')
+    .normalize('NFKC')
+}
+
+const INTERPRETER_BINS = new Set([
+  'bash', 'sh', 'zsh', 'ksh', 'dash', 'fish', 'csh', 'tcsh',
+  'python', 'python2', 'python3', 'node', 'nodejs', 'deno', 'bun',
+  'ruby', 'perl', 'php', 'lua',
+  'env', 'xargs', 'eval', 'exec',
+  'sudo', 'doas', 'su', 'ssh', 'scp', 'sftp',
+])
+
+const DANGEROUS_COMMAND_PATTERNS = [
+  /\b(?:bash|sh|zsh|ksh|dash|fish)\s+-[^\s]*c(?:\s|$)/i,
+  /\b(?:python[23]?|perl|ruby|node|nodejs|deno|bun|php)\s+-[ec]\s/i,
+  /\b(?:python[23]?|perl|ruby|node|nodejs|deno|bun|php|bash|sh|zsh|ksh)\s*<</i,
+  /\b(?:curl|wget)\b[^\n]*\|\s*(?:ba)?sh\b/i,
+  /\bxargs\b[^\n]*\brm\b/i,
+  /\bfind\b[^\n]*-exec\b/i,
+  /\bchmod\s+\+x\b[^\n]*[;&|]+\s*\.\//i,
+  /\beval\b/i,
+]
+
+export function isDangerousCommand(command) {
+  const normalized = normalizeCommandForDetection(command)
+  return DANGEROUS_COMMAND_PATTERNS.some((re) => re.test(normalized))
+}
+
+export function isSafeAllowlistPattern(pattern) {
+  const p = String(pattern ?? '').trim()
+  if (!p) return false
+  if (p.endsWith('/*')) {
+    const base = p.slice(0, -2)
+    return /^[a-zA-Z0-9_./-]+$/.test(base) && !base.includes('..') && !base.includes('*')
+  }
+  if (!/^[a-zA-Z0-9_.-]+$/.test(p)) return false
+  if (INTERPRETER_BINS.has(p.toLowerCase())) return false
+  return true
+}
+
 const CACHE_DIR = '/workspace/knowledge/sources/uploads/.cache'
 
 function unquoteShellToken(token) {
@@ -458,9 +511,9 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
   // security === 'allowlist'
   if (toolName === 'Bash') {
     const command = String(input.command ?? '')
-    // 셸 메타문자가 인용부호 밖에 있으면 첫 토큰 검사로 안전을 보장할 수 없으므로 자동 통과를
-    // 건너뛰고 아래 ask 정책(plan_request)으로 강등한다. (SEC-T7)
-    if (!hasUnquotedShellMetachar(command)) {
+    // 셸 메타문자(SEC-T7) 또는 위험 명령(인터프리터 -c/heredoc·curl|sh·find -exec 등, SEC-T3)이면
+    // 자동 통과를 건너뛰고 결재로 강등한다. allowlist에 든 bin도 위험 호출이면 강등.
+    if (!hasUnquotedShellMetachar(command) && !isDangerousCommand(command)) {
       const head = extractBashHead(command)
       if (head && isSafeBinCall(head)) return { kind: 'allow', reason: 'safe-bin' }
       if (head && matchesAllowlist(head.bin, allowlist)) return { kind: 'allow', reason: 'allowlist' }

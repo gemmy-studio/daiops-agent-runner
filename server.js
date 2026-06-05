@@ -12,7 +12,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { handleChat, resolveApproval, abortAllSessions } from './handler.js'
+import { handleChat, resolveApproval, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -135,9 +135,13 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { error: 'decision must be one of allow_once|allow_always|deny' })
         return
       }
+      // SEC-T3: 네트워크로 받은 allowlist_entry를 재검증(charset·인터프리터 deny). 안전하지 않으면
+      // 무시 → sticky 없이 일회성 allow로 처리(방어심화, cloud 파생 검증과 이중화).
+      const rawEntry = typeof body.allowlist_entry === 'string' ? body.allowlist_entry : undefined
+      const allowlistEntry = rawEntry && isSafeAllowlistPattern(rawEntry) ? rawEntry : undefined
       const decision = {
         kind,
-        allowlistEntry: typeof body.allowlist_entry === 'string' ? body.allowlist_entry : undefined,
+        allowlistEntry,
         feedback: typeof body.feedback === 'string' ? body.feedback : undefined,
       }
       const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
