@@ -267,6 +267,8 @@ describe('stopReasonToResultSubtype', () => {
   it('stop_sequence → success', () => assert.equal(stopReasonToResultSubtype('stop_sequence'), 'success'))
   it('refusal → success', () => assert.equal(stopReasonToResultSubtype('refusal'), 'success'))
   it('max_tokens → error_max_turns', () => assert.equal(stopReasonToResultSubtype('max_tokens'), 'error_max_turns'))
+  it('model_context_window_exceeded → error_context_overflow (#14, success로 두지 않음)', () =>
+    assert.equal(stopReasonToResultSubtype('model_context_window_exceeded'), 'error_context_overflow'))
   it('null → success', () => assert.equal(stopReasonToResultSubtype(null), 'success'))
 })
 
@@ -604,6 +606,26 @@ describe('runAnthropicTurnManager — 기본 round-trip', () => {
       yielded.push(m)
     }
     assert.equal(yielded[yielded.length - 1].subtype, 'error_max_turns')
+  })
+
+  it('model_context_window_exceeded stop_reason → result(error_context_overflow) (#14)', async () => {
+    const ssePayload = sse([
+      { event: 'message_start', data: { message: { usage: { input_tokens: 200000, output_tokens: 0 } } } },
+      { event: 'content_block_start', data: { index: 0, content_block: { type: 'text', text: '' } } },
+      { event: 'content_block_delta', data: { index: 0, delta: { type: 'text_delta', text: 'truncated' } } },
+      { event: 'content_block_stop', data: { index: 0 } },
+      { event: 'message_delta', data: { delta: { stop_reason: 'model_context_window_exceeded' }, usage: { output_tokens: 100 } } },
+      { event: 'message_stop', data: {} },
+    ])
+    const yielded = []
+    for await (const m of runAnthropicTurnManager(
+      { prompt: 'hi', options: { model: 'claude-sonnet-4-6' } },
+      { fetchFn: mockFetch(ssePayload), apiKey: 'sk-test' },
+    )) {
+      yielded.push(m)
+    }
+    // overflow를 success로 두면 절단을 완료로 오인 — 반드시 별도 error subtype.
+    assert.equal(yielded[yielded.length - 1].subtype, 'error_context_overflow')
   })
 
   it('API 4xx → throw', async () => {

@@ -148,14 +148,18 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
 /**
  * Anthropic stop_reason → SDK result.subtype 매핑.
  * SDK 호환: end_turn/stop_sequence/refusal → success, max_tokens → error_max_turns.
- * model_context_window_exceeded는 SDK에서 dedicated subtype이 없어 success로 처리하되,
- * 호출자(handler.js)는 max_tokens 카운터로 별도 감지한다.
+ * model_context_window_exceeded → error_context_overflow: 컨텍스트 한도 초과는 정상 end-of-turn이
+ * 아니라 *잘린* 응답이다. success로 매핑하면 호출자가 절단을 완료로 오인한다(silent truncation).
+ * 호출자(handler.js)가 이 subtype을 error SSE로 surface하고, REF-T1 압축의 트리거로 쓴다.
+ * (레퍼런스 근거: hermes는 이 stop_reason을 "length"로 매핑하며 normal end-of-turn 취급을 명시적으로
+ *  금지 — anthropic_adapter.py:1501-1516. opencode/openhuman도 overflow를 success로 두지 않는다.)
  *
  * @param {AnthropicStopReason | null | undefined} stopReason
- * @returns {'success' | 'error_max_turns'}
+ * @returns {'success' | 'error_max_turns' | 'error_context_overflow'}
  */
 export function stopReasonToResultSubtype(stopReason) {
   if (stopReason === 'max_tokens') return 'error_max_turns'
+  if (stopReason === 'model_context_window_exceeded') return 'error_context_overflow'
   return 'success'
 }
 
@@ -720,7 +724,7 @@ export function resolveUpstream(ctx = {}) {
  * @param {TurnManagerCtx} [ctx]
  * @yields {{ type: 'assistant', message: { content: ContentBlock[], usage: Usage } }
  *        | { type: 'user', message: { content: ToolResultBlock[] } }
- *        | { type: 'result', subtype: 'success' | 'error_max_turns' }}
+ *        | { type: 'result', subtype: 'success' | 'error_max_turns' | 'error_context_overflow' }}
  */
 export async function* runAnthropicTurnManager(input, ctx = {}) {
   const fetchFn = ctx.fetchFn ?? globalThis.fetch

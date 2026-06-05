@@ -18,12 +18,19 @@ const { appendEvent, forceCleanup } = await import('./event-buffer.js')
 // resume 로직만 격리 테스트 — handler.js의 handleResume과 같은 로직을 inline 재현.
 // (handler.js 내부 export가 아니므로 동일 동작을 재구현해 검증)
 async function handleResumeForTest(sessionId, fromSeq, res) {
-  const { getBufferState, getEventsSince } = await import('./event-buffer.js')
-  const bufState = getBufferState(sessionId)
+  const { getBufferState, getEventsSince, ensureBuffer, forceCleanup } = await import('./event-buffer.js')
+  let bufState = getBufferState(sessionId)
   if (!bufState) {
-    res.writeHead(410, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Session buffer gone', session_id: sessionId }))
-    return
+    // handler.js #5: 인메모리 buffer 부재 = 재시작 → 영속 파일에서 *완료된* 턴만 복원(done-only).
+    const restored = await ensureBuffer(sessionId)
+    if (restored.events.length > 0 && restored.done) {
+      bufState = restored
+    } else {
+      await forceCleanup(sessionId)
+      res.writeHead(410, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Session buffer gone', session_id: sessionId }))
+      return
+    }
   }
 
   res.writeHead(200, {
@@ -181,4 +188,58 @@ test('resume from_seq가 lastSeq와 같으면 빈 stream + done 처리', async (
   assert.equal(events.length, 0)
 
   await forceCleanup(sid)
+})
+
+// #5 — 샌드박스 재시작: 인메모리 buffer는 사라졌지만 영속 파일이 남은 경우.
+// 재시작을 시뮬레이션하기 위해 appendEvent(인메모리 채움) 대신 .jsonl 파일을 직접 쓴다.
+function bufferFilePath(sid) {
+  return path.join(TMP, `agent-runner-events-${sid}.jsonl`)
+}
+async function writeBufferFile(sid, events) {
+  const lines = events.map((e, i) => JSON.stringify({
+    seq: i + 1, sessionId: sid, event: e.event, data: e.data ?? {}, ts: Date.now(),
+  }))
+  await fs.writeFile(bufferFilePath(sid), lines.join('\n') + '\n', 'utf-8')
+}
+
+test('재시작 후 done 파일 복원 → 200 + 완료 턴 replay (#5)', async () => {
+  const sid = 'resume-restart-done'
+  // 인메모리 Map을 거치지 않고 파일만 존재 = 재시작 후 상태.
+  await writeBufferFile(sid, [
+    { event: 'text', data: { content: 'hello' } },
+    { event: 'text', data: { content: 'world' } },
+    { event: 'done', data: { content: 'world' } },
+  ])
+
+  const res = await fetch(`${baseUrl}/v1/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resume_session_id: sid, from_seq: 0 }),
+  })
+  assert.equal(res.status, 200)
+  const events = await readSseStream(res)
+  assert.equal(events.length, 3)
+  assert.equal(events[0].event, 'text')
+  assert.equal(events[0].id, 1)
+  assert.equal(events[2].event, 'done')
+
+  await forceCleanup(sid)
+})
+
+test('재시작 후 done 없는(진행 중) 파일 → 410 + 파일 정리 (#5)', async () => {
+  const sid = 'resume-restart-partial'
+  await writeBufferFile(sid, [
+    { event: 'text', data: { content: 'partial' } },
+    { event: 'tool_use', data: { name: 'Bash' } },
+  ])
+
+  const res = await fetch(`${baseUrl}/v1/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resume_session_id: sid, from_seq: 0 }),
+  })
+  assert.equal(res.status, 410)
+
+  // 재부착 불가한 진행 중 buffer는 파일까지 정리됐는지 확인.
+  await assert.rejects(() => fs.access(bufferFilePath(sid)))
 })

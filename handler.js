@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './tools/request-secret.js'
-import { appendEvent, ensureBuffer, getEventsSince, getBufferState } from './event-buffer.js'
+import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
 import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail } from './retry-utils.js'
 import { maskTokensInText, maskSecretValues } from './mcp-client.js'
@@ -595,11 +595,23 @@ export function resolveApproval(approvalId, decision, resolvedBy) {
  * @param {import('node:http').IncomingMessage} [req]
  */
 async function handleResume(sessionId, fromSeq, res, req) {
-  const bufState = getBufferState(sessionId)
+  let bufState = getBufferState(sessionId)
   if (!bufState) {
-    res.writeHead(410, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Session buffer gone', session_id: sessionId }))
-    return
+    // 인메모리 buffer 부재 = 프로세스/샌드박스 재시작 (라이브 buffer는 done 24h 후·forceCleanup으로만 삭제됨).
+    // → in-flight SDK 실행은 이미 죽었으므로 live tail로 재부착할 수 없다. 영속 파일에서 복원해 *완료된*
+    //   턴만 salvage한다(#5). done이 없는(진행 중이던) buffer를 복원해 tail하면 오지 않을 done을 기다리며
+    //   매달리므로, done인 경우에만 serve하고 그 외엔 410(정직한 "세션 유실, 재시도" 신호).
+    //   레퍼런스(openclaw/hermes/opencode)는 라이브 스트림이 사라지면 깔끔히 포기 — done-only 복원이 그 선.
+    const restored = await ensureBuffer(sessionId)
+    if (restored.events.length > 0 && restored.done) {
+      bufState = restored
+    } else {
+      // 복원할 파일이 없거나(진짜 유실) 진행 중이던 턴(재부착 불가). ensureBuffer가 만든 빈/부분 state는 정리.
+      await forceCleanup(sessionId)
+      res.writeHead(410, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Session buffer gone', session_id: sessionId }))
+      return
+    }
   }
 
   res.writeHead(200, {
@@ -1198,6 +1210,14 @@ export async function handleChat(rawParams, res, req) {
           emitSseEvent(sessionId, 'error', {
             code: 'max_turns',
             message: `도구 루프가 ${params.max_turns}턴 상한에 도달해 종료했어요. 더 작은 단위로 나눠 다시 요청해주세요`,
+            recoverable: false,
+          })
+        } else if (message.subtype === 'error_context_overflow') {
+          // 컨텍스트 한도 초과 — 응답이 잘렸다. success로 두면 절단을 완료로 오인하므로 error로 surface.
+          // (REF-T1 압축의 트리거. 압축 도입 전까지는 새 세션 권장으로 안내.)
+          emitSseEvent(sessionId, 'error', {
+            code: 'context_overflow',
+            message: '대화가 너무 길어져 컨텍스트 한도에 도달했어요. 새 세션에서 다시 시작하면 이어갈 수 있어요',
             recoverable: false,
           })
         }
