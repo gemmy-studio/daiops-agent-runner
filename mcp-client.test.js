@@ -7,6 +7,7 @@ import {
   normalizeMcpToolResult,
   maskSensitiveHeaders,
   maskTokensInText,
+  maskSecretValues,
   isMcpToolName,
 } from './mcp-client.js'
 
@@ -119,6 +120,55 @@ describe('maskTokensInText', () => {
   it('non-string도 안전', () => {
     assert.equal(maskTokensInText(undefined), '')
     assert.equal(maskTokensInText({ a: 1 }), '[object Object]')
+  })
+})
+
+describe('maskSecretValues', () => {
+  it('활성 secret 값을 정확히 마스킹 (echo $KEY 출력)', () => {
+    const secrets = new Map([['STRIPE_API_KEY', 'rk_live_abcDEF123']])
+    assert.equal(
+      maskSecretValues('result: rk_live_abcDEF123\n', secrets.values()),
+      'result: ***\n',
+    )
+  })
+
+  it('토큰 모양과 무관한 임의 값도 마스킹 (DB 비밀번호 등)', () => {
+    const secrets = new Map([['DB_PASSWORD', 's3cr3t-p@ss word!']])
+    assert.equal(
+      maskSecretValues('PGPASSWORD=s3cr3t-p@ss word!', secrets.values()),
+      'PGPASSWORD=***',
+    )
+  })
+
+  it('동일 값이 여러 번 나와도 모두 치환', () => {
+    const secrets = new Map([['K', 'TOKENVAL']])
+    assert.equal(maskSecretValues('TOKENVAL x TOKENVAL', secrets.values()), '*** x ***')
+  })
+
+  it('정규식 메타문자가 든 값도 리터럴로 매칭', () => {
+    const secrets = new Map([['K', 'a.b*c+(d)']])
+    assert.equal(maskSecretValues('val=a.b*c+(d)', secrets.values()), 'val=***')
+    // 메타문자가 정규식으로 해석됐다면 'axbyc...'도 매칭됐을 것 — 그러지 않음을 확인
+    assert.equal(maskSecretValues('val=axbyczzd', secrets.values()), 'val=axbyczzd')
+  })
+
+  it('longest-first — 짧은 secret이 긴 secret의 부분일 때 부분 마스킹 방지', () => {
+    const secrets = new Map([['SHORT', 'abc'], ['LONG', 'abcdef']])
+    // 'abcdef'를 먼저 치환해야 'abcXYZ'식 잔재가 남지 않음
+    assert.equal(maskSecretValues('x=abcdef', secrets.values()), 'x=***')
+  })
+
+  it('빈 값은 무시 (전체 치환으로 출력 훼손 방지)', () => {
+    const secrets = new Map([['EMPTY', '']])
+    assert.equal(maskSecretValues('unchanged text', secrets.values()), 'unchanged text')
+  })
+
+  it('secret 없으면 원문 그대로', () => {
+    assert.equal(maskSecretValues('plain output', new Map().values()), 'plain output')
+  })
+
+  it('non-string 입력도 안전', () => {
+    assert.equal(maskSecretValues(undefined, new Map().values()), '')
   })
 })
 

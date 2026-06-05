@@ -119,6 +119,31 @@ export function maskTokensInText(text) {
 }
 
 /**
+ * 알려진 활성 secret 값들을 텍스트에서 `***`로 치환 (값 기반 — 토큰 모양과 무관하게 정확히 일치).
+ * `echo $KEY` / `env` 등으로 Bash stdout에 평문 secret이 흘러나오는 것을 emit 직전에 차단한다.
+ *
+ * longest-first로 치환해 한 secret이 다른 secret의 부분 문자열일 때 부분 마스킹을 방지하고,
+ * 정규식 메타문자를 이스케이프해 값 자체를 리터럴로 매칭한다. (openclaw redact-snapshot.ts
+ * collectSensitiveValues + redactRawText 차용 — 길이 floor 없음: 비어있지 않은 값이면 전부 마스킹.)
+ *
+ * @param {unknown} text
+ * @param {Iterable<string>} secretValues — 활성 secret 값 (workspaceSecrets.values())
+ * @returns {string}
+ */
+export function maskSecretValues(text, secretValues) {
+  let s = typeof text === 'string' ? text : String(text ?? '')
+  if (!s) return s
+  const values = [...secretValues]
+    .filter((v) => typeof v === 'string' && v.length > 0)
+    .sort((a, b) => b.length - a.length)
+  for (const v of values) {
+    const escaped = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    s = s.replace(new RegExp(escaped, 'g'), '***')
+  }
+  return s
+}
+
+/**
  * @typedef {Object} McpClientCtx
  * @property {typeof globalThis.fetch} [fetchFn] — 테스트 주입
  * @property {AbortSignal} [signal]

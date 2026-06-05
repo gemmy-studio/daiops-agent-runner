@@ -13,6 +13,7 @@ import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './tools/re
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState } from './event-buffer.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
 import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail } from './retry-utils.js'
+import { maskTokensInText, maskSecretValues } from './mcp-client.js'
 import { logError } from './logger.js'
 
 /**
@@ -871,8 +872,9 @@ export async function handleChat(rawParams, res, req) {
     /**
      * request_secret 도구 실행 (Phase B) — llm-wrapper runTool이 ctx.onRequestSecret으로 위임.
      * env에 이미 있으면 즉시 "사용 가능", 없으면 secret_request로 사용자에게 요청(in-flight pause).
-     * 사용자가 값을 제공하면 process.env[KEY]에 주입 → 후속 Bash 등의 buildToolEnv가 즉시 픽업.
-     * 값(평문)은 LLM에 절대 반환하지 않는다 — 결과는 핸들 텍스트만. SSE에도 평문 미포함.
+     * 사용자가 값을 제공하면 *모듈-level secretStore(workspaceSecrets)*에 저장 → getToolEnv가 후속 Bash
+     * 등의 자식 프로세스 env로만 주입(본체 process.env 불변). 값(평문)은 LLM에 절대 반환하지 않는다 —
+     * 결과는 핸들 텍스트만. SSE에도 평문 미포함(tool_result 출력은 SEC-T4 maskSecretValues로 추가 차단).
      */
     const onRequestSecret = async (input) => {
       const keyName = typeof input?.key_name === 'string' ? input.key_name.trim() : ''
@@ -1155,8 +1157,13 @@ export async function handleChat(rawParams, res, req) {
               .filter(Boolean)
               .join('\n')
           }
+          // SEC-T4: emit/영속화 직전 secret 마스킹. echo $KEY / env 등으로 Bash stdout에
+          // 흘러나온 평문을 2겹으로 가린다 — (1) 값 기반: 활성 secret 정확 일치,
+          // (2) 토큰 모양: env가 덤프하는 ANTHROPIC_API_KEY(sk-ant) 등. emitSseEvent가
+          // EventBuffer에도 누적하므로 SSE·디스크 영속(resume 로그) 양쪽이 한 번에 덮인다.
+          const safeOutput = maskTokensInText(maskSecretValues(output, workspaceSecrets.values()))
           emitSseEvent(sessionId, 'tool_result', {
-            output,
+            output: safeOutput,
             is_error: block.is_error === true,
             tool_index: matchedIndex,
           })

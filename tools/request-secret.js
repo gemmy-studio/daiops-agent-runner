@@ -5,9 +5,10 @@
  *
  * 보안 원칙:
  *  - 값(평문)은 **모델에 절대 노출되지 않는다**. 도구 결과는 "$KEY_NAME 사용 가능" 핸들만 반환.
- *  - 실제 값은 agent-runner의 process.env[KEY]에 주입되어 Bash 등 후속 도구의 buildToolEnv가 픽업.
- *  - 실행 로직(결재 대기·env 주입)은 handler.js가 onRequestSecret 콜백으로 주입한다.
- *    (이 도구는 ApprovalManager/emitSse/process.env에 접근해야 하므로 runBuiltinTool 디스패치 밖에서 처리.)
+ *  - 실제 값은 agent-runner 본체 process.env가 아닌 *세션 secret Map*에만 저장되고, getToolEnv →
+ *    buildToolEnv로 Bash 등 자식 프로세스 env에만 주입된다(본체 env 불변·OpenHuman 격리).
+ *  - 실행 로직(결재 대기·secret 주입)은 handler.js가 onRequestSecret 콜백으로 주입한다.
+ *    (이 도구는 ApprovalManager/emitSse/세션 secret store에 접근해야 하므로 runBuiltinTool 디스패치 밖에서 처리.)
  */
 
 /** 환경변수 키 규칙 — cloud workspace_secrets KEY_PATTERN과 정합(대문자 시작, 영대문자/숫자/밑줄). */
