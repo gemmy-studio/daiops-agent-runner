@@ -246,6 +246,44 @@ function extractBashHead(command) {
   return { bin: tokens[0], args: tokens.slice(1) }
 }
 
+/** 인용부호 밖에 셸 메타문자로 취급되는 문자들. $( 와 서브셸은 ( 로 함께 걸린다. */
+const SHELL_METACHARS = new Set([';', '&', '|', '<', '>', '`', '(', ')', '\n', '\r'])
+
+/**
+ * 인용부호(', ") 밖에 셸 메타문자가 있는지 검사한다 (SEC-T7).
+ *
+ * extractBashHead는 공백으로만 토큰을 쪼개 첫 토큰(bin)만 추출하므로, allowlist에 든 bin이
+ * 명령 맨 앞에만 오면 `git log; curl 169.254.169.254 | sh` 같은 체인/파이프/서브셸이
+ * 결재 없이 통과해 bash -c로 전체 실행된다. 메타문자가 인용부호 밖에 하나라도 있으면
+ * safe-bin/allowlist 자동 통과를 막고 결재(plan_request)로 강등한다.
+ * cloud(policy.ts hasUnquotedShellMetachar)와 동일 구현 — 드리프트 금지.
+ */
+export function hasUnquotedShellMetachar(command) {
+  let quote = null
+  const str = String(command ?? '')
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i]
+    if (quote) {
+      if (quote === '"' && ch === '\\') {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '\\') {
+      i++
+      continue
+    }
+    if (SHELL_METACHARS.has(ch)) return true
+  }
+  return false
+}
+
 const CACHE_DIR = '/workspace/knowledge/sources/uploads/.cache'
 
 function unquoteShellToken(token) {
@@ -397,7 +435,7 @@ function buildPlanContent({ toolName, commandSummary, reason }) {
  * PreToolUse 정책 평가.
  * @returns { kind: 'allow'|'plan_request'|'deny', reason, toolName?, commandSummary? }
  */
-function evaluatePolicy(policy, toolName, input, hasUiChannel) {
+export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
   if (!RISKY_TOOL_NAMES.has(toolName)) {
     return { kind: 'allow', reason: 'non-risky' }
   }
@@ -419,9 +457,14 @@ function evaluatePolicy(policy, toolName, input, hasUiChannel) {
 
   // security === 'allowlist'
   if (toolName === 'Bash') {
-    const head = extractBashHead(String(input.command ?? ''))
-    if (head && isSafeBinCall(head)) return { kind: 'allow', reason: 'safe-bin' }
-    if (head && matchesAllowlist(head.bin, allowlist)) return { kind: 'allow', reason: 'allowlist' }
+    const command = String(input.command ?? '')
+    // 셸 메타문자가 인용부호 밖에 있으면 첫 토큰 검사로 안전을 보장할 수 없으므로 자동 통과를
+    // 건너뛰고 아래 ask 정책(plan_request)으로 강등한다. (SEC-T7)
+    if (!hasUnquotedShellMetachar(command)) {
+      const head = extractBashHead(command)
+      if (head && isSafeBinCall(head)) return { kind: 'allow', reason: 'safe-bin' }
+      if (head && matchesAllowlist(head.bin, allowlist)) return { kind: 'allow', reason: 'allowlist' }
+    }
   } else {
     const filePath = String(input.file_path ?? '')
     if (filePath && matchesAllowlist(filePath, allowlist)) return { kind: 'allow', reason: 'allowlist' }
