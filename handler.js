@@ -310,10 +310,19 @@ const INTERPRETER_BINS = new Set([
   'sudo', 'doas', 'su', 'ssh', 'scp', 'sftp',
 ])
 
+// 버전 접미 인터프리터(python3.11, node20, php8.2 등)는 위 정확 집합에 없으므로
+// 접두 매칭으로 함께 차단한다. 누락 시 sticky allowlist 등록·위험탐지를 모두 우회한다.
+const INTERPRETER_PREFIXES = [/^python\d/, /^node\d/, /^php\d/, /^ruby\d/, /^perl\d/]
+function isInterpreterBin(name) {
+  const n = String(name ?? '').toLowerCase()
+  if (INTERPRETER_BINS.has(n)) return true
+  return INTERPRETER_PREFIXES.some((re) => re.test(n))
+}
+
 const DANGEROUS_COMMAND_PATTERNS = [
   /\b(?:bash|sh|zsh|ksh|dash|fish)\s+-[^\s]*c(?:\s|$)/i,
-  /\b(?:python[23]?|perl|ruby|node|nodejs|deno|bun|php)\s+-[ec]\s/i,
-  /\b(?:python[23]?|perl|ruby|node|nodejs|deno|bun|php|bash|sh|zsh|ksh)\s*<</i,
+  /\b(?:python[\d.]*|perl[\d.]*|ruby[\d.]*|node[\d.]*|nodejs|deno|bun|php[\d.]*)\s+-[ec]\s/i,
+  /\b(?:python[\d.]*|perl[\d.]*|ruby[\d.]*|node[\d.]*|nodejs|deno|bun|php[\d.]*|bash|sh|zsh|ksh)\s*<</i,
   /\b(?:curl|wget)\b[^\n]*\|\s*(?:ba)?sh\b/i,
   /\bxargs\b[^\n]*\brm\b/i,
   /\bfind\b[^\n]*-exec\b/i,
@@ -334,7 +343,7 @@ export function isSafeAllowlistPattern(pattern) {
     return /^[a-zA-Z0-9_./-]+$/.test(base) && !base.includes('..') && !base.includes('*')
   }
   if (!/^[a-zA-Z0-9_.-]+$/.test(p)) return false
-  if (INTERPRETER_BINS.has(p.toLowerCase())) return false
+  if (isInterpreterBin(p)) return false
   return true
 }
 
