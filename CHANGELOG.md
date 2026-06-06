@@ -2,6 +2,13 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.5.3] — 2026-06-06
+
+### Security
+- 버전 접미 인터프리터(`python3.11`·`node20`·`php8.2` 등) 위험탐지·sticky allowlist 우회 차단. `INTERPRETER_BINS` 정확집합에 없는 버전 접미 이름이 `isDangerousCommand`·`isSafeAllowlistPattern`을 모두 통과하던 갭을 `INTERPRETER_PREFIXES` 접두 매칭(`isInterpreterBin`) + `DANGEROUS_COMMAND_PATTERNS`의 `python[\d.]*` 확장으로 해소.
+
+> 변경 이력 갭: 0.4.0~0.5.2는 CHANGELOG 미기재(git 태그·커밋 이력 참조).
+
 ## [0.3.1] — 2026-06-02
 
 ### Added
