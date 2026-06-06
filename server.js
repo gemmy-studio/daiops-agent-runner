@@ -34,6 +34,22 @@ const PACKAGE_VERSION = (() => {
   }
 })()
 
+/**
+ * 기동 시 박힌 LLM_PROXY_URL의 origin(scheme+host+port).
+ * 메인 앱이 /health 핸드셰이크로 "지금 주입할 값"과 비교해 drift(stale ngrok 등)를 감지하고
+ * 불일치면 재시작한다 (CONTRACT.md §2-1). path/토큰은 노출하지 않고 origin만 — /health는
+ * 샌드박스 내부(localhost) 전용이라 origin 노출 위험이 낮다. 미설정/파싱 실패 시 null.
+ */
+const LLM_PROXY_ORIGIN = (() => {
+  const raw = process.env.LLM_PROXY_URL
+  if (!raw) return null
+  try {
+    return new URL(raw).origin
+  } catch {
+    return null
+  }
+})()
+
 /** 인증 토큰 — 필수 환경변수 */
 const AUTH_TOKEN = process.env.AGENT_RUNNER_TOKEN
 if (!AUTH_TOKEN) {
@@ -92,6 +108,7 @@ const server = createServer(async (req, res) => {
       status: 'ok',
       version: PACKAGE_VERSION,
       schemaVersion: SCHEMA_VERSION,
+      llmProxyOrigin: LLM_PROXY_ORIGIN,
       timestamp: Date.now(),
     })
     return
