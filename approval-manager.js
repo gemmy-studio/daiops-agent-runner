@@ -109,17 +109,7 @@ export class ApprovalManager {
   }
 
   /**
-   * 운영용 — 현재 pending 결재 record 조회. 없으면 null.
-   *
-   * @param {string} recordId
-   * @returns {ApprovalRecord|null}
-   */
-  getSnapshot(recordId) {
-    return this.pending.get(recordId)?.record ?? null
-  }
-
-  /**
-   * 운영용 — 모든 pending id. T9 sandbox auto-sleep 보호 판정에 사용.
+   * 운영용 — 모든 pending id.
    *
    * @returns {string[]}
    */

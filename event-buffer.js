@@ -223,8 +223,3 @@ export async function forceCleanup(sessionId) {
   buffers.delete(sessionId)
   await deleteFile(sessionId)
 }
-
-/** 운영용 — 모든 buffer state 스냅샷. T9 sandbox 보호 판정에서 활성 세션 카운트로 사용. */
-export function listBufferIds() {
-  return Array.from(buffers.keys())
-}

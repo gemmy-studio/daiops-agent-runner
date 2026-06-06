@@ -64,19 +64,6 @@ test('caller가 지정한 id는 그대로 사용 (DB 매칭용)', () => {
   assert.equal(record.id, 'custom-id-abc')
 })
 
-test('getSnapshot — pending 중인 record만 반환', async () => {
-  const mgr = new ApprovalManager()
-  const record = mgr.create(REQUEST, 60_000)
-  const waiter = mgr.waitForDecision(record, 60_000)
-
-  const snap = mgr.getSnapshot(record.id)
-  assert.equal(snap?.id, record.id)
-  assert.equal(snap?.request.toolName, 'Bash')
-
-  mgr.resolve(record.id, { kind: 'deny' })
-  await waiter
-  assert.equal(mgr.getSnapshot(record.id), null)
-})
 
 test('decision에 allowlistEntry 포함 (allow_always 케이스)', async () => {
   const mgr = new ApprovalManager()

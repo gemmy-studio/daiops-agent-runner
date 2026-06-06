@@ -20,7 +20,6 @@ const {
   getEventsSince,
   getBufferState,
   forceCleanup,
-  listBufferIds,
 } = await import('./event-buffer.js')
 
 before(async () => {
@@ -88,13 +87,6 @@ test('파일에서 buffer 복원 — 메모리에 없으면 ensureBuffer로 json
   assert.equal(restored.lastSeq, 1)
   assert.equal(restored.events.length, 1)
   assert.equal(restored.events[0].event, 'text')
-})
-
-test('listBufferIds — 활성 buffer 세션 목록', () => {
-  const sid = 'sess-E-list'
-  appendEvent(sid, 'tick', {})
-  const ids = listBufferIds()
-  assert.ok(ids.includes(sid))
 })
 
 test('forceCleanup — 메모리 + 파일 둘 다 제거', async () => {
