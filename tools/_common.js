@@ -11,7 +11,7 @@
  *   - sandbox(Daytona)가 1차 격리, 본 가드는 2차 방어.
  */
 
-import { promises as fs, existsSync } from 'node:fs'
+import { promises as fs, existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 
@@ -99,15 +99,45 @@ export function resolvePath(input, cwd) {
 }
 
 /**
+ * SEC-T12 #6: 심볼릭 링크를 해석한 실경로 반환. deny-prefix·safe-root 검사를 *심링크 해석 후*
+ * 경로로 수행하기 위함 — `/workspace/link → /etc` 같은 심링크로 시스템 디렉토리 보호·safe-root를
+ * 우회하는 것을 차단(hermes `_is_write_denied`가 os.path.realpath로 해석하는 패턴 동형).
+ * 대상이 아직 없으면(신규 파일 쓰기) 존재하는 최근접 상위를 realpath 후 나머지 tail을 재결합.
+ *
+ * @param {string} absPath
+ * @returns {string}
+ */
+function realpathResolve(absPath) {
+  const normalized = path.normalize(absPath)
+  try {
+    return realpathSync(normalized)
+  } catch {
+    // 존재하지 않는 경로 — 존재하는 최근접 상위를 해석한 뒤 비존재 tail을 재결합한다.
+    let dir = path.dirname(normalized)
+    const tailParts = [path.basename(normalized)]
+    while (dir && dir !== path.dirname(dir)) {
+      try {
+        const realDir = realpathSync(dir)
+        return path.join(realDir, ...tailParts.reverse())
+      } catch {
+        tailParts.push(path.basename(dir))
+        dir = path.dirname(dir)
+      }
+    }
+    return normalized
+  }
+}
+
+/**
  * 쓰기 deny 여부.
- *  - WRITE_DENIED_EXACT / WRITE_DENIED_PREFIXES 1차 검사.
- *  - DAIOPS_WRITE_SAFE_ROOT 설정 시 그 트리 밖은 모두 deny (옵트인 sandbox 강화).
+ *  - 심링크 해석(realpathResolve) 후 WRITE_DENIED_EXACT / WRITE_DENIED_PREFIXES 1차 검사.
+ *  - DAIOPS_WRITE_SAFE_ROOT 설정 시 그 트리 밖은 모두 deny (옵트인 sandbox 강화, 심링크 탈출 포함).
  *
  * @param {string} absPath
  * @returns {{denied: boolean, reason?: string}}
  */
 export function isWriteDenied(absPath) {
-  const resolved = path.normalize(absPath)
+  const resolved = realpathResolve(absPath)
   if (WRITE_DENIED_EXACT.has(resolved)) {
     return { denied: true, reason: `system path '${resolved}'` }
   }
