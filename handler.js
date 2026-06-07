@@ -156,6 +156,26 @@ function emitSseEvent(sessionId, event, data) {
 }
 
 /**
+ * EventBuffer에 누적하지 않는 휘발성 SSE 이벤트 (tool_progress 등 도구 실행 중 라이브 tail).
+ * seq를 부여하지 않으므로 resume 시 replay되지 않는다 — 진행 중 화면 갱신용 transient 신호.
+ * heartbeat와 동일하게 buffer 누적 없이 활성 res로만 push.
+ *
+ * @param {string} sessionId
+ * @param {string} event
+ * @param {Record<string, unknown>} data
+ */
+function emitEphemeralSse(sessionId, event, data) {
+  const res = activeSessions.get(sessionId)?.res
+  if (res && !res.writableEnded) {
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify({ ...data, session_id: sessionId })}\n\n`)
+    } catch {
+      /* 연결 끊김 무시 — 휘발성이라 buffer 보존 불필요 */
+    }
+  }
+}
+
+/**
  * 연속 턴 안내 — history가 비어있지 않은(=진행 중 대화의 후속) 턴에만 system prompt 끝에 덧붙인다.
  * 후속 턴을 "첫 턴"으로 오인해 매번 재인사 + 세션 시작 절차를 반복하는 회귀를 막는다.
  * 멀티턴 대화 프레이밍은 실행 글루의 책임이므로 runner에 둔다 — 워크스페이스 고유의
@@ -1044,6 +1064,8 @@ export async function handleChat(rawParams, res, req) {
           onRequestSecret,
           // Phase B 격리 — 세션 secret을 도구 자식 프로세스 env로만 전달(본체 process.env 미오염).
           getToolEnv: () => Object.fromEntries(workspaceSecrets),
+          // P3-a — 도구(Bash) 실행 중 stdout/stderr tail 라이브 전송. 휘발성(buffer 미누적).
+          onToolProgress: (p) => emitEphemeralSse(sessionId, 'tool_progress', p),
         },
       ),
       {

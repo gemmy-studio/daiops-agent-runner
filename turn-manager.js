@@ -906,7 +906,7 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
         throw new Error(`runAnthropicTurnManager: runTool is required to execute tool '${block.name}'`)
       }
       try {
-        const result = await effectiveRunTool(block.name, effectiveInput, { signal })
+        const result = await effectiveRunTool(block.name, effectiveInput, { signal, toolUseId: block.id })
         toolResults.push({
           type: 'tool_result',
           tool_use_id: block.id,

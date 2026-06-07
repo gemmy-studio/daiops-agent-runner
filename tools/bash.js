@@ -20,6 +20,15 @@ const DEFAULT_TIMEOUT_MS = 30_000
 const MAX_TIMEOUT_MS = 5 * 60 * 1000
 const MAX_OUTPUT_BYTES = 64 * 1024
 const SIGKILL_GRACE_MS = 2000
+// P3-a — 실행 중 stdout/stderr tail 라이브 표시 주기(2초)·줄 수(12). odysseus _run_subprocess_streaming 차용.
+const PROGRESS_INTERVAL_MS = 2000
+const PROGRESS_TAIL_LINES = 12
+
+/** 문자열의 마지막 n줄만 반환 (라이브 tail용). */
+function lastLines(s, n) {
+  const lines = s.split('\n')
+  return lines.length <= n ? s : lines.slice(-n).join('\n')
+}
 
 /**
  * 백그라운드 잡 레지스트리 디렉토리. event-buffer.js BUFFER_DIR과 같은 persistent volume 베이스.
@@ -47,7 +56,7 @@ export const BASH_TOOL = Object.freeze({
 
 /**
  * @param {{command: string, timeout?: number, description?: string}} input
- * @param {{ cwd?: string, signal?: AbortSignal, env?: Record<string,string> }} [ctx]
+ * @param {{ cwd?: string, signal?: AbortSignal, env?: Record<string,string>, onProgress?: (p: {elapsed_s: number, tail: string}) => void }} [ctx]
  * @returns {Promise<{content: string, is_error?: boolean}>}
  */
 export async function runBash(input, ctx = {}) {
@@ -85,6 +94,20 @@ export async function runBash(input, ctx = {}) {
     let settled = false
     let sigkillTimer = null
 
+    // P3-a — 실행 중 tail 라이브 전송. 첫 푸시는 2초 후(짧은 명령은 미발신). best-effort.
+    const startedAt = Date.now()
+    const progressTimer = typeof ctx.onProgress === 'function'
+      ? setInterval(() => {
+          const combined = stderrBuf ? `${stdoutBuf}\n${stderrBuf}` : stdoutBuf
+          const tail = lastLines(combined, PROGRESS_TAIL_LINES).trim()
+          if (!tail) return
+          try {
+            ctx.onProgress({ elapsed_s: Math.round((Date.now() - startedAt) / 1000), tail })
+          } catch { /* UI 진행 표시 실패는 실행에 비치명 */ }
+        }, PROGRESS_INTERVAL_MS)
+      : null
+    if (progressTimer) progressTimer.unref?.()
+
     const killProcess = () => {
       try { child.kill('SIGTERM') } catch { /* dead */ }
       sigkillTimer = setTimeout(() => {
@@ -97,6 +120,7 @@ export async function runBash(input, ctx = {}) {
       settled = true
       clearTimeout(timer)
       if (sigkillTimer) clearTimeout(sigkillTimer)
+      if (progressTimer) clearInterval(progressTimer)
       try { child.kill('SIGTERM') } catch { /* dead */ }
       if (ctx.signal?.removeEventListener) ctx.signal.removeEventListener('abort', onAbort)
       resolve(result)

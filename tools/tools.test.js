@@ -327,6 +327,25 @@ describe('runBash', () => {
     assert.ok(/timeout/.test(r.content))
   })
 
+  it('P3-a: 장시간 실행 시 onProgress로 tail 전송 (2초 주기)', async () => {
+    const calls = []
+    // 출력을 먼저 내고 2.4초 대기 → 2초 주기 emitter가 최소 1회 fire, tail에 출력 포함.
+    const r = await runBash(
+      { command: "printf 'building...\\n'; sleep 2.4", timeout: 5000 },
+      { onProgress: (p) => calls.push(p) },
+    )
+    assert.equal(r.is_error, undefined)
+    assert.ok(calls.length >= 1, `onProgress가 최소 1회 호출돼야 함 (got ${calls.length})`)
+    assert.ok(calls.some((c) => c.tail.includes('building...')), 'tail에 stdout이 포함돼야 함')
+    assert.ok(calls.every((c) => typeof c.elapsed_s === 'number'), 'elapsed_s는 숫자')
+  })
+
+  it('P3-a: 짧은 명령(2초 미만)은 onProgress 미발신', async () => {
+    const calls = []
+    await runBash({ command: 'echo quick' }, { onProgress: (p) => calls.push(p) })
+    assert.equal(calls.length, 0)
+  })
+
   it('cwd 적용', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bash-cwd-'))
     const r = await runBash({ command: 'pwd' }, { cwd: dir })
