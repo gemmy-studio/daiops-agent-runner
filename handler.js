@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './tools/request-secret.js'
+import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX } from './tools/remember.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
 import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail } from './retry-utils.js'
@@ -982,6 +983,51 @@ export async function handleChat(rawParams, res, req) {
       }
     }
 
+    /**
+     * remember 도구 실행 (ADR 19) — llm-wrapper runTool이 ctx.onRemember로 위임.
+     * 저장은 cloud가 수행한다(정규 writer updateMemory('instructions:core')). runner는 remember_request
+     * SSE를 발신하고 in-flight pause로 cloud 결과를 기다린다(request_secret과 동형). 저장된 규칙은
+     * 이후 모든 작업 시스템 프롬프트에 always-lane으로 주입된다.
+     */
+    const onRemember = async (input) => {
+      const content = typeof input?.content === 'string' ? input.content.trim() : ''
+      if (!isValidRememberContent(content)) {
+        return {
+          content: `remember: 저장할 내용이 비어있거나 너무 길어요 (1~${REMEMBER_CONTENT_MAX}자). 규칙을 한 줄로 요약해 다시 시도하세요.`,
+          is_error: true,
+        }
+      }
+
+      const record = approvalManager.create(
+        { toolName: 'remember', commandSummary: content.slice(0, 80), reason: '영구 기억 저장', sessionId },
+        approvalTimeoutMs,
+      )
+      approvalRouting.set(record.id, sessionId)
+
+      emitSseEvent(sessionId, 'remember_request', {
+        content,
+        session_id: sessionId,
+        approval_id: record.id,
+      })
+
+      const result = await approvalManager.waitForDecision(record, approvalTimeoutMs)
+      approvalRouting.delete(record.id)
+
+      if (!result) {
+        return {
+          content: '기억 저장 응답 대기 시간이 초과됐어요. 사용자에게 설정 메뉴에서 직접 등록하도록 안내하거나 잠시 후 다시 시도하세요.',
+          is_error: true,
+        }
+      }
+      if (result.kind === 'deny' || result.rememberAction === 'failed') {
+        return { content: '기억 저장에 실패했어요. 잠시 후 다시 시도하세요.', is_error: true }
+      }
+      if (result.rememberAction === 'duplicate') {
+        return { content: `이미 기억하고 있는 내용이에요: "${content}"` }
+      }
+      return { content: `기억했어요 — 앞으로 작업에 항상 반영할게요: "${content}"` }
+    }
+
     // SDK maxTurns는 절대 상한(brake)만 담당. 실제 통제는 자체 turnCount + plan_request 결재.
     // 결재 거부 시 abortController.abort()로 중단. SDK가 먼저 끝나면 자체 카운터의
     // 결재 기회를 잃으므로 충분히 크게.
@@ -1017,8 +1063,8 @@ export async function handleChat(rawParams, res, req) {
       abortController,
       canUseTool,
       // request_secret(Phase B) 도구 노출 — LLM이 필요한 환경변수를 사용자에게 요청할 수 있게.
-      // llm-wrapper가 options.tools를 LLM 요청 tools[]에 머지하고, runTool은 onRequestSecret으로 라우팅.
-      tools: [REQUEST_SECRET_TOOL],
+      // llm-wrapper가 options.tools를 LLM 요청 tools[]에 머지하고, runTool은 onRequestSecret/onRemember로 라우팅.
+      tools: [REQUEST_SECRET_TOOL, REMEMBER_TOOL],
     }
 
     // 자체 turn 카운터: assistant 메시지 수신마다 +1. budget 도달 시 silent 자동 연장
@@ -1062,6 +1108,7 @@ export async function handleChat(rawParams, res, req) {
             emitSseEvent(sessionId, 'text_delta', { delta })
           },
           onRequestSecret,
+          onRemember,
           // Phase B 격리 — 세션 secret을 도구 자식 프로세스 env로만 전달(본체 process.env 미오염).
           getToolEnv: () => Object.fromEntries(workspaceSecrets),
           // P3-a — 도구(Bash) 실행 중 stdout/stderr tail 라이브 전송. 휘발성(buffer 미누적).

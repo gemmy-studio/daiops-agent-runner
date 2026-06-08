@@ -221,6 +221,41 @@ const server = createServer(async (req, res) => {
     return
   }
 
+  // POST /v1/remember/:id — remember_request 해소 (ADR 19). /v1/secret/:id 미러.
+  // body: { action: 'saved' | 'duplicate' | 'failed' }. cloud가 updateMemory 수행 후 결과를 통보한다.
+  // 같은 approvalRouting/ApprovalManager.resolve 경로 재사용 — decision에 rememberAction을 실어 보낸다.
+  if (req.method === 'POST' && url.pathname.startsWith('/v1/remember/')) {
+    const rememberId = url.pathname.slice('/v1/remember/'.length)
+    if (!rememberId) {
+      sendJson(res, 400, { error: 'remember id required' })
+      return
+    }
+    try {
+      const raw = await parseBody(req)
+      const body = raw ? JSON.parse(raw) : {}
+      const action = String(body.action ?? 'saved')
+      if (action !== 'saved' && action !== 'duplicate' && action !== 'failed') {
+        sendJson(res, 400, { error: 'action must be saved|duplicate|failed' })
+        return
+      }
+      // failed → kind:'deny'로 매핑, 나머지는 allow_once. rememberAction으로 onRemember가 분기.
+      const decision = action === 'failed'
+        ? { kind: 'deny', rememberAction: 'failed' }
+        : { kind: 'allow_once', rememberAction: action }
+      const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
+      const ok = resolveApproval(rememberId, decision, resolvedBy)
+      if (!ok) {
+        sendJson(res, 409, { error: 'remember request already resolved or not found', remember_id: rememberId })
+        return
+      }
+      sendJson(res, 200, { ok: true, remember_id: rememberId })
+    } catch (err) {
+      console.error('[agent-runner] /v1/remember error', err instanceof Error ? err.stack || err.message : err)
+      sendJson(res, 500, { error: 'Internal error' })
+    }
+    return
+  }
+
   sendJson(res, 404, { error: 'Not found' })
 })
 

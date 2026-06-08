@@ -190,6 +190,11 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
       if (typeof ctx.onRequestSecret === 'function') return ctx.onRequestSecret(input)
       return { content: 'request_secret: 이 환경에서는 secret 요청이 지원되지 않습니다.', is_error: true }
     }
+    // remember(ADR 19): handler가 주입한 onRemember 콜백으로 위임 — cloud updateMemory 저장 + 결과 대기.
+    if (name === 'remember') {
+      if (typeof ctx.onRemember === 'function') return ctx.onRemember(input)
+      return { content: 'remember: 이 환경에서는 기억 저장이 지원되지 않습니다.', is_error: true }
+    }
     if (isBuiltinTool(name)) {
       // Phase B 격리: 세션 secret을 자식 프로세스 env로만 주입(본체 process.env 미오염).
       // ctx.getToolEnv()가 {KEY:value} 맵을 반환하면 buildToolEnv(extra)로 Bash 등 자식에 머지된다.
