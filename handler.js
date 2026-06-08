@@ -197,6 +197,17 @@ This call is a follow-up turn in an ongoing conversation, not the first turn of 
 const RISKY_TOOL_NAMES = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit'])
 const SAFE_BINS = new Set(['jq', 'grep', 'cut', 'sort', 'uniq', 'head', 'tail', 'tr', 'wc'])
 
+/**
+ * 외향 발신 MCP 도구 — 직원 정체성으로 외부(슬랙/이메일)에 메시지를 보내는 도구.
+ * 능동 발신 오발송(엉뚱한 사람/채널)을 막기 위해 security/ask 설정과 무관하게 항상 결재한다.
+ * MCP 도구명은 'mcp__daiops-mcp__slack_post_message' 형태로 오므로 '__<tool>' suffix로 매칭.
+ */
+const OUTWARD_SEND_TOOL_SUFFIXES = ['slack_post_message', 'slack_upload_file', 'gmail_send']
+function isOutwardSendTool(toolName) {
+  if (!toolName) return false
+  return OUTWARD_SEND_TOOL_SUFFIXES.some((s) => toolName === s || toolName.endsWith(`__${s}`))
+}
+
 /** 기본 정책 — 클라우드에서 policy를 보내지 않은 경우 fallback */
 const DEFAULT_POLICY = {
   security: 'allowlist',
@@ -470,6 +481,11 @@ function summarizeToolInput(toolName, input) {
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
     return String(input.file_path ?? '').slice(0, 200)
   }
+  if (isOutwardSendTool(toolName)) {
+    const to = String(input.channel_id ?? input.user_id ?? input.to ?? '?')
+    const text = String(input.text ?? input.body ?? input.content ?? '')
+    return `→ ${to}: ${text}`.slice(0, 200)
+  }
   try {
     return JSON.stringify(input).slice(0, 200)
   } catch {
@@ -483,12 +499,23 @@ const TOOL_LABEL_KO = {
   Write: '파일 생성',
   Edit: '파일 수정',
   NotebookEdit: '노트북 수정',
+  slack_post_message: '슬랙 메시지 보내기',
+  slack_upload_file: '슬랙 파일 올리기',
+  gmail_send: '이메일 보내기',
+}
+
+/** 도구 라벨 조회. MCP 도구명(mcp__server__tool)은 마지막 세그먼트로 매칭. */
+function toolLabelKo(toolName) {
+  if (TOOL_LABEL_KO[toolName]) return TOOL_LABEL_KO[toolName]
+  const bare = String(toolName ?? '').split('__').pop()
+  return TOOL_LABEL_KO[bare] || toolName || '알 수 없는 동작'
 }
 
 const REASON_LABEL_KO = {
   'risky-default': '위험할 수 있는 동작이라 한 번 확인이 필요해요',
   'on-miss': '허용 목록에 없는 명령이라 확인이 필요해요',
   'always': '이 직원은 모든 도구 사용을 항상 결재받도록 설정되어 있어요',
+  'outward-send': '직원 이름으로 외부에 메시지를 보내는 일이라 보내기 전 확인이 필요해요',
 }
 
 /**
@@ -497,7 +524,7 @@ const REASON_LABEL_KO = {
  * 직원 메타포 + 해요체 톤(.claude/rules/terminology.md, glossary.md). 슬랙 mrkdwn 호환.
  */
 function buildPlanContent({ toolName, commandSummary, reason }) {
-  const toolLabel = TOOL_LABEL_KO[toolName] || toolName || '알 수 없는 동작'
+  const toolLabel = toolLabelKo(toolName)
   const reasonLabel = REASON_LABEL_KO[reason] || ''
   const trimmedSummary = String(commandSummary ?? '').trim()
 
@@ -520,6 +547,12 @@ function buildPlanContent({ toolName, commandSummary, reason }) {
  * @returns { kind: 'allow'|'plan_request'|'deny', reason, toolName?, commandSummary? }
  */
 export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
+  // 외향 발신(슬랙/이메일 등 직원 정체성으로 외부에 메시지)은 보안 설정과 무관하게 항상 결재.
+  // UI 채널이 없으면(스케줄 등 무인 실행) askFallback을 따른다(기본 deny — 무인 능동 발신 차단).
+  if (isOutwardSendTool(toolName)) {
+    const summary = summarizeToolInput(toolName, input)
+    return askOrFallback({ askFallback: policy?.askFallback ?? 'deny' }, toolName, summary, hasUiChannel, 'outward-send')
+  }
   if (!RISKY_TOOL_NAMES.has(toolName)) {
     return { kind: 'allow', reason: 'non-risky' }
   }

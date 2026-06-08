@@ -103,3 +103,33 @@ describe('SEC-T3 — 위험탐지 + allowlist 패턴 안전성 (cloud와 일치)
     assert.equal(evaluatePolicy(policy, 'Bash', { command: 'find . -name x' }, true).kind, 'allow')
   })
 })
+
+describe('evaluatePolicy — 외향 발신 도구는 항상 결재', () => {
+  // 능동 발신(직원 정체성으로 외부에 메시지)은 오발송 방지를 위해 security/ask와 무관하게 결재.
+  const fullAccess = { security: 'full', ask: 'off', askFallback: 'deny', allowlist: [] }
+  const mcpName = 'mcp__daiops-mcp__slack_post_message'
+
+  for (const tool of [mcpName, 'mcp__daiops-mcp__slack_upload_file', 'mcp__daiops-mcp__gmail_send']) {
+    it(`security:'full' 이어도 결재 강등: ${tool}`, () => {
+      const decision = evaluatePolicy(fullAccess, tool, { channel_id: 'C1', text: '안녕' }, true)
+      assert.equal(decision.kind, 'plan_request')
+      assert.equal(decision.reason, 'outward-send')
+    })
+  }
+
+  it('UI 채널 없으면(무인 실행) askFallback=deny로 차단', () => {
+    const decision = evaluatePolicy(fullAccess, mcpName, { user_id: 'U1', text: 'hi' }, false)
+    assert.equal(decision.kind, 'deny')
+  })
+
+  it('UI 없음 + askFallback=full 이면 통과 (설정 존중)', () => {
+    const policy = { security: 'allowlist', ask: 'on-miss', askFallback: 'full', allowlist: [] }
+    assert.equal(evaluatePolicy(policy, mcpName, { channel_id: 'C1', text: 'hi' }, false).kind, 'allow')
+  })
+
+  it('읽기 계열 MCP 도구는 외향 발신 아님 → 영향 없음', () => {
+    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__slack_read_channel', { channel_id: 'C1' }, true).kind, 'allow')
+    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__slack_find_user', { query: '유민' }, true).kind, 'allow')
+    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__slack_list_channels', {}, true).kind, 'allow')
+  })
+})
