@@ -15,6 +15,7 @@ import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup
 import { runAnthropicSdkStream } from './llm-wrapper.js'
 import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail } from './retry-utils.js'
 import { maskTokensInText, maskSecretValues } from './mcp-client.js'
+import { RepeatFailureGuard } from './repeat-failure-guard.js'
 import { logError } from './logger.js'
 
 /**
@@ -790,6 +791,12 @@ export async function handleChat(rawParams, res, req) {
   // 보낼 때 tool_use_id로 매칭해 정확한 toolIndex를 cloud에 전달 → cloud가 해당 entry의
   // duration_ms를 계산할 수 있게 한다(stream-handler.onToolResult).
   const toolIndexById = new Map()
+  // tool_use_id → { toolName, toolInput } 매핑. tool_result 수신 시 어떤 호출의 결과인지
+  // 역추적해 RepeatFailureGuard에 성공/실패를 기록하기 위함.
+  const toolCallById = new Map()
+  // 반복 실패 회로 차단기 — 같은 (도구,입력) 누적 실패 / 무진전 연속 실패를 canUseTool에서
+  // 사전 차단한다. 요청(턴)마다 새 인스턴스. (openhuman tool_loop.rs 이식)
+  const repeatGuard = new RepeatFailureGuard()
   // 도구 실행 중 idle progress emit — tool_use ~ tool_result 사이 30초 간격으로 SSE event 발생.
   // 효과: (a) SSE 트래픽 유지로 proxy idle 단절 방지, (b) EventBuffer에 누적되어 자동 resume 시
   // 누락 신호 없음, (c) (후속 이슈에서 cloud가 lastActivityAt 갱신에 활용 가능).
@@ -883,6 +890,22 @@ export async function handleChat(rawParams, res, req) {
       if (toolName === 'request_secret') {
         return { behavior: 'allow' }
       }
+
+      // 반복 실패 회로 차단 — 정책 평가보다 먼저. 같은 (도구,입력)이 누적 실패했거나
+      // 성공 없이 연속 실패가 쌓였으면, 정책상 allow여도 또 실행시키지 않고 근본 원인을
+      // 모델에 돌려준다(deny). 모델이 같은 삽질 대신 다른 접근으로 전환하거나 한계를 보고하도록.
+      const repeatBlockReason = repeatGuard.shouldBlock(toolName, input)
+      if (repeatBlockReason) {
+        emitSseEvent(sessionId, 'tool_use', {
+          name: toolName,
+          input,
+          input_summary: `[반복 실패로 차단됨] ${summarizeToolInput(toolName, input)}`,
+          tool_index: toolIndex++,
+          blocked_by_policy: 'repeat-failure',
+        })
+        return { behavior: 'deny', message: repeatBlockReason }
+      }
+
       const decision = evaluatePolicy(params.policy, toolName, input, true)
 
       if (decision.kind === 'allow') {
@@ -1243,7 +1266,10 @@ export async function handleChat(rawParams, res, req) {
 
             const myToolIndex = toolIndex++
             const toolUseId = typeof block.id === 'string' ? block.id : ''
-            if (toolUseId) toolIndexById.set(toolUseId, myToolIndex)
+            if (toolUseId) {
+              toolIndexById.set(toolUseId, myToolIndex)
+              toolCallById.set(toolUseId, { toolName, toolInput })
+            }
 
             emitSseEvent(sessionId, 'tool_use', {
               name: toolName,
@@ -1268,6 +1294,10 @@ export async function handleChat(rawParams, res, req) {
         for (const block of blocks) {
           if (!block || block.type !== 'tool_result') continue
           const tuid = typeof block.tool_use_id === 'string' ? block.tool_use_id : ''
+          // RepeatFailureGuard에 결과 기록 — is_error면 실패. canUseTool 사전 차단의 deny도
+          // SDK가 is_error 결과로 합성하므로 동일하게 실패로 집계된다(반복 deny 차단 일관성).
+          const call = tuid ? toolCallById.get(tuid) : undefined
+          if (call) repeatGuard.record(call.toolName, call.toolInput, block.is_error !== true)
           const matchedIndex = tuid ? toolIndexById.get(tuid) : undefined
           if (typeof matchedIndex !== 'number') continue
           // SDK는 content를 string 또는 [{type:'text', text}, ...] 형태로 줌. 텍스트만 추출.
