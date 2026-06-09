@@ -1552,9 +1552,20 @@ describe('streamWithStaleGuard', () => {
     return { [Symbol.asyncIterator]: () => iterator }
   }
 
-  /** guard가 stale로 throw한 뒤 finally(fire-and-forget return)·abandoned next()가
-   *  완전히 settle되도록 한 틱 양보 — node:test(엄격 모드)의 "pending promise" 오탐 방지. */
-  const flushCleanup = () => new Promise((r) => setTimeout(r, 50))
+  /**
+   * stale 검출은 guard 내부의 *unref된* idle 타이머에 의존하는데, 테스트에서 다른 ref된 작업이
+   * 없으면 node:test 러너(특히 node 22)가 그 타이머 발화 전에 이벤트 루프를 "종료됨"으로 보고
+   * 서브테스트를 cancel한다("event loop has already resolved"). ref된 keepalive로 stale 검출
+   * 구간 동안 루프를 살려두고, 검출 후 해제한다. (프로덕션 unref는 그대로 — 프로세스 비점유 목적)
+   */
+  async function withEventLoopAlive(fn) {
+    const keepAlive = setInterval(() => {}, 1_000)
+    try {
+      return await fn()
+    } finally {
+      clearInterval(keepAlive)
+    }
+  }
 
   /** idleMs 안에 모든 chunk가 흐르면 그대로 통과시킨다. */
   it('정상 스트림은 chunk를 그대로 yield', async () => {
@@ -1572,15 +1583,14 @@ describe('streamWithStaleGuard', () => {
   it('idle 초과 시 ETIMEDOUT throw 및 onStale 호출', async () => {
     let staleCalls = 0
     const received = []
-    await assert.rejects(
+    await withEventLoopAlive(() => assert.rejects(
       async () => {
         for await (const c of streamWithStaleGuard(hangingIterable(['first']), 30, () => { staleCalls++ })) {
           received.push(c)
         }
       },
       (err) => err && err.code === 'ETIMEDOUT' && err.stale === true,
-    )
-    await flushCleanup()
+    ))
     assert.deepEqual(received, ['first'])
     assert.equal(staleCalls, 1)
   })
@@ -1588,13 +1598,12 @@ describe('streamWithStaleGuard', () => {
   /** 첫 chunk조차 오지 않는 TTFB stall도 감지(가장 흔한 케이스). */
   it('첫 chunk 전 stall(TTFB)도 감지', async () => {
     let staleCalls = 0
-    await assert.rejects(
+    await withEventLoopAlive(() => assert.rejects(
       async () => {
         for await (const _ of streamWithStaleGuard(hangingIterable([]), 20, () => { staleCalls++ })) { /* drain */ }
       },
       (err) => err.code === 'ETIMEDOUT',
-    )
-    await flushCleanup()
+    ))
     assert.equal(staleCalls, 1)
   })
 })
