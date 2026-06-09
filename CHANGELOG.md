@@ -2,6 +2,11 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.5.7] — 2026-06-09
+
+### Fixed
+- **스트림 stale 감지·자동 재시도** — 업스트림(Anthropic / cloud LLM proxy)이 연결은 유지한 채 토큰 전송을 멈추면(mid-stream stall), agent-runner에 시간 기반 abort가 없어 cloud `FETCH_TIMEOUT`(750초)까지 매달려 사용자에게 "멈춤"으로 보이던 갭 해소. `turn-manager`의 SSE 소비를 `streamWithStaleGuard`로 감싸 chunk 간 idle이 `STREAM_STALE_TIMEOUT_MS`(기본 120초, env `AGENT_RUNNER_STREAM_STALE_MS`로 override)를 넘으면 요청 전용 AbortController로 연결을 끊고 retryable timeout(`ETIMEDOUT`)을 throw → 기존 재시도(turn 0 first-yield retry / turn 1+ `withJitteredRetry`)가 같은 turn을 자동 재시도하며 `retry` SSE로 가시화. SSE 계약(schemaVersion) 불변 — cloud 무변경 호환. (hermes `run_agent.py` stale-stream 감시 패턴 이식)
+
 ## [0.5.3] — 2026-06-06
 
 ### Security

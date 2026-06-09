@@ -27,6 +27,27 @@ import { withJitteredRetry } from './retry-utils.js'
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 const ANTHROPIC_VERSION = '2023-06-01'
 
+/**
+ * 스트림 stale 감지 임계 (ms) — 업스트림(Anthropic / cloud LLM proxy)이 연결은 살아있는데
+ * *바이트를 보내지 않는* 상태를 감지하는 idle 타임아웃. chunk 도착마다 리셋되며, 이 시간 안에
+ * 다음 chunk가 오지 않으면 stale로 판단해 요청을 끊고 retryable timeout으로 surface한다.
+ *
+ * 배경: agent-runner에는 시간 기반 abort가 없어, 업스트림이 토큰 생성 도중 멈추면(연결만 유지)
+ * cloud의 FETCH_TIMEOUT(750s)까지 그대로 매달려 사용자에게 "멈춤"으로 보인다. hermes
+ * (run_agent.py last_chunk_time 감시 → HTTP 클라이언트 교체) 패턴의 daiops 이식.
+ *
+ * Anthropic은 스트림 유지 중 `ping` SSE 이벤트를 주기적으로 보내고, adaptive thinking 중에도
+ * thinking_delta chunk가 흐르므로, 정상 장기 추론은 idle로 오인되지 않는다. 따라서 임계는
+ * "정상 ping 간격 ≫" 수준으로 넉넉히 둔다. env로 override 가능(테스트·튜닝).
+ */
+export const STREAM_STALE_TIMEOUT_MS = (() => {
+  const v = Number(process.env.AGENT_RUNNER_STREAM_STALE_MS)
+  return Number.isFinite(v) && v > 0 ? v : 120_000
+})()
+
+/** stale watchdog이 read race를 끊을 때 던지는 내부 sentinel. */
+const STREAM_STALE = Symbol('stream-stale')
+
 // ── web server tool ──────────────────────────────────────────────────────
 // Anthropic server-side tool — 서버가 검색/페치를 직접 실행하고 server_tool_use +
 // web_search_tool_result/web_fetch_tool_result 블록을 같은 응답에 인라인한다. 클라이언트
@@ -389,6 +410,67 @@ async function* readableStreamToAsyncIterable(stream) {
     }
   } finally {
     try { reader.releaseLock() } catch { /* already released */ }
+  }
+}
+
+/**
+ * stale watchdog — chunk 단위 async iterable을 감싸, 각 `next()`를 idle 타임아웃과 race한다.
+ * `idleMs` 안에 다음 chunk가 도착하지 않으면 `onStale()`(연결 abort 등)을 호출하고 retryable
+ * timeout 에러(`code: 'ETIMEDOUT'`)를 throw한다. chunk가 흐르는 동안에는 타이머가 매번 리셋돼
+ * 정상 스트림에는 영향이 없다.
+ *
+ * 던지는 에러를 `code: 'ETIMEDOUT'`로 표시하는 이유: retry-utils.classifyLlmError가 이를
+ * `timeout`(retryable)로 분류 → turn 0은 handler의 asyncIteratorWithFirstYieldRetry,
+ * turn 1+는 turn-manager의 withJitteredRetry가 자동으로 같은 turn을 재시도한다(둘 다 retry SSE로 가시화).
+ *
+ * 트레이드오프: stale은 대개 TTFB 구간(토큰 흐르기 전)에서 발생하므로 재시도가 깨끗하다.
+ * 드물게 일부 텍스트가 흐른 뒤 stale가 나면 재시도로 텍스트가 한 번 중복될 수 있으나,
+ * 최종 `done` 이벤트의 content가 진실 소스라 결과는 교정된다 — 750초 hang보다 압도적으로 낫다.
+ *
+ * @param {ReadableStream<Uint8Array> | AsyncIterable<Uint8Array | string>} stream
+ * @param {number} idleMs
+ * @param {() => void} onStale — stale 감지 시 1회 호출 (보통 fetch AbortController.abort()).
+ * @returns {AsyncGenerator<Uint8Array | string>}
+ */
+export async function* streamWithStaleGuard(stream, idleMs, onStale) {
+  const iterable = isReadableStream(stream) ? readableStreamToAsyncIterable(stream) : stream
+  const iterator = iterable[Symbol.asyncIterator] ? iterable[Symbol.asyncIterator]() : iterable
+  try {
+    while (true) {
+      const nextP = Promise.resolve(iterator.next())
+      let timer
+      const idleP = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(STREAM_STALE), idleMs)
+        timer.unref?.()
+      })
+      let result
+      try {
+        result = await Promise.race([nextP, idleP])
+      } catch (err) {
+        if (err === STREAM_STALE) {
+          // 아직 살아있는 read promise는 onStale의 abort로 곧 reject됨 — unhandled 방지로 swallow.
+          nextP.catch(() => {})
+          try { onStale() } catch { /* best-effort */ }
+          throw Object.assign(new Error(`Anthropic stream stalled (no data for ${idleMs}ms)`), {
+            code: 'ETIMEDOUT',
+            stale: true,
+          })
+        }
+        throw err
+      } finally {
+        clearTimeout(timer)
+      }
+      if (result.done) return
+      yield result.value
+    }
+  } finally {
+    // best-effort 정리 — await하지 않는다. stale로 끊긴 소스는 onStale의 abort로 read가 reject되며
+    // *자체* 정리(releaseLock)되고, 정상 완료 소스는 이미 done까지 소진됐다. 여기서 return()을
+    // await하면, 영원히 멈춘(never-settling) 소스에서 ETIMEDOUT 전파가 막혀 hang이 된다.
+    try {
+      const r = iterator.return?.()
+      if (r && typeof r.then === 'function') r.then(() => {}, () => {})
+    } catch { /* already done / not resumable */ }
   }
 }
 
@@ -783,33 +865,48 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       topK: input.options.topK,
       webTools: input.options.webTools,
     })
-    const res = await fetchFn(upstream.url, {
-      method: 'POST',
-      headers: upstream.headers,
-      body: JSON.stringify(body),
-      signal,
-    })
-    if (!res.ok) {
-      const errText = await safeReadText(res)
-      throw Object.assign(
-        new Error(`Anthropic API ${res.status}: ${errText.slice(0, 500)}`),
-        { status: res.status, body: errText },
-      )
+    // 요청 전용 AbortController — 부모 signal(세션 abort)을 링크하되, stale watchdog이
+    // *이 요청만* 끊을 수 있게 분리한다(부모를 직접 abort하면 세션 전체가 죽는다).
+    const reqController = new AbortController()
+    const onParentAbort = () => reqController.abort()
+    if (signal) {
+      if (signal.aborted) reqController.abort()
+      else signal.addEventListener('abort', onParentAbort, { once: true })
     }
-    if (!res.body) {
-      throw new Error('Anthropic API returned empty body')
-    }
-    /** @type {{ content: ContentBlock[], usage: Usage, stop_reason: AnthropicStopReason | null } | null} */
-    let at = null
-    // accumulateTurn 가 text_delta 도착마다 ctx.onPartialText 콜백을 호출하도록 forward.
-    const accIter = accumulateTurn(parseAnthropicSSE(res.body), { onPartialText: ctx.onPartialText })
-    for await (const out of accIter) {
-      if (out.kind === 'error') {
-        throw Object.assign(new Error(out.error.message || out.error.code), { code: out.error.code })
+    try {
+      const res = await fetchFn(upstream.url, {
+        method: 'POST',
+        headers: upstream.headers,
+        body: JSON.stringify(body),
+        signal: reqController.signal,
+      })
+      if (!res.ok) {
+        const errText = await safeReadText(res)
+        throw Object.assign(
+          new Error(`Anthropic API ${res.status}: ${errText.slice(0, 500)}`),
+          { status: res.status, body: errText },
+        )
       }
-      at = { content: out.content, usage: out.usage, stop_reason: out.stop_reason }
+      if (!res.body) {
+        throw new Error('Anthropic API returned empty body')
+      }
+      /** @type {{ content: ContentBlock[], usage: Usage, stop_reason: AnthropicStopReason | null } | null} */
+      let at = null
+      // stale watchdog으로 감싼 뒤 SSE 파싱. 업스트림이 STREAM_STALE_TIMEOUT_MS 동안 침묵하면
+      // reqController.abort()로 연결을 끊고 retryable timeout을 throw → 상위 retry가 재시도.
+      const guarded = streamWithStaleGuard(res.body, STREAM_STALE_TIMEOUT_MS, () => reqController.abort())
+      // accumulateTurn 가 text_delta 도착마다 ctx.onPartialText 콜백을 호출하도록 forward.
+      const accIter = accumulateTurn(parseAnthropicSSE(guarded), { onPartialText: ctx.onPartialText })
+      for await (const out of accIter) {
+        if (out.kind === 'error') {
+          throw Object.assign(new Error(out.error.message || out.error.code), { code: out.error.code })
+        }
+        at = { content: out.content, usage: out.usage, stop_reason: out.stop_reason }
+      }
+      return at
+    } finally {
+      signal?.removeEventListener('abort', onParentAbort)
     }
-    return at
   }
 
   try { // mcpRegistry close 보장

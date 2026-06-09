@@ -18,6 +18,7 @@ import {
   resolveUpstream,
   isThinkingSignatureError,
   stripThinkingBlocks,
+  streamWithStaleGuard,
 } from './turn-manager.js'
 import { sdkMessageToLLMEvents } from './llm-wrapper.js'
 
@@ -1526,5 +1527,54 @@ describe('isThinkingSignatureError / stripThinkingBlocks', () => {
     // user 메시지는 불변
     assert.equal(messages[0].content, 'hi')
     assert.equal(messages[2].content[0].type, 'tool_result')
+  })
+})
+
+describe('streamWithStaleGuard', () => {
+  /** idleMs 안에 모든 chunk가 흐르면 그대로 통과시킨다. */
+  it('정상 스트림은 chunk를 그대로 yield', async () => {
+    async function* src() {
+      yield 'a'
+      yield 'b'
+      yield 'c'
+    }
+    const out = []
+    for await (const c of streamWithStaleGuard(src(), 1000, () => {})) out.push(c)
+    assert.deepEqual(out, ['a', 'b', 'c'])
+  })
+
+  /** chunk 사이 간격이 idleMs를 넘으면 stale로 ETIMEDOUT throw + onStale 1회 호출. */
+  it('idle 초과 시 ETIMEDOUT throw 및 onStale 호출', async () => {
+    let staleCalls = 0
+    // 첫 chunk는 즉시, 이후 영원히 멈추는 소스.
+    async function* src() {
+      yield 'first'
+      await new Promise(() => {}) // never resolves → stall
+    }
+    const received = []
+    await assert.rejects(
+      async () => {
+        for await (const c of streamWithStaleGuard(src(), 30, () => { staleCalls++ })) {
+          received.push(c)
+        }
+      },
+      (err) => err && err.code === 'ETIMEDOUT' && err.stale === true,
+    )
+    assert.deepEqual(received, ['first'])
+    assert.equal(staleCalls, 1)
+  })
+
+  /** 첫 chunk조차 오지 않는 TTFB stall도 감지(가장 흔한 케이스). */
+  it('첫 chunk 전 stall(TTFB)도 감지', async () => {
+    async function* src() {
+      await new Promise(() => {})
+      yield 'never'
+    }
+    await assert.rejects(
+      async () => {
+        for await (const _ of streamWithStaleGuard(src(), 20, () => {})) { /* drain */ }
+      },
+      (err) => err.code === 'ETIMEDOUT',
+    )
   })
 })
