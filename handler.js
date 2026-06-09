@@ -1280,6 +1280,10 @@ export async function handleChat(rawParams, res, req) {
               // 이미 summary를 싣고 있었고, 정상 경로만 비어 있던 것을 일치시킨다.
               input_summary: summarizeToolInput(toolName, toolInput),
               tool_index: myToolIndex,
+              // tool_use 블록 id 동봉 — cloud가 결과를 순번이 아닌 이 id로 매칭한다.
+              // 결재 승인 후 resume로 새 빈 logBuffer가 생기면 세션 누적 tool_index와
+              // 새 버퍼의 순번이 어긋나 결과가 유실되던 갭(P0-a)을 막는다.
+              ...(toolUseId ? { tool_use_id: toolUseId } : {}),
               ...(knowledgeAccess ? { knowledge_access: knowledgeAccess } : {}),
             })
             startToolProgress(myToolIndex)
@@ -1323,6 +1327,8 @@ export async function handleChat(rawParams, res, req) {
             output: safeOutput,
             is_error: block.is_error === true,
             tool_index: matchedIndex,
+            // tool_use 블록 id 동봉 — cloud setToolResult가 id로 정확 매칭(순번 폴백).
+            ...(tuid ? { tool_use_id: tuid } : {}),
           })
           stopToolProgress(matchedIndex)
         }
