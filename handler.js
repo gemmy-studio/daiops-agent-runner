@@ -1274,7 +1274,11 @@ export async function handleChat(rawParams, res, req) {
             emitSseEvent(sessionId, 'tool_use', {
               name: toolName,
               input: toolInput,
-              input_summary: '',
+              // 도구 입력 요약을 채워 보낸다 — cloud가 이 값을 thinkingLog/parts.input에 기록한다.
+              // 비워 보내면(과거) 모델의 다음 턴 history에 "무슨 명령을 썼는지"가 통째로 누락돼,
+              // 같은 첫 단계를 반복 재도출하는 루프가 생긴다(연속성 갭). 차단/거부 경로(902·921·958)는
+              // 이미 summary를 싣고 있었고, 정상 경로만 비어 있던 것을 일치시킨다.
+              input_summary: summarizeToolInput(toolName, toolInput),
               tool_index: myToolIndex,
               ...(knowledgeAccess ? { knowledge_access: knowledgeAccess } : {}),
             })
