@@ -464,13 +464,13 @@ export async function* streamWithStaleGuard(stream, idleMs, onStale) {
       yield result.value
     }
   } finally {
-    // best-effort 정리 — await하지 않는다. stale로 끊긴 소스는 onStale의 abort로 read가 reject되며
-    // *자체* 정리(releaseLock)되고, 정상 완료 소스는 이미 done까지 소진됐다. 여기서 return()을
-    // await하면, 영원히 멈춘(never-settling) 소스에서 ETIMEDOUT 전파가 막혀 hang이 된다.
-    try {
-      const r = iterator.return?.()
-      if (r && typeof r.then === 'function') r.then(() => {}, () => {})
-    } catch { /* already done / not resumable */ }
+    // inner iterator 정리를 await해 throw 전파 전에 완전히 끝낸다(미settle promise 잔류 방지).
+    // 모든 진입 경로에서 await가 안전한 이유 — finally 시점엔 소스의 pending read가 이미 settle됨:
+    //   · stale: 위에서 onStale()이 fetch를 abort → reader.read()가 reject → 소스 finally(releaseLock) 진행
+    //   · 정상: while이 done까지 소진해 소스가 이미 종료
+    //   · 부모 abort/네트워크 오류: read가 reject돼 동일하게 정리
+    // 따라서 return()은 곧바로 resolve되며 hang이 없다(abort 미연동 소스만 hang 위험 — 실경로엔 없음).
+    try { await iterator.return?.() } catch { /* already done / not resumable */ }
   }
 }
 
