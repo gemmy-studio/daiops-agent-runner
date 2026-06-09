@@ -2,6 +2,11 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.5.8] — 2026-06-09
+
+### Added
+- **dist tarball Release asset 게시** — 태그(`vX.Y.Z`) push 시 런타임 JS만(테스트·문서 제외, 0-dep이라 ~84KB) 담은 `agent-runner-dist.tar.gz` + `.sha256`을 GitHub Release asset으로 게시하는 CI `release` 잡 추가. cloud(ADR 20)의 in-place 업그레이드가 이 asset을 무인증 fetch→sha256 검증→기존 워크스페이스의 `/opt/agent-runner`를 무손실 교체한다. 런타임 코드 변경 없음(0.5.7과 동일) — 버전 범프는 기존 워크스페이스가 staleness를 감지해 새 dist를 받게 하는 롤아웃 트리거.
+
 ## [0.5.7] — 2026-06-09
 
 ### Fixed
