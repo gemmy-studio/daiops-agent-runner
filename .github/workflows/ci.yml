@@ -56,3 +56,33 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # 태그(vX.Y.Z) 푸시마다 런타임 JS dist tarball + sha256을 GitHub Release asset으로 게시.
+  # cloud(ADR 20 T3)가 이 asset을 무인증 fetch(레포 public)→sha256 검증→기존 워크스페이스의
+  # /opt/agent-runner를 in-place 교체한다. zero-dep이라 dist = JS 파일 몇 개(수백 KB).
+  release:
+    needs: test
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # release 생성 + asset 업로드
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dist tarball (런타임 JS only)
+        run: |
+          mkdir -p dist
+          # 런타임에 필요한 것만: package.json(ESM type·version 스탬프) + 루트 *.js + tools/ + 라이선스.
+          # 테스트·문서·VCS·node_modules 제외(.dockerignore 정책 + 문서 제외). 0-dep이라 node_modules 없음.
+          tar czf dist/agent-runner-dist.tar.gz \
+            --exclude='*.test.js' \
+            package.json *.js tools LICENSE NOTICE
+          cd dist && sha256sum agent-runner-dist.tar.gz > agent-runner-dist.tar.gz.sha256
+          echo "dist 내용:" && tar tzf agent-runner-dist.tar.gz
+
+      - name: Create GitHub Release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/agent-runner-dist.tar.gz
+            dist/agent-runner-dist.tar.gz.sha256
