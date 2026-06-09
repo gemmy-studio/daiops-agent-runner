@@ -42,7 +42,8 @@ export function jitteredBackoff(attempt, opts = {}) {
  * - 'overloaded'   : 503/529, "overloaded" — retry
  * - 'server_error' : 500/502 — retry
  * - 'timeout'      : "timeout", "timed out", "ETIMEDOUT", "ECONNRESET" — retry
- * - 'billing'      : 402, "credit", "quota exhausted" — fatal
+ * - 'billing'      : 402(크레딧 소진), "credit", "quota exhausted" — fatal
+ *                    단, 402가 "usage limit ... try again/resets" 신호면 rate_limit(retryable)로 분리.
  * - 'auth'         : 401/403 — fatal
  * - 'context_overflow' : 400 + "prompt is too long"/"context length" — fatal (새 대화 유도)
  * - 'bad_request'  : 400 (format/validation) — fatal
@@ -55,6 +56,15 @@ export function jitteredBackoff(attempt, opts = {}) {
  * @param {unknown} err
  * @returns {{reason: string, retryable: boolean, status?: number}}
  */
+/**
+ * 402 disambiguation 패턴 — cloud src/lib/llm/error-classifier.ts와 동일(드리프트 금지).
+ * usage-limit 신호 + transient 신호가 함께 있으면 "월 한도 일시 초과"로 보고 재시도한다.
+ */
+const USAGE_LIMIT_PATTERNS = ['usage limit', 'quota', 'limit exceeded', 'key limit exceeded']
+const USAGE_LIMIT_TRANSIENT_SIGNALS = [
+  'try again', 'retry', 'resets at', 'reset in', 'wait', 'requests remaining', 'periodic', 'window',
+]
+
 export function classifyLlmError(err) {
   const e = /** @type {{status?: number, statusCode?: number, code?: string, message?: string, name?: string, cause?: unknown}} */ (
     err && typeof err === 'object' ? err : {}
@@ -72,7 +82,15 @@ export function classifyLlmError(err) {
 
   // 상태 코드 우선 (Anthropic SDK는 .status 노출)
   if (status === 429) return { reason: 'rate_limit', retryable: true, status }
-  if (status === 402) return { reason: 'billing', retryable: false, status }
+  if (status === 402) {
+    // 402는 두 갈래: 월 사용량 한도 초과(일시적, 곧 리셋) vs 크레딧 소진(영구).
+    // "usage limit ... try again/resets" 신호가 함께 있으면 rate_limit로 재시도, 아니면 billing fatal.
+    // (hermes _classify_402 차용, cloud error-classifier.ts:192-198과 동일 — 드리프트 금지)
+    const hasUsageLimit = USAGE_LIMIT_PATTERNS.some((p) => message.includes(p))
+    const hasTransient = USAGE_LIMIT_TRANSIENT_SIGNALS.some((p) => message.includes(p))
+    if (hasUsageLimit && hasTransient) return { reason: 'rate_limit', retryable: true, status }
+    return { reason: 'billing', retryable: false, status }
+  }
   if (status === 401 || status === 403) return { reason: 'auth', retryable: false, status }
   // context window 초과 — 400의 한 갈래. bad_request보다 먼저 매칭해 사용자에게 "새 대화" 유도.
   if (status === 400 && /prompt is too long|context length|context window|maximum.*tokens|too many tokens/.test(message)) {

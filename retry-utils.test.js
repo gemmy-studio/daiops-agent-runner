@@ -61,6 +61,21 @@ describe('classifyLlmError', () => {
     assert.equal(c.reason, 'auth')
     assert.equal(c.retryable, false)
   })
+  it('402 + usage limit + transient 신호 → rate_limit retryable (월 한도 일시초과)', () => {
+    const c = classifyLlmError({ status: 402, message: 'Usage limit exceeded. Please try again at reset.' })
+    assert.equal(c.reason, 'rate_limit')
+    assert.equal(c.retryable, true)
+  })
+  it('402 + 크레딧 소진(transient 신호 없음) → billing fatal', () => {
+    const c = classifyLlmError({ status: 402, message: 'Your credit balance is too low to access the API.' })
+    assert.equal(c.reason, 'billing')
+    assert.equal(c.retryable, false)
+  })
+  it('402 + usage limit이지만 transient 신호 없음 → billing fatal (보수적)', () => {
+    const c = classifyLlmError({ status: 402, message: 'Monthly usage limit exceeded.' })
+    assert.equal(c.reason, 'billing')
+    assert.equal(c.retryable, false)
+  })
   it('400 → bad_request fatal', () => {
     const c = classifyLlmError({ status: 400 })
     assert.equal(c.reason, 'bad_request')

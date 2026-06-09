@@ -6,6 +6,7 @@
 
 ### Fixed
 - **스트림 stale 감지·자동 재시도** — 업스트림(Anthropic / cloud LLM proxy)이 연결은 유지한 채 토큰 전송을 멈추면(mid-stream stall), agent-runner에 시간 기반 abort가 없어 cloud `FETCH_TIMEOUT`(750초)까지 매달려 사용자에게 "멈춤"으로 보이던 갭 해소. `turn-manager`의 SSE 소비를 `streamWithStaleGuard`로 감싸 chunk 간 idle이 `STREAM_STALE_TIMEOUT_MS`(기본 120초, env `AGENT_RUNNER_STREAM_STALE_MS`로 override)를 넘으면 요청 전용 AbortController로 연결을 끊고 retryable timeout(`ETIMEDOUT`)을 throw → 기존 재시도(turn 0 first-yield retry / turn 1+ `withJitteredRetry`)가 같은 turn을 자동 재시도하며 `retry` SSE로 가시화. SSE 계약(schemaVersion) 불변 — cloud 무변경 호환. (hermes `run_agent.py` stale-stream 감시 패턴 이식)
+- **402 usage-limit/billing 구분** — `classifyLlmError`가 402를 전부 billing(fatal)로 처리해, 월 사용량 한도 일시 초과에도 대화가 끊기던 갭 해소. "usage limit … try again/resets" 신호가 함께 있으면 `rate_limit`(retryable)로 분류해 자동 재시도, 크레딧 소진은 그대로 billing(fatal). cloud `error-classifier.ts`(hermes `_classify_402`)와 동일 분류 — 드리프트 금지.
 
 ## [0.5.3] — 2026-06-06
 
