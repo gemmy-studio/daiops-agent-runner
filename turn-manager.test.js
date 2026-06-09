@@ -1552,6 +1552,10 @@ describe('streamWithStaleGuard', () => {
     return { [Symbol.asyncIterator]: () => iterator }
   }
 
+  /** guard가 stale로 throw한 뒤 finally(fire-and-forget return)·abandoned next()가
+   *  완전히 settle되도록 한 틱 양보 — node:test(엄격 모드)의 "pending promise" 오탐 방지. */
+  const flushCleanup = () => new Promise((r) => setTimeout(r, 50))
+
   /** idleMs 안에 모든 chunk가 흐르면 그대로 통과시킨다. */
   it('정상 스트림은 chunk를 그대로 yield', async () => {
     async function* src() {
@@ -1576,6 +1580,7 @@ describe('streamWithStaleGuard', () => {
       },
       (err) => err && err.code === 'ETIMEDOUT' && err.stale === true,
     )
+    await flushCleanup()
     assert.deepEqual(received, ['first'])
     assert.equal(staleCalls, 1)
   })
@@ -1589,6 +1594,7 @@ describe('streamWithStaleGuard', () => {
       },
       (err) => err.code === 'ETIMEDOUT',
     )
+    await flushCleanup()
     assert.equal(staleCalls, 1)
   })
 })
