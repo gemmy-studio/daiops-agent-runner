@@ -1531,6 +1531,27 @@ describe('isThinkingSignatureError / stripThinkingBlocks', () => {
 })
 
 describe('streamWithStaleGuard', () => {
+  /**
+   * N개 chunk를 yield한 뒤 next()가 멈추는(=stall) async iterable.
+   * `await new Promise(()=>{})`처럼 영영 안 풀리면 node:test가 "pending promise"로 잡으므로,
+   * guard의 finally가 호출하는 return()에서 멈춘 promise를 settle해 깔끔히 해제한다.
+   * (프로덕션의 실제 fetch 스트림은 onStale의 abort로 read가 reject돼 동일하게 정리된다.)
+   */
+  function hangingIterable(chunks) {
+    let resolveHang
+    const hang = new Promise((res) => { resolveHang = res })
+    let i = 0
+    const iterator = {
+      async next() {
+        if (i < chunks.length) return { value: chunks[i++], done: false }
+        await hang
+        return { value: undefined, done: true }
+      },
+      async return() { resolveHang?.(); return { value: undefined, done: true } },
+    }
+    return { [Symbol.asyncIterator]: () => iterator }
+  }
+
   /** idleMs 안에 모든 chunk가 흐르면 그대로 통과시킨다. */
   it('정상 스트림은 chunk를 그대로 yield', async () => {
     async function* src() {
@@ -1546,15 +1567,10 @@ describe('streamWithStaleGuard', () => {
   /** chunk 사이 간격이 idleMs를 넘으면 stale로 ETIMEDOUT throw + onStale 1회 호출. */
   it('idle 초과 시 ETIMEDOUT throw 및 onStale 호출', async () => {
     let staleCalls = 0
-    // 첫 chunk는 즉시, 이후 영원히 멈추는 소스.
-    async function* src() {
-      yield 'first'
-      await new Promise(() => {}) // never resolves → stall
-    }
     const received = []
     await assert.rejects(
       async () => {
-        for await (const c of streamWithStaleGuard(src(), 30, () => { staleCalls++ })) {
+        for await (const c of streamWithStaleGuard(hangingIterable(['first']), 30, () => { staleCalls++ })) {
           received.push(c)
         }
       },
@@ -1566,15 +1582,13 @@ describe('streamWithStaleGuard', () => {
 
   /** 첫 chunk조차 오지 않는 TTFB stall도 감지(가장 흔한 케이스). */
   it('첫 chunk 전 stall(TTFB)도 감지', async () => {
-    async function* src() {
-      await new Promise(() => {})
-      yield 'never'
-    }
+    let staleCalls = 0
     await assert.rejects(
       async () => {
-        for await (const _ of streamWithStaleGuard(src(), 20, () => {})) { /* drain */ }
+        for await (const _ of streamWithStaleGuard(hangingIterable([]), 20, () => { staleCalls++ })) { /* drain */ }
       },
       (err) => err.code === 'ETIMEDOUT',
     )
+    assert.equal(staleCalls, 1)
   })
 })
