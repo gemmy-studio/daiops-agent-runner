@@ -19,6 +19,7 @@ import {
   isThinkingSignatureError,
   stripThinkingBlocks,
   streamWithStaleGuard,
+  pruneOldToolResults,
 } from './turn-manager.js'
 import { sdkMessageToLLMEvents } from './llm-wrapper.js'
 
@@ -1605,5 +1606,73 @@ describe('streamWithStaleGuard', () => {
       (err) => err.code === 'ETIMEDOUT',
     ))
     assert.equal(staleCalls, 1)
+  })
+})
+
+describe('pruneOldToolResults (REF-1 A2-②)', () => {
+  const big = (n) => 'x'.repeat(n)
+
+  function buildMessages(toolResultLen) {
+    // assistant(tool_use) + user(tool_result) 페어 5쌍 + 마지막 user 질문 1개.
+    const msgs = []
+    for (let i = 0; i < 5; i++) {
+      msgs.push({ role: 'assistant', content: [{ type: 'tool_use', id: `t${i}`, name: 'Bash', input: {} }] })
+      msgs.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: big(toolResultLen) }] })
+    }
+    return msgs
+  }
+
+  it('보호 tail 밖의 큰 tool_result만 요약 치환', () => {
+    const msgs = buildMessages(500)
+    const n = pruneOldToolResults(msgs, { protectTailCount: 4 })
+    // 10개 메시지 중 마지막 4개(2쌍) 보호 → 앞 6개 중 user(tool_result) 3개가 대상.
+    assert.equal(n, 3)
+    // 보호 tail의 마지막 tool_result는 원본 유지(500자).
+    const lastTr = msgs[msgs.length - 1].content[0]
+    assert.equal(lastTr.content.length, 500)
+    // 프루닝된 것은 마커 포함.
+    const firstTr = msgs[1].content[0]
+    assert.ok(firstTr.content.startsWith('…[이전 도구 결과 생략]'))
+    assert.ok(firstTr.content.includes('[Bash]'))
+  })
+
+  it('짧은 tool_result(임계 이하)는 건드리지 않음', () => {
+    const msgs = buildMessages(50) // PRUNE_MIN_CHARS(200) 이하
+    const n = pruneOldToolResults(msgs, { protectTailCount: 4 })
+    assert.equal(n, 0)
+    assert.equal(msgs[1].content[0].content.length, 50)
+  })
+
+  it('멱등 — 이미 프루닝된 결과는 재치환 안 함', () => {
+    const msgs = buildMessages(500)
+    const n1 = pruneOldToolResults(msgs, { protectTailCount: 4 })
+    const n2 = pruneOldToolResults(msgs, { protectTailCount: 4 })
+    assert.equal(n1, 3)
+    assert.equal(n2, 0) // 두 번째 호출은 이미 마커가 있어 0
+  })
+
+  it('is_error tool_result는 오류 라벨로 요약', () => {
+    const msgs = [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'e1', name: 'Bash', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'e1', content: 'x'.repeat(300), is_error: true }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      { role: 'user', content: [{ type: 'text', text: '다음' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ]
+    pruneOldToolResults(msgs, { protectTailCount: 2 })
+    assert.ok(msgs[1].content[0].content.includes('오류'))
+  })
+
+  it('배열 content(text 블록) tool_result도 요약', () => {
+    const msgs = buildMessages(0).map((m) => m)
+    msgs[1].content = [{ type: 'tool_result', tool_use_id: 't0', content: [{ type: 'text', text: 'y'.repeat(400) }] }]
+    const n = pruneOldToolResults(msgs, { protectTailCount: 4 })
+    assert.ok(n >= 1)
+    assert.ok(String(msgs[1].content[0].content).startsWith('…[이전 도구 결과 생략]'))
+  })
+
+  it('메시지 수가 protectTail 이하면 no-op', () => {
+    const msgs = buildMessages(500).slice(0, 4)
+    assert.equal(pruneOldToolResults(msgs, { protectTailCount: 6 }), 0)
   })
 })

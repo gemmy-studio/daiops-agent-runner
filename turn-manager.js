@@ -48,6 +48,66 @@ export const STREAM_STALE_TIMEOUT_MS = (() => {
 /** stale watchdog이 read race를 끊을 때 던지는 내부 sentinel. */
 const STREAM_STALE = Symbol('stream-stale')
 
+// ── 컨텍스트 압축 (REF-1 A2-②) ────────────────────────────────────────────
+// hermes context_compressor._prune_old_tool_results 차용 — LLM 없는 cheap pre-pass.
+// 직전 turn input_tokens가 임계를 넘으면, 보호 tail 밖의 오래된 tool_result 내용을 1줄
+// 요약으로 치환해 멀티턴 토큰 선형 증가(캐시 미스 폭증)를 완화한다. 임계 미만이면 prefix
+// 캐시 보존을 위해 건드리지 않음(hermes should_compress 0.5 임계 + anti-thrashing 정신).
+/** 직전 turn input_tokens가 이 값을 넘으면 프루닝 트리거 (Opus 200K window의 절반 수준). */
+const PRUNE_THRESHOLD_TOKENS = (() => {
+  const v = Number(process.env.AGENT_RUNNER_PRUNE_THRESHOLD_TOKENS)
+  return Number.isFinite(v) && v > 0 ? v : 100_000
+})()
+/** 최근 N개 메시지는 프루닝하지 않음(직전 도구 결과는 추론에 필수). assistant+user 페어 ≈ 3턴. */
+const PRUNE_PROTECT_TAIL = 6
+/** 이 길이 이하 tool_result는 요약 이득이 없어 건너뜀. */
+const PRUNE_MIN_CHARS = 200
+/** 이미 프루닝된 결과를 식별하는 마커(재프루닝 무한 방지 = 멱등). */
+const PRUNED_MARKER = '…[이전 도구 결과 생략]'
+
+/** tool_result.content(string | [{type:'text',text}])를 평문으로. */
+function toolResultText(content) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content.map((p) => (p && typeof p.text === 'string' ? p.text : '')).join('')
+  }
+  return ''
+}
+
+/**
+ * 보호 tail 밖의 오래된 tool_result를 1줄 요약으로 치환 (in-place mutate). LLM 미호출.
+ * 멱등: 이미 마커가 붙은 결과·짧은 결과는 건너뛴다(재호출해도 안정).
+ * @returns {number} 요약 치환한 tool_result 수
+ */
+export function pruneOldToolResults(messages, { protectTailCount = PRUNE_PROTECT_TAIL } = {}) {
+  if (!Array.isArray(messages) || messages.length <= protectTailCount) return 0
+  // tool_use_id → 도구 이름 (요약 라벨용). assistant 메시지의 tool_use 블록에서 수집.
+  const toolNameById = new Map()
+  for (const m of messages) {
+    if (m && m.role === 'assistant' && Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (b && b.type === 'tool_use') toolNameById.set(b.id, b.name)
+      }
+    }
+  }
+  const boundary = messages.length - protectTailCount
+  let pruned = 0
+  for (let i = 0; i < boundary; i++) {
+    const m = messages[i]
+    if (!m || m.role !== 'user' || !Array.isArray(m.content)) continue
+    for (const b of m.content) {
+      if (!b || b.type !== 'tool_result') continue
+      const text = toolResultText(b.content)
+      if (text.startsWith(PRUNED_MARKER) || text.length <= PRUNE_MIN_CHARS) continue
+      const name = toolNameById.get(b.tool_use_id) || 'tool'
+      const status = b.is_error ? '오류' : '성공'
+      b.content = `${PRUNED_MARKER} [${name}] ${status}, ${text.length}자`
+      pruned++
+    }
+  }
+  return pruned
+}
+
 // ── web server tool ──────────────────────────────────────────────────────
 // Anthropic server-side tool — 서버가 검색/페치를 직접 실행하고 server_tool_use +
 // web_search_tool_result/web_fetch_tool_result 블록을 같은 응답에 인라인한다. 클라이언트
@@ -847,6 +907,8 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
 
   let turn = 0
   let thinkingSigRetryDone = false
+  // A2-② 컨텍스트 압축: 직전 turn의 실제 input_tokens. 임계 초과 시 다음 turn 전 프루닝 트리거.
+  let lastInputTokens = 0
 
   // 단일 turn의 LLM 호출(fetch + 전체 SSE 누적)을 1 단위로 묶는다. accumulateTurn이 스트림을 끝까지
   // 소비한 뒤에야 결과를 반환하므로 — turn-manager가 아직 아무것도 yield하지 않은 시점 — 이 함수 전체를
@@ -913,6 +975,14 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   while (true) {
     if (signal?.aborted) return
 
+    // A2-② 컨텍스트 압축: 직전 turn input이 임계 초과면 보호 tail 밖 오래된 tool_result를 요약 치환.
+    // 임계 미만이면 prefix 캐시 보존을 위해 무손. lastInputTokens=0으로 리셋해 다음 turn usage로
+    // 재평가하기 전까지 재프루닝하지 않음(anti-thrashing). 프루닝 자체도 멱등(마커 가드).
+    if (lastInputTokens > PRUNE_THRESHOLD_TOKENS) {
+      pruneOldToolResults(messages, { protectTailCount: PRUNE_PROTECT_TAIL })
+      lastInputTokens = 0
+    }
+
     /** @type {{ content: ContentBlock[], usage: Usage, stop_reason: AnthropicStopReason | null } | null} */
     let assistantTurn = null
     try {
@@ -944,6 +1014,9 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       type: 'assistant',
       message: { content: assistantTurn.content, usage: assistantTurn.usage },
     }
+
+    // A2-② — 다음 turn 프루닝 판정용. Anthropic usage.input_tokens(캐시 포함 실제 프롬프트 크기).
+    lastInputTokens = assistantTurn.usage?.input_tokens ?? 0
 
     const stop = assistantTurn.stop_reason
     if (stop !== 'tool_use') {
