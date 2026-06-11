@@ -133,3 +133,41 @@ describe('evaluatePolicy — 외향 발신 도구는 항상 결재', () => {
     assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__slack_list_channels', {}, true).kind, 'allow')
   })
 })
+
+// ADR 21 §5.3 — 채널-인식 도구 게이트(toolOverrides). cloud(policy.ts)가 채널 capability로
+// deny/ask 목록을 계산해 정책에 실으면 agent-runner가 RISKY 분기보다 먼저 강제한다.
+describe('채널-인식 도구 게이트 (toolOverrides, ADR 21)', () => {
+  const full = { security: 'full', ask: 'off', askFallback: 'deny', allowlist: [] }
+
+  it('toolOverrides 없으면 상태변경 MCP 도구도 통과(기존 동작·graceful)', () => {
+    assert.equal(evaluatePolicy(full, 'mcp__daiops-mcp__wiki_save', { title: 'x' }, true).kind, 'allow')
+  })
+
+  it('deny에 bare 이름이 있으면 접두사 붙은 MCP 도구를 차단', () => {
+    const policy = { ...full, toolOverrides: { deny: ['wiki_save', 'skill_patch', 'schema_update'] } }
+    const d = evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_save', { title: 'x' }, true)
+    assert.equal(d.kind, 'deny')
+    assert.equal(d.reason, 'channel-deny')
+  })
+
+  it('deny 미포함 MCP 도구는 통과(읽기 등)', () => {
+    const policy = { ...full, toolOverrides: { deny: ['wiki_save'] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_read', {}, true).kind, 'allow')
+  })
+
+  it('deny는 RISKY 도구(Bash, bare)에도 우선 적용', () => {
+    const policy = { ...full, toolOverrides: { deny: ['Bash'] } }
+    assert.equal(evaluatePolicy(policy, 'Bash', { command: 'ls' }, true).reason, 'channel-deny')
+  })
+
+  it('ask 목록: UI 채널 있으면 plan_request, 없으면 보수적 deny', () => {
+    const policy = { ...full, toolOverrides: { ask: ['wiki_save'] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_save', {}, true).kind, 'plan_request')
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_save', {}, false).kind, 'deny')
+  })
+
+  it('owner(빈 deny) → 상태변경 도구 통과', () => {
+    const policy = { ...full, toolOverrides: { deny: [] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_save', {}, true).kind, 'allow')
+  })
+})

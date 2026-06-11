@@ -548,6 +548,27 @@ function buildPlanContent({ toolName, commandSummary, reason }) {
  * @returns { kind: 'allow'|'plan_request'|'deny', reason, toolName?, commandSummary? }
  */
 export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
+  // 채널-인식 도구 게이트 (ADR 21 §5.3) — 가장 먼저, 가장 제한적. cloud(policy.ts)가 인바운드
+  // 채널 capability로 계산한 deny/ask 목록을 데이터로 강제(분류/채널 로직은 cloud 단일 소스).
+  // 상태변경 MCP 도구(wiki_save 등)는 RISKY_TOOL_NAMES가 아니라 아래 non-risky로 새므로 여기서 막는다.
+  // toolOverrides 미존재(web=owner 전권/구버전 cloud) → 무시 = 기존 동작(graceful degradation).
+  const overrides = policy?.toolOverrides
+  if (overrides) {
+    // MCP 도구는 런타임에 mcp__<server>__<tool> 접두사가 붙는다(예: mcp__daiops-mcp__wiki_save).
+    // cloud는 bare 이름(wiki_save)으로 deny/ask를 계산하므로 양쪽 형태를 모두 매칭한다.
+    const bareName = toolName.replace(/^mcp__.+?__/, '')
+    const listed = (list) => Array.isArray(list) && (list.includes(toolName) || list.includes(bareName))
+    if (listed(overrides.deny)) {
+      return { kind: 'deny', reason: 'channel-deny', toolName, commandSummary: summarizeToolInput(toolName, input) }
+    }
+    if (listed(overrides.ask)) {
+      if (!hasUiChannel) {
+        return { kind: 'deny', reason: 'channel-deny', toolName, commandSummary: summarizeToolInput(toolName, input) }
+      }
+      return { kind: 'plan_request', reason: 'channel-ask', toolName, commandSummary: summarizeToolInput(toolName, input) }
+    }
+  }
+
   // 외향 발신(슬랙/이메일 등 직원 정체성으로 외부에 메시지)은 보안 설정과 무관하게 항상 결재.
   // UI 채널이 없으면(스케줄 등 무인 실행) askFallback을 따른다(기본 deny — 무인 능동 발신 차단).
   if (isOutwardSendTool(toolName)) {
