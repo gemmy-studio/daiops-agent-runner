@@ -3,7 +3,8 @@
  *
  *  - 페이지네이션 (offset 1-based + limit, 기본 500/최대 2000).
  *  - 확장자 우선 바이너리 감지 + 내용 sniff fallback.
- *  - 이미지 확장자는 별도 안내 (vision 미통합 — 안내만 반환).
+ *  - 이미지(png/jpeg/gif/webp)는 base64 image 블록으로 반환 → 모델이 vision으로 직접 본다.
+ *    (bmp/ico 등 vision 미지원 포맷·과대 파일은 텍스트 안내로 폴백.)
  *  - 파일 크기 상한 초과 시 head + 명시적 truncated 안내.
  *
  * daiops 적응: 모든 경로는 ctx.cwd(기본 '/workspace') 기준, `~`/`~/` 확장 지원.
@@ -18,6 +19,8 @@ import {
   isBinaryByContent,
   formatNumberedLines,
   IMAGE_EXTENSIONS,
+  VISION_MEDIA_TYPES,
+  MAX_VISION_IMAGE_BYTES,
   MAX_FILE_SIZE,
   DEFAULT_READ_LIMIT,
   MAX_READ_LIMIT,
@@ -26,7 +29,7 @@ import path from 'node:path'
 
 export const READ_TOOL = Object.freeze({
   name: 'Read',
-  description: 'Read a file from the local filesystem with optional line range. Returns content with line numbers in "      N|content" format. Default 500 lines starting from line 1.',
+  description: 'Read a file from the local filesystem with optional line range. Returns text content with line numbers in "      N|content" format (default 500 lines from line 1). Image files (PNG, JPEG, GIF, WebP) are returned as an image so you can inspect their contents visually — call this to look at an uploaded screenshot or photo.',
   input_schema: {
     type: 'object',
     properties: {
@@ -41,7 +44,7 @@ export const READ_TOOL = Object.freeze({
 /**
  * @param {{file_path: string, offset?: number, limit?: number}} input
  * @param {{ cwd?: string, signal?: AbortSignal }} [ctx]
- * @returns {Promise<{content: string, is_error?: boolean}>}
+ * @returns {Promise<{content: string|Array<{type:string,[k:string]:unknown}>, is_error?: boolean}>}
  */
 export async function runRead(input, ctx = {}) {
   if (!input || typeof input.file_path !== 'string' || !input.file_path) {
@@ -58,12 +61,34 @@ export async function runRead(input, ctx = {}) {
     return { content: `Read: '${resolved}' is a directory, not a file`, is_error: true }
   }
 
-  // 이미지: 안내만 반환 (vision 미통합 — 별도 흐름)
+  // 이미지: vision 지원 포맷이면 base64 image 블록으로 반환(모델이 그림을 직접 본다).
+  // 미지원 포맷(bmp/ico 등)·상한 초과 파일은 텍스트 안내로 폴백.
   const ext = path.extname(resolved).toLowerCase()
   if (IMAGE_EXTENSIONS.has(ext)) {
+    const mediaType = VISION_MEDIA_TYPES[ext]
+    if (!mediaType) {
+      return {
+        content: `Read: '${resolved}' is a ${ext} image, which Claude vision does not support. Convert it to PNG, JPEG, GIF, or WebP first.`,
+        is_error: true,
+      }
+    }
+    if (stat.size > MAX_VISION_IMAGE_BYTES) {
+      return {
+        content: `Read: '${resolved}' is too large to inspect inline (${stat.size} bytes; limit ${MAX_VISION_IMAGE_BYTES}). Resize or downscale it below ~3.75MB first.`,
+        is_error: true,
+      }
+    }
+    let imgBuf
+    try {
+      imgBuf = await fs.readFile(resolved)
+    } catch (err) {
+      return { content: `Read: read failed for '${resolved}': ${err.code ?? err.message}`, is_error: true }
+    }
     return {
-      content: `Read: '${resolved}' is an image (${ext}, ${stat.size} bytes). Use a vision-capable tool to inspect contents.`,
-      is_error: true,
+      content: [
+        { type: 'text', text: `Image '${resolved}' (${ext}, ${stat.size} bytes):` },
+        { type: 'image', source: { type: 'base64', media_type: mediaType, data: imgBuf.toString('base64') } },
+      ],
     }
   }
   if (isBinaryByExtension(resolved)) {

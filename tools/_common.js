@@ -78,6 +78,24 @@ export const IMAGE_EXTENSIONS = Object.freeze(new Set([
 ]))
 
 /**
+ * Claude vision이 지원하는 이미지 포맷의 확장자 → Anthropic media_type 매핑.
+ * png/jpeg/gif/webp만 지원 — bmp/ico/tiff는 vision 미지원이라 제외(Read는 텍스트 안내로 폴백).
+ */
+export const VISION_MEDIA_TYPES = Object.freeze({
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+})
+
+/**
+ * vision 인라인 상한. Anthropic API는 이미지당 base64 페이로드 5MB가 한도이고
+ * base64는 원본의 약 1.37배이므로, 원본 ~3.75MB까지만 인라인한다(초과 시 안내로 폴백, resize 유도).
+ */
+export const MAX_VISION_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) // ≈ 3.75MB
+
+/**
  * 경로 해석:
  *  - `~` / `~/`은 HOME으로 확장 (process.env.HOME 또는 os.homedir).
  *  - 절대 경로면 그대로, 상대 경로면 cwd 기준.

@@ -542,13 +542,28 @@ describe('Write 안전 가드 (시스템 경로 쓰기 거부)', () => {
 })
 
 describe('Read 바이너리 확장자 + 이미지 분기', () => {
-  it('.png은 이미지 안내', async () => {
+  it('.png은 base64 image 블록으로 반환 (vision)', async () => {
     const dir = await mkTmpDir()
     const f = path.join(dir, 'pic.png')
-    await fs.writeFile(f, Buffer.from([0x89, 0x50, 0x4e, 0x47])) // PNG magic
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]) // PNG magic
+    await fs.writeFile(f, bytes)
+    const r = await runRead({ file_path: f })
+    assert.ok(!r.is_error)
+    assert.ok(Array.isArray(r.content))
+    const img = r.content.find((b) => b.type === 'image')
+    assert.ok(img, 'image 블록이 있어야 함')
+    assert.equal(img.source.type, 'base64')
+    assert.equal(img.source.media_type, 'image/png')
+    assert.equal(img.source.data, bytes.toString('base64'))
+  })
+
+  it('.bmp는 vision 미지원이라 텍스트 안내', async () => {
+    const dir = await mkTmpDir()
+    const f = path.join(dir, 'old.bmp')
+    await fs.writeFile(f, Buffer.from([0x42, 0x4d])) // BM magic
     const r = await runRead({ file_path: f })
     assert.equal(r.is_error, true)
-    assert.ok(/image/.test(r.content))
+    assert.ok(/does not support/.test(r.content))
   })
 
   it('.zip은 바이너리 확장자 거부', async () => {
