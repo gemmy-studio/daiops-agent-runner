@@ -1671,6 +1671,36 @@ describe('pruneOldToolResults (REF-1 A2-②)', () => {
     assert.ok(String(msgs[1].content[0].content).startsWith('…[이전 도구 결과 생략]'))
   })
 
+  it('보호 tail 밖의 이미지 tool_result는 base64를 치환(길이 임계 무관)', () => {
+    // image 블록은 toolResultText에서 0자라 기존 텍스트 프루닝을 통과 → 별도 분기로 치환.
+    const imgBlock = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(5000) } }
+    const msgs = [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'i0', name: 'Read', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'i0', content: [{ type: 'text', text: 'Image:' }, imgBlock] }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      { role: 'user', content: [{ type: 'text', text: '다음' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ]
+    const n = pruneOldToolResults(msgs, { protectTailCount: 2 })
+    assert.equal(n, 1)
+    const tr = msgs[1].content[0].content
+    assert.equal(typeof tr, 'string')
+    assert.ok(tr.startsWith('…[이전 도구 결과 생략]'))
+    assert.ok(tr.includes('[Read]') && tr.includes('Read'))
+  })
+
+  it('보호 tail 안의 이미지는 유지(최근 이미지 보존)', () => {
+    const imgBlock = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(5000) } }
+    const msgs = [
+      { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'i0', content: [imgBlock] }] },
+    ]
+    // 2개뿐 → 전부 보호 tail → 치환 0, 이미지 블록 그대로.
+    assert.equal(pruneOldToolResults(msgs, { protectTailCount: 6 }), 0)
+    assert.ok(Array.isArray(msgs[1].content[0].content))
+    assert.equal(msgs[1].content[0].content[0].type, 'image')
+  })
+
   it('메시지 수가 protectTail 이하면 no-op', () => {
     const msgs = buildMessages(500).slice(0, 4)
     assert.equal(pruneOldToolResults(msgs, { protectTailCount: 6 }), 0)

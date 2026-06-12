@@ -97,6 +97,17 @@ export function pruneOldToolResults(messages, { protectTailCount = PRUNE_PROTECT
     if (!m || m.role !== 'user' || !Array.isArray(m.content)) continue
     for (const b of m.content) {
       if (!b || b.type !== 'tool_result') continue
+      // 이미지 블록을 품은 오래된 tool_result: base64는 toolResultText에서 0자로 잡혀
+      // 아래 텍스트 프루닝(길이 임계)을 그냥 통과해 컨텍스트에 영구 잔존한다. 여기 도달하는
+      // 건 보호 tail(최근 protectTailCount개) 밖뿐이므로, 멀어진 이미지의 base64를 치환해
+      // 토큰을 회수한다. 원본 파일은 샌드박스(/workspace/.attachments 등)에 남아 있어,
+      // 모델이 다시 봐야 하면 Read로 재로드할 수 있다(문맥 복구 경로 보존).
+      if (Array.isArray(b.content) && b.content.some((c) => c && c.type === 'image')) {
+        const name = toolNameById.get(b.tool_use_id) || 'tool'
+        b.content = `${PRUNED_MARKER} [${name}] 이전 이미지 생략 — 다시 봐야 하면 해당 파일을 Read`
+        pruned++
+        continue
+      }
       const text = toolResultText(b.content)
       if (text.startsWith(PRUNED_MARKER) || text.length <= PRUNE_MIN_CHARS) continue
       const name = toolNameById.get(b.tool_use_id) || 'tool'
