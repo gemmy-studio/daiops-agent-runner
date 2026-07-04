@@ -260,8 +260,11 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
       cacheControl: opts.cacheControl,
       mcpServers: opts.mcpServers,
       webTools,
-      // 구조화 출력: 존재 시 turn-manager가 tool_choice로 강제 + 검증 통과 시 조기 종료.
+      // 구조화 출력: 존재 시 turn-manager가 submit_structured_response로 강제 + 검증 통과 시 조기 종료.
       structuredToolName: responseSchema ? STRUCTURED_TOOL_NAME : undefined,
+      // 최종턴 전환 모드(AGENT-API-5): 미지정 시 turn-manager 기본값 'final_turn'(도구 선사용 후 구조화).
+      // 'immediate'는 turn 0부터 강제(단발 변환 하위호환).
+      structuredMode: opts.structuredMode,
     },
   }
 
