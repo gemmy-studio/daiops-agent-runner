@@ -2,6 +2,14 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.5.15] — 2026-07-05
+
+### Changed
+- **구조화 출력을 "최종턴만 강제"로 확장 (AGENT-API-5)** — 기존(0.5.14)에는 `response_schema` 지정 시 `submit_structured_response`를 turn 0부터 `tool_choice`로 강제해, 도구를 먼저 쓴 뒤 구조화하는 워크플로우(검색→종합 등)가 불가능했고(단발 변환만) thinking도 turn 0부터 꺼졌다. 이제 `structuredMode`(기본 `final_turn`)에서 open phase 동안 도구를 자유롭게 사용하고(thinking 활성) 모델이 자연 종료(`end_turn`)하면 그때 1회만 `tool_choice`를 강제해 스키마 제출을 받는다. `immediate` 모드는 turn 0부터 강제(단발 변환 하위호환). 검증 실패 재시도 캡(3)·thinking+forced tool_choice 400 회피(forcing turn만 thinking off)는 유지.
+
+### Added
+- **typed `structured_output` SSE 이벤트** — 검증 통과한 최종 payload를 원시 JSON을 `text`로 흘리지 않고 전용 `structured_output` 이벤트로 발신한다(cloud sse-relay가 공개 `structured` 이벤트로 매핑). `done.content`에는 순수 JSON을 유지해 sync 트리거의 `structured_result` 하위호환을 보존.
+
 ## [0.5.8] — 2026-06-09
 
 ### Added
