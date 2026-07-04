@@ -21,6 +21,8 @@
 import { runAnthropicTurnManager } from './turn-manager.js'
 import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, runBuiltinTool, isBuiltinTool } from './tools/index.js'
 import { isMcpToolName } from './mcp-client.js'
+import { buildStructuredTool, STRUCTURED_TOOL_NAME } from './tools/submit-structured.js'
+import { validateAgainstSchema } from './tools/validate-schema.js'
 
 /**
  * @typedef {Object} TextDeltaEvent
@@ -172,7 +174,14 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
   const allowedSet = new Set(Array.isArray(opts.allowedTools) ? opts.allowedTools : BUILTIN_TOOL_NAMES)
   const builtinSubset = BUILTIN_TOOLS.filter((t) => allowedSet.has(t.name))
   const userTools = Array.isArray(opts.tools) ? opts.tools : []
-  const tools = mergeUnique(builtinSubset, userTools)
+  let tools = mergeUnique(builtinSubset, userTools)
+
+  // 구조화 출력(AGENT-API-2): responseSchema가 있으면 submit_structured_response 가상 도구를 추가하고
+  // turn-manager가 tool_choice로 강제한다. 검증은 아래 runTool 분기에서 수행.
+  const responseSchema = opts.responseSchema && typeof opts.responseSchema === 'object' ? opts.responseSchema : null
+  if (responseSchema) {
+    tools = mergeUnique(tools, [buildStructuredTool(responseSchema)])
+  }
 
   // web server tool (5.4): allowedTools에 WebSearch/WebFetch가 있으면 Anthropic server tool로 등록.
   // agent-runner는 anthropic 단일이라 'server' 고정 (ANTHROPIC_CAPS.webTools와 정합). WebSearch/WebFetch는
@@ -184,6 +193,28 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
 
   // runTool: 빌트인은 자체 실행, MCP는 turn-manager가 routing(자기 registry에서 처리).
   const runTool = async (name, input, runCtx) => {
+    // 구조화 출력(AGENT-API-2): submit_structured_response는 스키마 검증 후 결과를 JSON 문자열로 반환.
+    // 통과 시 turn-manager가 이 tool_result를 최종 응답으로 삼아 조기 종료하고, 실패 시 is_error로
+    // 돌려주면 멀티턴 루프가 자기수정 재시도한다(forced tool_choice 유지).
+    if (name === STRUCTURED_TOOL_NAME) {
+      if (!responseSchema) {
+        return { content: 'submit_structured_response: response_schema가 설정되지 않았습니다.', is_error: true }
+      }
+      const { ok, errors } = validateAgainstSchema(responseSchema, input)
+      if (!ok) {
+        return {
+          content: `스키마 검증 실패 — 아래 항목을 고쳐 다시 제출하세요:\n${errors.join('\n')}`,
+          is_error: true,
+        }
+      }
+      let json = ''
+      try {
+        json = JSON.stringify(input)
+      } catch {
+        return { content: 'submit_structured_response: 결과를 JSON으로 직렬화할 수 없습니다.', is_error: true }
+      }
+      return { content: json }
+    }
     // request_secret(Phase B): handler가 주입한 onRequestSecret 콜백으로 위임 — 결재 대기 + env 주입.
     // 값(평문)은 LLM에 노출되지 않고, 결과는 "$KEY 사용 가능" 핸들 텍스트만 반환된다.
     if (name === 'request_secret') {
@@ -229,6 +260,8 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
       cacheControl: opts.cacheControl,
       mcpServers: opts.mcpServers,
       webTools,
+      // 구조화 출력: 존재 시 turn-manager가 tool_choice로 강제 + 검증 통과 시 조기 종료.
+      structuredToolName: responseSchema ? STRUCTURED_TOOL_NAME : undefined,
     },
   }
 
