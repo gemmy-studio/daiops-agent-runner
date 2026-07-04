@@ -1248,15 +1248,26 @@ export async function handleChat(rawParams, res, req) {
       // assistant 메시지: 텍스트와 도구 사용
       // 정책 평가는 canUseTool(T1)에서 사전 처리됨 — 여기까지 도달한 도구는 모두 allow된 것.
       if (message.type === 'assistant' && message.message?.content) {
+        // typed 구조화 신호(AGENT-API-5): 최종 구조화 결과는 원시 JSON을 text로 흘리지 않고 전용
+        // structured_output 이벤트로 발신한다(Option B — text=서술, structured=검증된 payload).
+        // finalContent(=done.content)에는 계속 누적해 sync 트리거의 JSON 파싱 하위호환을 유지한다.
+        const structuredPayload =
+          'structuredResult' in message ? message.structuredResult : undefined
         // partial 이 흘렀으면 cumulative 'text' 는 중복이므로 skip. snapshot 으로 찍어
         // 같은 turn 의 모든 text 블록을 일관되게 처리한 뒤, 다음 turn 을 위해 flag 를 reset.
         const skipBlockTextEmit = partialEmittedThisTurn
         for (const block of message.message.content) {
           if ('text' in block && block.text) {
-            finalContent += block.text
-            if (!skipBlockTextEmit) {
-              // partial 미수신 케이스(예: 비 streaming 경로)의 fallback.
-              emitSseEvent(sessionId, 'text', { content: block.text })
+            if (structuredPayload !== undefined) {
+              // 구조화 최종 결과가 정답이다. open phase에서 누적된 서술 텍스트를 덮어써 done.content를
+              // 순수 JSON으로 유지한다 — sync 트리거의 JSON.parse(finalContent) 하위호환(AGENT-API-5).
+              finalContent = block.text
+            } else {
+              finalContent += block.text
+              if (!skipBlockTextEmit) {
+                // partial 미수신 케이스(예: 비 streaming 경로)의 fallback.
+                emitSseEvent(sessionId, 'text', { content: block.text })
+              }
             }
           } else if ('name' in block) {
             const toolName = String(block.name ?? '')
@@ -1317,6 +1328,11 @@ export async function handleChat(rawParams, res, req) {
             })
             startToolProgress(myToolIndex)
           }
+        }
+        // typed 구조화 신호 발신 — 검증 통과한 최종 payload를 전용 이벤트로 1회. cloud sdk-event-mapper가
+        // 이를 받아 공개 SSE structured 이벤트로 매핑한다(AGENT-API-5 T4).
+        if (structuredPayload !== undefined) {
+          emitSseEvent(sessionId, 'structured_output', { result: structuredPayload })
         }
         if (forceTerminate) break
         // 다음 turn 의 partial 추적을 위해 reset. (text_delta 가 또 흐르면 다시 true.)

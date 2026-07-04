@@ -65,6 +65,15 @@ const PRUNE_MIN_CHARS = 200
 /** 이미 프루닝된 결과를 식별하는 마커(재프루닝 무한 방지 = 멱등). */
 const PRUNED_MARKER = '…[이전 도구 결과 생략]'
 
+// ── 구조화 출력 최종턴 전환 (AGENT-API-5) ──────────────────────────────────
+/**
+ * final_turn 모드에서 open phase(도구 자유 사용)가 자연 종료(end_turn)한 뒤, 모델에 구조화 제출을
+ * 지시하는 user 메시지. 이 메시지 다음 turn은 tool_choice로 submit_structured_response를 강제한다.
+ */
+const STRUCTURED_FINALIZE_PROMPT =
+  '이제 지금까지의 결과를 submit_structured_response 도구로 제출하세요. ' +
+  '요구된 JSON 스키마에 정확히 부합하도록 호출해야 하며, 자유 텍스트로 답하지 마세요.'
+
 /** tool_result.content(string | [{type:'text',text}])를 평문으로. */
 function toolResultText(content) {
   if (typeof content === 'string') return content
@@ -220,6 +229,8 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
  * @property {number} [options.topP]
  * @property {number} [options.topK]
  * @property {Array<{name:string, url:string, transport?:'http', headers?:Record<string,string>}>} [options.mcpServers] — 자동 registry + routing wrapper
+ * @property {string} [options.structuredToolName] — 설정 시 이 도구로 구조화 최종 응답을 강제·검증(AGENT-API-2/5)
+ * @property {'final_turn'|'immediate'} [options.structuredMode] — 구조화 강제 시점. 'final_turn'(기본)=도구 선사용 후 end_turn에서만 강제, 'immediate'=turn 0부터 강제(단발 변환)
  *
  * @typedef {{ behavior: 'allow', updatedInput?: unknown } | { behavior: 'deny', message?: string }} CanUseToolResult
  *
@@ -898,11 +909,18 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   // maxTokens 미지정 시 buildAnthropicRequest가 모델 ID로 자동 산출 (3.2 정규화).
   const maxTokens = input.options.maxTokens
 
-  // 구조화 출력(AGENT-API-2): 설정 시 해당 도구를 tool_choice로 강제하고, 검증 통과 시 조기 종료.
-  // 검증 실패는 tool_result(is_error)로 돌려 자기수정 재시도하되 STRUCTURED_MAX_RETRIES로 캡.
+  // 구조화 출력(AGENT-API-2/5): 설정 시 submit_structured_response로 최종 응답을 강제·검증한다.
+  //  - structuredMode 'final_turn'(기본): open phase에서 도구를 자유롭게 쓰다가(thinking 활성) 모델이
+  //    자연 종료(end_turn)하면 그때만 tool_choice를 1회 강제한다 → 도구 선사용 후 구조화가 가능.
+  //  - structuredMode 'immediate': turn 0부터 강제(단발 변환 — 하위호환).
+  //  검증 실패는 tool_result(is_error)로 돌려 자기수정 재시도하되 STRUCTURED_MAX_RETRIES로 캡.
   const structuredToolName = input.options.structuredToolName
+  const structuredMode = input.options.structuredMode === 'immediate' ? 'immediate' : 'final_turn'
   const STRUCTURED_MAX_RETRIES = 3
   let structuredRetries = 0
+  // forcing phase 진입 여부. immediate면 처음부터, final_turn이면 end_turn 감지 후 전환한다.
+  // runTurnRequest가 이 값을 읽어 tool_choice 강제 여부를 매 turn 결정한다(closure 캡처).
+  let structuredForcing = Boolean(structuredToolName) && structuredMode === 'immediate'
 
   // ── MCP 서버 자동 wiring (3.3) ────────────────────────────────────────
   // input.options.mcpServers가 있으면 registry 생성 → tools 머지 + runTool routing wrapper.
@@ -950,7 +968,9 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       topP: input.options.topP,
       topK: input.options.topK,
       webTools: input.options.webTools,
-      toolChoice: structuredToolName ? { type: 'tool', name: structuredToolName } : undefined,
+      // final_turn 모드는 open phase에서 강제하지 않아(thinking 활성·도구 자유) 도구 선사용을 허용하고,
+      // end_turn 감지 후 forcing phase에서만 tool_choice를 강제한다(AGENT-API-5).
+      toolChoice: structuredForcing ? { type: 'tool', name: structuredToolName } : undefined,
     })
     // 요청 전용 AbortController — 부모 signal(세션 abort)을 링크하되, stale watchdog이
     // *이 요청만* 끊을 수 있게 분리한다(부모를 직접 abort하면 세션 전체가 죽는다).
@@ -1045,6 +1065,26 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
 
     const stop = assistantTurn.stop_reason
     if (stop !== 'tool_use') {
+      // 최종턴 전환(AGENT-API-5): final_turn 모드에서 도구 자유 사용 후 자연 종료(성공 subtype)가 나오면,
+      // 방금 답변을 history에 넣고 구조화 제출을 지시한 뒤 forcing phase로 1회 전환한다. max_tokens/
+      // context_overflow(비-success)는 절단이므로 전환하지 않고 그대로 error로 surface한다.
+      // (open phase는 thinking 활성 + 도구 자유. forcing turn만 tool_choice 강제 → thinking 자동 off.)
+      if (structuredToolName && !structuredForcing && stopReasonToResultSubtype(stop) === 'success') {
+        structuredForcing = true
+        // 빈 content(예: refusal)면 placeholder로 대체 — 빈 assistant content는 API가 거부하고,
+        // 연속 user 메시지가 되면 role 교대 위반이 된다.
+        messages.push({
+          role: 'assistant',
+          content: assistantTurn.content?.length ? assistantTurn.content : [{ type: 'text', text: '(완료)' }],
+        })
+        messages.push({ role: 'user', content: STRUCTURED_FINALIZE_PROMPT })
+        turn++
+        if (turn >= maxTurns) {
+          yield { type: 'result', subtype: 'error_max_turns' }
+          return
+        }
+        continue
+      }
       yield { type: 'result', subtype: stopReasonToResultSubtype(stop) }
       return
     }
@@ -1133,9 +1173,16 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       if (structuredUse) {
         const structuredResult = toolResults.find((r) => r.tool_use_id === structuredUse.id)
         if (structuredResult && !structuredResult.is_error) {
+          const jsonText = String(structuredResult.content ?? '')
+          // typed 신호(AGENT-API-5): 검증 통과한 최종 JSON을 파싱해 message에 실어 보낸다. handler가
+          // 이를 structured_output SSE로 발신하고 원시 JSON을 text로는 노출하지 않는다(Option B).
+          // 파싱 실패 시 structuredResult 필드를 생략 → handler가 기존처럼 text로 폴백한다.
+          let parsed
+          try { parsed = JSON.parse(jsonText) } catch { parsed = undefined }
           yield {
             type: 'assistant',
-            message: { content: [{ type: 'text', text: String(structuredResult.content ?? '') }] },
+            message: { content: [{ type: 'text', text: jsonText }] },
+            ...(parsed !== undefined ? { structuredResult: parsed } : {}),
           }
           yield { type: 'result', subtype: 'success' }
           return

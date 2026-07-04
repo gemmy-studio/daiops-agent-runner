@@ -13,11 +13,13 @@
  *
  * request-secret.js의 "input_schema 도구 + 전용 runTool 분기 + in-loop resolve" 패턴을 그대로 차용.
  *
- * ⚠️ v1 한계(단발 변환): tool_choice로 이 도구를 turn 0부터 강제하므로, 모델은 다른 도구
- * (Read/Bash/MCP wiki_read 등)를 먼저 호출한 뒤 구조화할 수 없다. 즉 "제공된 입력을 스키마로
- * 변환/분류/추출"은 되지만 "도구로 자료를 수집한 뒤 구조화"는 안 된다. 도구 선사용이 필요하면
- * response_schema 없이 실행해 텍스트를 받은 뒤 별도 호출로 구조화하거나, 후속에서 "최종 턴에만
- * 강제" 패턴으로 확장한다. (강제를 유지하는 이유: 결정론 + 최종 출력이 순수 JSON이라 파싱 안전.)
+ * 강제 시점(structuredMode, AGENT-API-5):
+ *  - 'final_turn'(기본): open phase에서 다른 도구(Read/Bash/MCP wiki_read 등)를 자유롭게 쓰다가
+ *    모델이 자연 종료(end_turn)하면 그때 1회 tool_choice로 이 도구를 강제한다 → "도구로 자료를
+ *    수집한 뒤 구조화"가 가능. open phase에는 thinking도 활성이며, forcing turn에서만 thinking이
+ *    자동 비활성화된다(thinking+forced tool_choice 400 회피).
+ *  - 'immediate': turn 0부터 강제(단발 변환 — 제공된 입력을 스키마로 변환/분류/추출). 하위호환용.
+ *  두 모드 모두 최종 출력이 순수 JSON이라 파싱이 결정론적으로 안전하다.
  */
 
 export const STRUCTURED_TOOL_NAME = 'submit_structured_response'
