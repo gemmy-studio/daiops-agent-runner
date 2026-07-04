@@ -802,8 +802,15 @@ export function buildAnthropicRequest(args) {
   if (args.webTools?.fetch === 'server') tools.push(WEB_FETCH_SERVER_TOOL)
   if (tools.length > 0) body.tools = tools
 
+  // ── 구조화 출력(AGENT-API-2): 특정 도구 강제 호출 ───────────────────
+  // toolChoice가 있으면 해당 도구를 반드시 호출하도록 강제(response_schema 구조화 출력).
+  if (args.toolChoice) body.tool_choice = args.toolChoice
+
   // ── adaptive thinking 자동 wiring ───────────────────────────────────
-  const thinkingCfg = buildThinkingOptions(args.model, args.thinking)
+  // ★ 강제 tool_choice(type:'tool'/'any')와 thinking은 Anthropic에서 공존 불가 — thinking이 켜진 채
+  //   강제 tool_choice를 보내면 400("Thinking may not be enabled when tool_choice forces tool use").
+  //   구조화 출력은 tool_choice를 강제하므로, toolChoice가 설정되면 thinking을 끈다.
+  const thinkingCfg = body.tool_choice ? null : buildThinkingOptions(args.model, args.thinking)
   if (thinkingCfg) {
     body.thinking = thinkingCfg.thinking
     body.output_config = thinkingCfg.output_config
@@ -891,6 +898,12 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   // maxTokens 미지정 시 buildAnthropicRequest가 모델 ID로 자동 산출 (3.2 정규화).
   const maxTokens = input.options.maxTokens
 
+  // 구조화 출력(AGENT-API-2): 설정 시 해당 도구를 tool_choice로 강제하고, 검증 통과 시 조기 종료.
+  // 검증 실패는 tool_result(is_error)로 돌려 자기수정 재시도하되 STRUCTURED_MAX_RETRIES로 캡.
+  const structuredToolName = input.options.structuredToolName
+  const STRUCTURED_MAX_RETRIES = 3
+  let structuredRetries = 0
+
   // ── MCP 서버 자동 wiring (3.3) ────────────────────────────────────────
   // input.options.mcpServers가 있으면 registry 생성 → tools 머지 + runTool routing wrapper.
   // ctx.mcpRegistry가 주입돼 있으면 그것을 우선 사용 (테스트/외부 관리 케이스).
@@ -937,6 +950,7 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       topP: input.options.topP,
       topK: input.options.topK,
       webTools: input.options.webTools,
+      toolChoice: structuredToolName ? { type: 'tool', name: structuredToolName } : undefined,
     })
     // 요청 전용 AbortController — 부모 signal(세션 abort)을 링크하되, stale watchdog이
     // *이 요청만* 끊을 수 있게 분리한다(부모를 직접 abort하면 세션 전체가 죽는다).
@@ -1109,6 +1123,38 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       // stop_reason=tool_use인데 tool_use 블록이 없는 비정상 케이스 — 종료.
       yield { type: 'result', subtype: 'success' }
       return
+    }
+
+    // ── 구조화 출력(AGENT-API-2): submit_structured_response 결과 처리 ──
+    // 검증 통과 → JSON 문자열을 최종 응답 텍스트로 yield하고 조기 종료(forced tool_choice라 계속 루프하면 무한).
+    // 검증 실패 → 캡 이내면 tool_result(is_error)를 아래 공통 경로로 push해 다음 turn 자기수정 재시도.
+    if (structuredToolName) {
+      const structuredUse = toolUses.find((b) => b.name === structuredToolName)
+      if (structuredUse) {
+        const structuredResult = toolResults.find((r) => r.tool_use_id === structuredUse.id)
+        if (structuredResult && !structuredResult.is_error) {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: String(structuredResult.content ?? '') }] },
+          }
+          yield { type: 'result', subtype: 'success' }
+          return
+        }
+        structuredRetries++
+        if (structuredRetries >= STRUCTURED_MAX_RETRIES) {
+          // 캡 초과 — 마지막 검증 오류를 텍스트로 surface 후 종료(무한 재시도 방지).
+          yield {
+            type: 'assistant',
+            message: {
+              content: [
+                { type: 'text', text: String(structuredResult?.content ?? 'structured output validation failed') },
+              ],
+            },
+          }
+          yield { type: 'result', subtype: 'success' }
+          return
+        }
+      }
     }
 
     // 다음 turn에 push할 assistant + user(tool_result) 메시지

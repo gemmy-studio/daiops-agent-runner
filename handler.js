@@ -782,6 +782,11 @@ export async function handleChat(rawParams, res, req) {
     // cloud claude-sdk-loop.FETCH_TIMEOUT_MS와 짝. 결재 대기 10분 + 여유 = 12.5분.
     timeout_seconds: typeof rawParams.timeout_seconds === 'number' ? rawParams.timeout_seconds : 750,
     context_dir: rawParams.context_dir ? String(rawParams.context_dir) : undefined,
+    /** 구조화 출력(AGENT-API-2): JSON Schema. 존재 시 submit_structured_response로 강제+검증+재시도. */
+    response_schema:
+      rawParams.response_schema && typeof rawParams.response_schema === 'object'
+        ? rawParams.response_schema
+        : undefined,
     /** PreToolUse 평가용 정책 (cloud-side에서 직렬화하여 전달) */
     policy: rawParams.policy && typeof rawParams.policy === 'object' ? rawParams.policy : DEFAULT_POLICY,
     /** 사용자가 명시적으로 plan을 요구한 경우만 true. 메시지 텍스트 분류는 더 이상 사용하지 않음. */
@@ -1142,6 +1147,9 @@ export async function handleChat(rawParams, res, req) {
       // request_secret(Phase B) 도구 노출 — LLM이 필요한 환경변수를 사용자에게 요청할 수 있게.
       // llm-wrapper가 options.tools를 LLM 요청 tools[]에 머지하고, runTool은 onRequestSecret/onRemember로 라우팅.
       tools: [REQUEST_SECRET_TOOL, REMEMBER_TOOL],
+      // 구조화 출력(AGENT-API-2): 존재 시 llm-wrapper가 submit_structured_response 도구를 추가하고
+      // turn-manager가 tool_choice로 강제 + 검증 통과 시 조기 종료한다.
+      responseSchema: params.response_schema,
     }
 
     // 자체 turn 카운터: assistant 메시지 수신마다 +1. budget 도달 시 silent 자동 연장
