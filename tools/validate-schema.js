@@ -10,30 +10,64 @@
  *  - properties (object 재귀), required (누락 검사)
  *  - items (array 원소 재귀 — 단일 스키마), enum, const
  *  - additionalProperties: false (properties 밖 키 거부)
- *  - anyOf (하나라도 통과하면 OK)
+ *  - anyOf (하나라도 통과) / allOf (모두 통과) / oneOf (정확히 하나 통과)
+ *  - $ref (#/$defs/… · #/definitions/… JSON 포인터를 root에서 해석) — codegen(zod/pydantic) 스키마 대응
  * 미지원 키워드(minLength/maximum/pattern 등)는 무시 — 통과로 간주.
  */
+
+/** $ref 사이클/과심층 방어 상한. 초과 시 검증 포기(통과) — 그로스 위반만 거른다는 설계 철학 유지. */
+const MAX_VALIDATION_DEPTH = 100
 
 /**
  * @param {unknown} schema
  * @param {unknown} value
  * @param {string} [path]
+ * @param {any} [root] - $ref 해석 기준(최초 스키마). 재귀에서 관통.
+ * @param {number} [depth] - 사이클 방어용 재귀 깊이.
  * @returns {string[]} 위반 메시지 목록 (빈 배열이면 통과)
  */
-export function collectSchemaErrors(schema, value, path = '$') {
+export function collectSchemaErrors(schema, value, path = '$', root = undefined, depth = 0) {
   if (!schema || typeof schema !== 'object') return []
+  if (root === undefined) root = schema
+  // $ref 사이클(자기참조 스키마 등)에서 값이 소비되지 않으면 무한 재귀 → 상한 초과 시 검증 포기.
+  if (depth > MAX_VALIDATION_DEPTH) return []
   /** @type {Record<string, any>} */
   const s = schema
 
+  // $ref — root의 $defs/definitions 등을 JSON 포인터로 해석해 재귀. draft-07처럼 $ref 형제 키워드는 무시.
+  if (typeof s.$ref === 'string') {
+    const resolved = resolveRef(root, s.$ref)
+    // 해석 불가한 ref는 검증 불가 → 통과(그로스 위반만 목표, false negative 방지).
+    if (!resolved || typeof resolved !== 'object') return []
+    return collectSchemaErrors(resolved, value, path, root, depth + 1)
+  }
+
   // anyOf — 하나라도 통과하면 OK.
   if (Array.isArray(s.anyOf)) {
-    const anyOk = s.anyOf.some((sub) => collectSchemaErrors(sub, value, path).length === 0)
+    const anyOk = s.anyOf.some((sub) => collectSchemaErrors(sub, value, path, root, depth + 1).length === 0)
     if (!anyOk) return [`${path}: does not match any of the allowed schemas`]
+    return []
+  }
+
+  // oneOf — 정확히 하나만 통과해야 OK.
+  if (Array.isArray(s.oneOf)) {
+    const passCount = s.oneOf.filter(
+      (sub) => collectSchemaErrors(sub, value, path, root, depth + 1).length === 0,
+    ).length
+    if (passCount !== 1) return [`${path}: must match exactly one schema (matched ${passCount})`]
     return []
   }
 
   /** @type {string[]} */
   const errors = []
+
+  // allOf — 모든 하위 스키마를 만족해야 함. 실패 시 형제 검사는 무의미하니 조기 반환.
+  if (Array.isArray(s.allOf)) {
+    for (const sub of s.allOf) {
+      errors.push(...collectSchemaErrors(sub, value, path, root, depth + 1))
+    }
+    if (errors.length) return errors
+  }
 
   // const
   if ('const' in s && !deepEqual(value, s.const)) {
@@ -65,7 +99,7 @@ export function collectSchemaErrors(schema, value, path = '$') {
     }
     for (const [key, sub] of Object.entries(props)) {
       if (key in value) {
-        errors.push(...collectSchemaErrors(sub, value[key], `${path}.${key}`))
+        errors.push(...collectSchemaErrors(sub, value[key], `${path}.${key}`, root, depth + 1))
       }
     }
     if (s.additionalProperties === false) {
@@ -78,11 +112,32 @@ export function collectSchemaErrors(schema, value, path = '$') {
   // array: items (단일 스키마만 지원)
   if (Array.isArray(value) && s.items && typeof s.items === 'object' && !Array.isArray(s.items)) {
     value.forEach((el, i) => {
-      errors.push(...collectSchemaErrors(s.items, el, `${path}[${i}]`))
+      errors.push(...collectSchemaErrors(s.items, el, `${path}[${i}]`, root, depth + 1))
     })
   }
 
   return errors
+}
+
+/**
+ * JSON 포인터('#/$defs/Foo' 등)를 root 스키마에서 해석. 해석 실패 시 undefined.
+ * @param {any} root
+ * @param {string} ref
+ */
+function resolveRef(root, ref) {
+  if (typeof ref !== 'string' || ref[0] !== '#') return undefined
+  const frag = ref.slice(1)
+  if (frag === '' || frag === '/') return root
+  const parts = frag
+    .split('/')
+    .slice(1)
+    .map((p) => p.replace(/~1/g, '/').replace(/~0/g, '~'))
+  let node = root
+  for (const part of parts) {
+    if (node && typeof node === 'object' && part in node) node = node[part]
+    else return undefined
+  }
+  return node
 }
 
 /** @returns {{ ok: boolean, errors: string[] }} */

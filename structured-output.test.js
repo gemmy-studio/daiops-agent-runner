@@ -158,6 +158,67 @@ describe('validateAgainstSchema', () => {
     assert.equal(validateAgainstSchema(s, { tags: ['a', 'b'] }).ok, true)
     assert.equal(validateAgainstSchema(s, { tags: ['a', 1] }).ok, false)
   })
+
+  it('$ref($defs) 해석 — codegen 스키마 검증(무력화 회귀)', () => {
+    const s = {
+      type: 'object',
+      properties: { user: { $ref: '#/$defs/User' } },
+      required: ['user'],
+      $defs: {
+        User: {
+          type: 'object',
+          properties: { name: { type: 'string' }, age: { type: 'integer' } },
+          required: ['name'],
+        },
+      },
+    }
+    assert.equal(validateAgainstSchema(s, { user: { name: 'kim', age: 3 } }).ok, true)
+    // $ref가 무시(통과)되던 과거 버그면 아래가 true로 잘못 통과했다.
+    assert.equal(validateAgainstSchema(s, { user: { age: 3 } }).ok, false) // name 누락
+    assert.equal(validateAgainstSchema(s, { user: { name: 1 } }).ok, false) // name 타입 불일치
+  })
+
+  it('$ref(definitions) 및 해석 불가 ref는 통과(false negative 방지)', () => {
+    const s = { type: 'object', properties: { x: { $ref: '#/definitions/X' } }, definitions: { X: { type: 'number' } } }
+    assert.equal(validateAgainstSchema(s, { x: 1 }).ok, true)
+    assert.equal(validateAgainstSchema(s, { x: 'no' }).ok, false)
+    // 존재하지 않는 ref → 검증 불가 → 통과.
+    const bad = { type: 'object', properties: { y: { $ref: '#/nope/Z' } } }
+    assert.equal(validateAgainstSchema(bad, { y: '아무거나' }).ok, true)
+  })
+
+  it('allOf — 모든 하위 스키마 만족해야 통과', () => {
+    const s = {
+      allOf: [
+        { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
+        { type: 'object', properties: { b: { type: 'number' } }, required: ['b'] },
+      ],
+    }
+    assert.equal(validateAgainstSchema(s, { a: 'x', b: 1 }).ok, true)
+    assert.equal(validateAgainstSchema(s, { a: 'x' }).ok, false) // b 누락
+  })
+
+  it('oneOf — 정확히 하나만 통과해야 OK', () => {
+    const s = { oneOf: [{ type: 'string' }, { type: 'number' }] }
+    assert.equal(validateAgainstSchema(s, 'hi').ok, true)
+    assert.equal(validateAgainstSchema(s, 1).ok, true)
+    assert.equal(validateAgainstSchema(s, true).ok, false) // 아무것도 매칭 안 함
+    // 둘 다 매칭되면(정확히 하나 아님) 실패.
+    const ambiguous = { oneOf: [{ type: 'integer' }, { type: 'number' }] }
+    assert.equal(validateAgainstSchema(ambiguous, 3).ok, false)
+  })
+
+  it('$ref 자기참조(재귀 스키마)에서도 스택 오버플로 없이 종료', () => {
+    const s = {
+      type: 'object',
+      properties: { next: { $ref: '#/$defs/Node' } },
+      $defs: { Node: { type: 'object', properties: { next: { $ref: '#/$defs/Node' } } } },
+    }
+    // 유한 깊이 값은 정상 검증.
+    assert.equal(validateAgainstSchema(s, { next: { next: {} } }).ok, true)
+    // 사이클 스키마 자체는 무한 재귀 위험 — 예외 없이 종료해야 한다.
+    assert.doesNotThrow(() => validateAgainstSchema(s, { next: { next: { next: {} } } }))
+  })
 })
 
 // ── buildAnthropicRequest tool_choice ──────────────────────────────────
