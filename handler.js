@@ -803,6 +803,13 @@ export async function handleChat(rawParams, res, req) {
     approval_timeout_seconds: typeof rawParams.approval_timeout_seconds === 'number' && rawParams.approval_timeout_seconds > 0
       ? Math.floor(rawParams.approval_timeout_seconds)
       : Math.floor(DEFAULT_APPROVAL_TIMEOUT_MS / 1000),
+    /**
+     * 결재(plan_request)를 실제로 surface·수신할 수 있는 경로인지 (cloud가 전달, ADR 21 후속).
+     * evaluatePolicy의 hasUiChannel 인자로 쓰인다 — 특히 외향 발신 도구의 "pause vs askFallback" 분기.
+     * 미지정(구버전 cloud)이면 true로 폴백해 기존 하드코딩 동작 보존(하위호환). false는 헤드리스
+     * 경로(cron·콜백 없는 트리거·MCP 블로킹 챗)가 명시할 때만 — 결재자 없는 pause→timeout-deny 낭비 제거.
+     */
+    has_approval_channel: rawParams.has_approval_channel !== false,
   }
 
   // SSE 헤더
@@ -932,7 +939,7 @@ export async function handleChat(rawParams, res, req) {
         return { behavior: 'deny', message: repeatBlockReason }
       }
 
-      const decision = evaluatePolicy(params.policy, toolName, input, true)
+      const decision = evaluatePolicy(params.policy, toolName, input, params.has_approval_channel)
 
       if (decision.kind === 'allow') {
         return { behavior: 'allow', updatedInput: applyCacheRedirectCorrection(toolName, input) }
