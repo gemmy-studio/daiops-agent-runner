@@ -2,7 +2,10 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
-## [0.5.15] — 2026-07-05
+## [0.5.16] — 2026-07-05
+
+### Fixed
+- **구조화 출력 스키마 검증기가 `$ref`/`allOf`/`oneOf`를 무시하던 갭 (AGENT-API-2)** — 자체 JSON Schema 검증기(`tools/validate-schema.js`)가 `$ref`/`$defs`/`definitions`/`allOf`/`oneOf`를 인식하지 못해 무시(=통과)했다. zod-to-json-schema·pydantic 등 codegen 스키마는 대부분 `$ref`로 하위 타입을 참조하므로, 그런 `response_schema`에선 어떤 값이든 통과되고 재시도 메커니즘까지 무력화됐다(Anthropic은 forced tool_use input을 하드 검증하지 않아 이 검증기가 유일한 게이트). 이제 `$ref`는 root의 `$defs`/`definitions`를 JSON 포인터로 해석해 재귀하고(해석 불가·자기참조 사이클은 `MAX_VALIDATION_DEPTH`로 방어, false negative 방지 위해 통과), `allOf`(모두 통과)/`oneOf`(정확히 하나)를 지원한다. 의존성 0 유지. schemaVersion 불변(§2 계약 무변경). cloud는 비-object 루트 `response_schema`를 진입에서 거부(daiops #23)해 짝을 이룬다.
 
 ### Changed
 - **구조화 출력을 "최종턴만 강제"로 확장 (AGENT-API-5)** — 기존(0.5.14)에는 `response_schema` 지정 시 `submit_structured_response`를 turn 0부터 `tool_choice`로 강제해, 도구를 먼저 쓴 뒤 구조화하는 워크플로우(검색→종합 등)가 불가능했고(단발 변환만) thinking도 turn 0부터 꺼졌다. 이제 `structuredMode`(기본 `final_turn`)에서 open phase 동안 도구를 자유롭게 사용하고(thinking 활성) 모델이 자연 종료(`end_turn`)하면 그때 1회만 `tool_choice`를 강제해 스키마 제출을 받는다. `immediate` 모드는 turn 0부터 강제(단발 변환 하위호환). 검증 실패 재시도 캡(3)·thinking+forced tool_choice 400 회피(forcing turn만 thinking off)는 유지.
