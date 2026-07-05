@@ -670,6 +670,32 @@ export function resolveApproval(approvalId, decision, resolvedBy) {
 }
 
 /**
+ * POST /v1/cancel/:sessionId 에서 호출 — 단일 세션 즉시 취소.
+ * 순서가 중요: (1) pending approval을 deny로 강제 해소해 canUseTool await를 풀고,
+ * (2) abortController.abort()로 진행 중 LLM fetch/SDK 루프를 중단시킨다.
+ * SDK 루프는 다음 스텝의 `if (signal.aborted) break`(handleChat 내부)로 종료되며, 그 직후
+ * 자연스럽게 'done'이 emit되고 finally가 세션을 정리한다(여기서 done/삭제를 하지 않아 이중 정리 회피).
+ * 'aborted' 이벤트는 EventBuffer에 누적돼 cloud가 resume(from_seq)로도 취소 사실을 받는다.
+ *
+ * @param {string} sessionId
+ * @param {string} [reason]
+ * @returns {boolean} 세션이 존재해 취소를 트리거했으면 true, 없으면 false(404 대상)
+ */
+export function cancelSession(sessionId, reason = 'user_abort') {
+  const session = activeSessions.get(sessionId)
+  if (!session) return false
+  const resolvedIds = session.approvalManager?.resolveAllPending?.(`Aborted: ${reason}`) ?? []
+  for (const id of resolvedIds) approvalRouting.delete(id)
+  try {
+    session.abortController?.abort?.()
+  } catch {
+    /* best-effort */
+  }
+  emitSseEvent(sessionId, 'aborted', { reason, session_id: sessionId })
+  return true
+}
+
+/**
  * Resume 모드 — 진행 중 세션의 res를 swap하고 from_seq 이후 이벤트 replay.
  * 스트림을 새로 시작하지 않음. 진행 중 turn-manager가 emit하는 신규 이벤트는
  * 이미 등록된 emitSseEvent가 새 res로 흘려보냄. session done까지 res를 잡아둠.

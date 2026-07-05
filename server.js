@@ -12,7 +12,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { handleChat, resolveApproval, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
+import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -22,7 +22,7 @@ const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
  * §2 contract가 깨지는 변경 시에만 +1. agent-runner package version과 별개.
  * 메인 앱은 deploy 직후 /health로 본 값을 검증한다.
  */
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 /** package.json에서 자체 version 읽기 (/health 응답용) */
 const PACKAGE_VERSION = (() => {
@@ -132,6 +132,28 @@ const server = createServer(async (req, res) => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: 'Internal error' })
       }
+    }
+    return
+  }
+
+  // POST /v1/cancel/:sessionId — 진행 중 세션 즉시 취소 (cloud abort route에서 호출).
+  // 세션이 이미 종료돼 activeSessions에 없으면 404(= "취소할 것 없음", cloud는 성공으로 관대 처리).
+  if (req.method === 'POST' && url.pathname.startsWith('/v1/cancel/')) {
+    const sessionId = decodeURIComponent(url.pathname.slice('/v1/cancel/'.length))
+    if (!sessionId) {
+      sendJson(res, 400, { error: 'session id required' })
+      return
+    }
+    try {
+      const ok = cancelSession(sessionId)
+      if (!ok) {
+        sendJson(res, 404, { error: 'session not found', session_id: sessionId })
+        return
+      }
+      sendJson(res, 200, { ok: true, session_id: sessionId })
+    } catch (err) {
+      console.error('[agent-runner] /v1/cancel error', err instanceof Error ? err.stack || err.message : err)
+      sendJson(res, 500, { error: 'Internal error' })
     }
     return
   }

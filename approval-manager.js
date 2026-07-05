@@ -109,6 +109,28 @@ export class ApprovalManager {
   }
 
   /**
+   * 세션 취소 시 모든 pending을 deny로 강제 해소한다.
+   * canUseTool의 waitForDecision await가 즉시 deny로 풀려 SDK 루프가 다음 스텝의
+   * abort break 지점(handler.js)에 도달한다. abort() 단독으로는 waitForDecision Promise가
+   * 풀리지 않아 최대 timeout(10분)까지 pending으로 남는 갭을 메운다.
+   *
+   * @param {string} [feedback]
+   * @returns {string[]} 해소된 record id 목록 (approvalRouting 정리용)
+   */
+  resolveAllPending(feedback = 'Session cancelled by user') {
+    const ids = []
+    for (const [id, entry] of this.pending) {
+      clearTimeout(entry.timer)
+      entry.record.resolvedAtMs = Date.now()
+      entry.record.decision = { kind: 'deny', feedback }
+      this.pending.delete(id)
+      entry.resolve(entry.record.decision)
+      ids.push(id)
+    }
+    return ids
+  }
+
+  /**
    * 운영용 — 모든 pending id.
    *
    * @returns {string[]}

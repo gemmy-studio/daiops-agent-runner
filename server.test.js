@@ -19,6 +19,14 @@ import { ApprovalManager } from './approval-manager.js'
 
 const TEST_TOKEN = 'test-token-xxx'
 const manager = new ApprovalManager()
+// cancelSession을 격리 검증하기 위한 fake activeSessions (실 서버는 handler.js의 Map).
+const fakeActiveSessions = new Map()
+function fakeCancelSession(sessionId) {
+  const session = fakeActiveSessions.get(sessionId)
+  if (!session) return false
+  session.cancelled = true
+  return true
+}
 
 function parseBody(req) {
   return new Promise((resolve, reject) => {
@@ -46,6 +54,20 @@ const server = createServer(async (req, res) => {
   }
   if (!verifyAuth(req)) {
     sendJson(res, 401, { error: 'Unauthorized' })
+    return
+  }
+  if (req.method === 'POST' && url.pathname.startsWith('/v1/cancel/')) {
+    const sessionId = decodeURIComponent(url.pathname.slice('/v1/cancel/'.length))
+    if (!sessionId) {
+      sendJson(res, 400, { error: 'session id required' })
+      return
+    }
+    const ok = fakeCancelSession(sessionId)
+    if (!ok) {
+      sendJson(res, 404, { error: 'session not found', session_id: sessionId })
+      return
+    }
+    sendJson(res, 200, { ok: true, session_id: sessionId })
     return
   }
   if (req.method === 'POST' && url.pathname.startsWith('/v1/approval/')) {
@@ -154,4 +176,31 @@ test('allowlist_entry + feedback이 decision에 전달', async () => {
   const decision = await waiter
   assert.equal(decision?.kind, 'allow_always')
   assert.equal(decision?.allowlistEntry, 'rg')
+})
+
+// ── POST /v1/cancel/:sessionId 라우팅 ──
+async function postCancel(sessionId, token = TEST_TOKEN) {
+  const headers = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(`${baseUrl}/v1/cancel/${encodeURIComponent(sessionId)}`, { method: 'POST', headers })
+  return { status: res.status, json: await res.json() }
+}
+
+test('cancel: 미인증 → 401', async () => {
+  const r = await postCancel('sess-x', null)
+  assert.equal(r.status, 401)
+})
+
+test('cancel: 존재하는 세션 → 200 + cancelled 플래그', async () => {
+  fakeActiveSessions.set('sess-live', { cancelled: false })
+  const r = await postCancel('sess-live')
+  assert.equal(r.status, 200)
+  assert.equal(r.json.ok, true)
+  assert.equal(fakeActiveSessions.get('sess-live').cancelled, true)
+})
+
+test('cancel: 없는 세션 → 404 (취소할 것 없음)', async () => {
+  const r = await postCancel('sess-gone')
+  assert.equal(r.status, 404)
+  assert.equal(r.json.session_id, 'sess-gone')
 })

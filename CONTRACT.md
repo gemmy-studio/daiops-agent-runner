@@ -24,7 +24,9 @@ cloud가 `params.model`을 안 보낸 경우의 fallback. 모델 세대 교체 �
 
 ## 2. HTTP API contract
 
-agent-runner가 노출하는 3개 endpoint. 메인 앱은 이 형식에만 의존한다.
+agent-runner가 노출하는 endpoint. 메인 앱은 이 형식에만 의존한다.
+(`/health`, `/v1/chat`, `/v1/approval/{id}`, `/v1/secret/{id}`, `/v1/remember/{id}`, `/v1/cancel/{sessionId}`.
+secret/remember는 approval과 동일한 in-flight resolve 패턴이라 상세 생략.)
 
 ### 2-1. `GET /health` (인증 불필요)
 
@@ -33,7 +35,7 @@ agent-runner가 노출하는 3개 endpoint. 메인 앱은 이 형식에만 의�
 {
   "status": "ok",
   "version": "0.2.0",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "timestamp": 1717000000000
 }
 ```
@@ -63,6 +65,16 @@ Request:
 ```
 
 Response: `{ ok: true, approval_id }` (200) | `{ error, approval_id }` (409 — 이미 resolved).
+
+### 2-4. `POST /v1/cancel/{sessionId}` (Bearer auth)
+
+진행 중 세션을 즉시 취소한다. body 없음. 처리 순서: pending approval을 deny로 강제 해소 →
+`abortController.abort()` → 'aborted' SSE(EventBuffer 누적, resume replay 가능) → SDK 루프가
+다음 스텝의 abort break로 종료 후 자연스럽게 'done' emit.
+
+Response: `{ ok: true, session_id }` (200) | `{ error, session_id }` (404 — 세션이 이미 종료돼
+activeSessions에 없음 = "취소할 것 없음", cloud는 성공으로 관대 처리) | `{ error }` (400 — sessionId 누락).
+멱등: 이미 종료된 세션 재취소는 404.
 
 ## 3. 환경변수 contract
 
