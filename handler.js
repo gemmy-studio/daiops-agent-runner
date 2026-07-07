@@ -104,6 +104,20 @@ const REPEATED_TOOL_THRESHOLD = 10
 const SDK_HARD_MAX_TURNS = 300
 
 /**
+ * turn budget 도달 시 다음 행동 결정 (P1 — 호출자 명시 max_turns 하드캡).
+ * - turnCount < budget: 'continue' (아직 여유)
+ * - budget 도달 + 호출자가 max_turns 명시(maxTurnsHard): 'stop' (auto-extend 없이 정확히 그 턴에서 종료)
+ * - budget 도달 + 미명시 + 연장 여유: 'extend' (자율 작업이 조기 종료되지 않게)
+ * - budget 도달 + 연장 소진: 'stop'
+ * @returns {'continue'|'extend'|'stop'}
+ */
+export function decideTurnBudget({ turnCount, turnBudget, extensionsUsed, maxTurnsHard, maxAutoExtensions }) {
+  if (turnCount < turnBudget) return 'continue'
+  if (!maxTurnsHard && extensionsUsed < maxAutoExtensions) return 'extend'
+  return 'stop'
+}
+
+/**
  * SSE heartbeat 간격 (ms). 프록시/CDN idle timeout(일반적 60초)의 절반.
  * 결재 대기·도구 무응답 구간에서도 30초 안에 한 번씩 빈 comment를 push해
  * idle proxy timeout(SSE 무응답 종료)을 방지한다.
@@ -807,6 +821,15 @@ export async function handleChat(rawParams, res, req) {
     mcp_servers: rawParams.mcp_servers,
     // cloud claude-sdk-loop.FETCH_TIMEOUT_MS와 짝. 결재 대기 10분 + 여유 = 12.5분.
     timeout_seconds: typeof rawParams.timeout_seconds === 'number' ? rawParams.timeout_seconds : 750,
+    /**
+     * 응답 벽시계 예산(초) — 호출자가 명시할 때만 전송. 도달 시 우아하게 종료(abort)한다.
+     * timeout_seconds와 분리한 이유: timeout_seconds는 자율/스케줄 포함 모든 경로에 기본값(300/750)으로
+     * 늘 전송되므로, 그걸 abort에 배선하면 기존 자율 작업이 조기 종료되는 회귀가 난다. 이 필드는
+     * 미지정 시 undefined(=무제한, 기존 동작)이라 명시적 콜백-창 호출자에만 영향을 준다.
+     */
+    response_deadline_seconds: typeof rawParams.response_deadline_seconds === 'number' && rawParams.response_deadline_seconds > 0
+      ? Math.floor(rawParams.response_deadline_seconds)
+      : undefined,
     context_dir: rawParams.context_dir ? String(rawParams.context_dir) : undefined,
     /** 구조화 출력(AGENT-API-2): JSON Schema. 존재 시 submit_structured_response로 강제+검증+재시도. */
     response_schema:
@@ -825,6 +848,11 @@ export async function handleChat(rawParams, res, req) {
     max_turns: typeof rawParams.max_turns === 'number' && rawParams.max_turns > 0
       ? Math.floor(rawParams.max_turns)
       : 50,
+    /**
+     * 호출자가 max_turns를 명시했는지 — 명시 시 하드캡(auto-extend 안 함)으로 정확히 그 턴에서 멈춘다.
+     * 미지정(기본 50)이면 기존 auto-extend 유지(자율 작업이 너무 일찍 멈추지 않게).
+     */
+    max_turns_hard: typeof rawParams.max_turns === 'number' && rawParams.max_turns > 0,
     /** 결재 대기 timeout (초). 미지정 시 10분. cloud Vercel timeout 초과 대비 길게. */
     approval_timeout_seconds: typeof rawParams.approval_timeout_seconds === 'number' && rawParams.approval_timeout_seconds > 0
       ? Math.floor(rawParams.approval_timeout_seconds)
@@ -910,6 +938,23 @@ export async function handleChat(rawParams, res, req) {
     res,
     heartbeatStop: startHeartbeat(sessionId),
   })
+
+  // 응답 벽시계 예산(호출자 명시 시) — 도달하면 우아한 신호를 먼저 emit한 뒤 abort한다.
+  // SDK 루프는 다음 이터레이션에서 signal.aborted를 보고 break하고(정상 종료 UX), 결재 대기 중이면
+  // 그 await도 abort로 풀린다. finally에서 clearTimeout. 미지정이면 타이머 자체를 만들지 않음(기존 동작).
+  let responseDeadlineTimer
+  if (params.response_deadline_seconds) {
+    responseDeadlineTimer = setTimeout(() => {
+      if (abortController.signal.aborted) return
+      emitSseEvent(sessionId, 'error', {
+        code: 'response_deadline',
+        message: '응답 시간이 예산을 초과해 여기서 멈췄어요. 더 짧게 나눠 다시 요청하거나 예산을 늘려주세요',
+        recoverable: false,
+      })
+      abortController.abort()
+    }, params.response_deadline_seconds * 1000)
+    responseDeadlineTimer.unref?.()
+  }
 
   // 클라이언트 연결 끊김: SDK 루프는 유지 (결재 대기 도중 끊겨도 cloud resume으로 회복).
   // res만 clear해 emitSseEvent가 buffer-only 모드로 동작. abort는 새 chat 호출이 들어오거나
@@ -1254,27 +1299,35 @@ export async function handleChat(rawParams, res, req) {
       // MAX_AUTO_EXTENSIONS 초과 시 자연 종료 (error_max_turns 경로와 동일 UX). 사용자 결재 없음.
       if (message.type === 'assistant') {
         turnCount++
-        if (turnCount >= turnBudget) {
-          if (extensionsUsed < MAX_AUTO_EXTENSIONS) {
-            extensionsUsed++
-            turnBudget += AUTO_EXTEND_INCREMENT
-            // 관찰성용 이벤트 — cloud-side 핸들러 없어도 무해(EventBuffer에만 누적).
-            emitSseEvent(sessionId, 'auto_extended', {
-              turn_count: turnCount,
-              new_budget: turnBudget,
-              extensions_used: extensionsUsed,
-              max_extensions: MAX_AUTO_EXTENSIONS,
-            })
-          } else {
-            emitSseEvent(sessionId, 'error', {
-              code: 'turn_budget_exhausted',
-              message: '작업이 예상보다 길어져 여기서 일단 멈췄어요. 더 작은 단위로 나눠 다시 요청해주세요',
-              recoverable: false,
-            })
-            abortController.abort()
-            forceTerminate = true
-            break
-          }
+        const budgetDecision = decideTurnBudget({
+          turnCount,
+          turnBudget,
+          extensionsUsed,
+          maxTurnsHard: params.max_turns_hard,
+          maxAutoExtensions: MAX_AUTO_EXTENSIONS,
+        })
+        if (budgetDecision === 'extend') {
+          extensionsUsed++
+          turnBudget += AUTO_EXTEND_INCREMENT
+          // 관찰성용 이벤트 — cloud-side 핸들러 없어도 무해(EventBuffer에만 누적).
+          emitSseEvent(sessionId, 'auto_extended', {
+            turn_count: turnCount,
+            new_budget: turnBudget,
+            extensions_used: extensionsUsed,
+            max_extensions: MAX_AUTO_EXTENSIONS,
+          })
+        } else if (budgetDecision === 'stop') {
+          // 호출자 명시 하드캡(max_turns)과 자동연장 소진(turn_budget_exhausted)을 코드로 구분.
+          emitSseEvent(sessionId, 'error', {
+            code: params.max_turns_hard ? 'max_turns' : 'turn_budget_exhausted',
+            message: params.max_turns_hard
+              ? `요청한 ${params.max_turns}턴 상한에 도달해 종료했어요`
+              : '작업이 예상보다 길어져 여기서 일단 멈췄어요. 더 작은 단위로 나눠 다시 요청해주세요',
+            recoverable: false,
+          })
+          abortController.abort()
+          forceTerminate = true
+          break
         }
       }
 
@@ -1478,6 +1531,8 @@ export async function handleChat(rawParams, res, req) {
   } finally {
     // 진행 중이던 도구 timer 모두 정리 (정상 종료/abort 무관).
     stopAllToolProgress()
+    // 응답 벽시계 타이머 정리 (정상 종료 시 발화 방지).
+    if (responseDeadlineTimer) clearTimeout(responseDeadlineTimer)
     // 현재 res가 활성 세션에 등록된 것과 일치하면 정리.
     // T5 resume이 res를 swap했을 수 있으므로 swap된 res는 resume 핸들러가 직접 닫는다.
     const session = activeSessions.get(sessionId)
