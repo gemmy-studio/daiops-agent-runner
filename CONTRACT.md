@@ -88,6 +88,7 @@ agent-runner 시작 시 메인 앱(deployer)이 주입해야 하는 env:
 | `WORKSPACE_ID` | yes | x-workspace-id 헤더 |
 | `BASH_ENV` | no | Bash 도구 자동 source (사용자 secrets) |
 | `AGENT_RUNNER_HOST` | no | bind host (기본 0.0.0.0) |
+| `DAIOPS_SANDBOX_WRITE_FREE` | no | 샌드박스 격리 신뢰 (ADR 21 §2.4). 기본 on — 자기 cwd 하위 Write/Edit·비-네트워크 Bash를 결재 없이 허용. 로컬 호스트 등 격리가 아닌 배포에서 파일작업까지 게이트하려면 `false`. |
 
 ## 4. schemaVersion 증가 규칙
 

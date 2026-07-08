@@ -26,6 +26,14 @@ import { logError } from './logger.js'
 const DEFAULT_CWD = '/workspace'
 
 /**
+ * 격리 샌드박스 신뢰 플래그 (ADR 21 §2.4). 격리 클라우드/venv 배포에서는 에이전트가 자기 샌드박스
+ * 안 파일작업을 결재 없이 수행하도록 허용한다("샌드박스 안 에이전트는 자기 파일에 전권"). 블래스트
+ * 반경이 샌드박스에 갇히므로 게이트 불필요 — 결재는 외향 발신·config.write·원격실행/네트워크에만 남긴다.
+ * 로컬 호스트 등 파일작업까지 게이트하려면 DAIOPS_SANDBOX_WRITE_FREE=false. 기본 on.
+ */
+const SANDBOX_WRITE_FREE = process.env.DAIOPS_SANDBOX_WRITE_FREE !== 'false'
+
+/**
  * Phase B — 워크스페이스 secret store. 모듈 레벨(= agent-runner 프로세스 = 샌드박스/워크스페이스 1개
  * 수명)이라 handleChat(턴)마다 새로 만들지 않는다. 한 번 제공된 secret이 같은 샌드박스의 후속 턴에서도
  * 유지돼 "이미 사용 가능"으로 인식된다(턴마다 재요청되던 갭 해소). getToolEnv가 이 맵을 도구 자식 env로 주입.
@@ -382,6 +390,33 @@ export function isDangerousCommand(command) {
   return DANGEROUS_COMMAND_PATTERNS.some((re) => re.test(normalized))
 }
 
+// -- ADR 21 §2.4: 샌드박스 격리 예외 (SYNC: src/lib/daytona/policy.ts) --
+
+/**
+ * 네트워크 egress 도구. 샌드박스는 파일시스템만 격리되고 네트워크는 열려 있으므로,
+ * 데이터 유출·원격 전송 벡터는 샌드박스 자동 허용에서 제외하고 결재로 남긴다.
+ */
+const NETWORK_EGRESS_RE = /\b(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|sftp|ftp|rsync|socat)\b/i
+
+/** 샌드박스 내부에서 결재 없이 허용해도 되는 Bash 명령인지 (원격실행·네트워크 egress만 게이트). */
+export function isSandboxSafeCommand(command) {
+  const cmd = String(command ?? '')
+  if (!cmd.trim()) return true
+  if (isDangerousCommand(cmd)) return false
+  if (NETWORK_EGRESS_RE.test(normalizeCommandForDetection(cmd))) return false
+  return true
+}
+
+/** file_path가 샌드박스 루트 하위인지 (경로 탈출 `..` 거부, 상대경로는 cwd=sandboxRoot 기준 내부). */
+export function isUnderSandbox(filePath, sandboxRoot) {
+  const fp = String(filePath ?? '')
+  if (!fp || !sandboxRoot) return false
+  if (fp.includes('..')) return false
+  if (fp === sandboxRoot || fp.startsWith(sandboxRoot + '/')) return true
+  if (!fp.startsWith('/')) return true
+  return false
+}
+
 export function isSafeAllowlistPattern(pattern) {
   const p = String(pattern ?? '').trim()
   if (!p) return false
@@ -600,6 +635,16 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
 
   if (security === 'full') {
     return { kind: 'allow', reason: 'full' }
+  }
+
+  // 샌드박스 격리 예외 (ADR 21 §2.4). sandboxRoot 주입 시(격리 배포) 그 하위 파일작업·비-네트워크
+  // Bash는 결재 없이 허용. 채널 게이트/외향 발신은 위에서, 원격실행·네트워크는 아래 헬퍼가 계속 게이트.
+  if (policy?.sandboxRoot) {
+    if (toolName === 'Bash') {
+      if (isSandboxSafeCommand(String(input.command ?? ''))) return { kind: 'allow', reason: 'sandbox' }
+    } else if (isUnderSandbox(String(input.file_path ?? ''), policy.sandboxRoot)) {
+      return { kind: 'allow', reason: 'sandbox' }
+    }
   }
 
   const summary = summarizeToolInput(toolName, input)
@@ -1010,7 +1055,12 @@ export async function handleChat(rawParams, res, req) {
         return { behavior: 'deny', message: repeatBlockReason }
       }
 
-      const decision = evaluatePolicy(params.policy, toolName, input, params.has_approval_channel)
+      // 샌드박스 격리 예외(ADR 21 §2.4): 러너는 자기 cwd(=샌드박스 루트)를 알고 있으므로 여기서 주입한다.
+      // cloud가 명시 sandboxRoot를 보냈으면 존중, 아니면 실행 cwd 사용. env로 배포별 on/off.
+      const effectivePolicy = SANDBOX_WRITE_FREE
+        ? { ...params.policy, sandboxRoot: params.policy?.sandboxRoot ?? (params.context_dir ?? DEFAULT_CWD) }
+        : params.policy
+      const decision = evaluatePolicy(effectivePolicy, toolName, input, params.has_approval_channel)
 
       if (decision.kind === 'allow') {
         return { behavior: 'allow', updatedInput: applyCacheRedirectCorrection(toolName, input) }
