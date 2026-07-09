@@ -274,6 +274,9 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
     runTool,
     fetchFn: ctx.fetchFn,
     onPartialText: ctx.onPartialText,
+    // 컨텍스트 관리 관찰성(우선순위1·4) — 제공 시 프루닝/오프로드 발생을 상위로 전달. 미제공이면 noop.
+    onPrune: ctx.onPrune,
+    onOffload: ctx.onOffload,
   }
 
   for await (const message of runAnthropicTurnManager(turnManagerInput, turnManagerCtx)) {

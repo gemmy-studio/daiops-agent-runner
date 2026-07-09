@@ -23,6 +23,7 @@
 
 import { createMcpToolRegistry, isMcpToolName } from './mcp-client.js'
 import { withJitteredRetry } from './retry-utils.js'
+import { enforceTurnResultBudget } from './offload.js'
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -58,8 +59,19 @@ const PRUNE_THRESHOLD_TOKENS = (() => {
   const v = Number(process.env.AGENT_RUNNER_PRUNE_THRESHOLD_TOKENS)
   return Number.isFinite(v) && v > 0 ? v : 100_000
 })()
-/** 최근 N개 메시지는 프루닝하지 않음(직전 도구 결과는 추론에 필수). assistant+user 페어 ≈ 3턴. */
+/** 최근 N개 메시지는 프루닝하지 않음(하드 최소 플로어). assistant+user 페어 ≈ 3턴. */
 const PRUNE_PROTECT_TAIL = 6
+/**
+ * protect-tail을 "개수"가 아니라 "최근 tool_result char 예산"으로 정의한다(우선순위4).
+ * 최근 결과가 이 예산 이내이면 그 앞의 오래된 tool_result만 프루닝 — 큰 결과가 최근 6개 안에
+ * 몰려도 개수 보호에 걸려 못 줄이던 갭을 해소. opencode PRUNE_PROTECT(40k tokens) × 4(chars/token) 차용.
+ */
+const PRUNE_PROTECT_TAIL_CHARS = (() => {
+  const v = Number(process.env.AGENT_RUNNER_PRUNE_PROTECT_TAIL_CHARS)
+  return Number.isFinite(v) && v > 0 ? v : 160_000
+})()
+/** char↔token 대략 환산(hermes _CHARS_PER_TOKEN=4). 프리엠티브 추정 전용. */
+const CHARS_PER_TOKEN = 4
 /** 이 길이 이하 tool_result는 요약 이득이 없어 건너뜀. */
 const PRUNE_MIN_CHARS = 200
 /** 이미 프루닝된 결과를 식별하는 마커(재프루닝 무한 방지 = 멱등). */
@@ -83,12 +95,60 @@ function toolResultText(content) {
   return ''
 }
 
+/** 한 메시지가 담은 tool_result의 평문 char 합. user 메시지가 아니면 0. */
+function messageToolResultChars(m) {
+  if (!m || m.role !== 'user' || !Array.isArray(m.content)) return 0
+  let n = 0
+  for (const b of m.content) {
+    if (b && b.type === 'tool_result') n += toolResultText(b.content).length
+  }
+  return n
+}
+
+/** messages 전체의 tool_result char 합(프리엠티브 트리거 추정용). */
+export function estimateMessagesToolResultChars(messages) {
+  if (!Array.isArray(messages)) return 0
+  let n = 0
+  for (const m of messages) n += messageToolResultChars(m)
+  return n
+}
+
+/** 절대 프루닝하지 않는 최근 메시지 수(하드 플로어). 직전 도구 결과는 추론에 필수 → 항상 보존. */
+const PRUNE_HARD_MIN_TAIL = 2
+
+/**
+ * 프루닝 boundary(0..boundary-1이 프루닝 대상) 계산.
+ *
+ * 보호 tail을 "개수(protectTailCount)"와 "char 예산(protectTailChars)" 두 기준의
+ * *더 작은 쪽*으로 정한다(= 둘 중 더 aggressive하게 프루닝). 즉:
+ *  - 최근 결과가 작으면 → char 예산이 여유로우니 개수 기준(protectTailCount)으로 보호(기존 동작 보존).
+ *  - 최근 결과가 크면 → char 예산이 먼저 차서 개수보다 적게 보호(큰 게 tail에 몰려도 잘림 — 우선순위4 핵심).
+ * 단 최근 PRUNE_HARD_MIN_TAIL개는 무슨 일이 있어도 보존(직전 도구 결과 blind 방지).
+ */
+function findPruneBoundary(messages, protectTailChars, protectTailCount) {
+  let acc = 0
+  let i = messages.length - 1
+  for (; i >= 0; i--) {
+    acc += messageToolResultChars(messages[i])
+    if (acc > protectTailChars) break
+  }
+  const byChars = Math.max(0, i + 1) // 0..i는 char 예산 밖(프루닝 대상)
+  const byCount = messages.length - protectTailCount
+  // 더 큰 boundary = 더 많이 프루닝 = 더 적게 보호.
+  const boundary = Math.max(byChars, byCount)
+  // 하드 플로어: 최근 PRUNE_HARD_MIN_TAIL개는 절대 프루닝하지 않음.
+  return Math.max(0, Math.min(boundary, messages.length - PRUNE_HARD_MIN_TAIL))
+}
+
 /**
  * 보호 tail 밖의 오래된 tool_result를 1줄 요약으로 치환 (in-place mutate). LLM 미호출.
  * 멱등: 이미 마커가 붙은 결과·짧은 결과는 건너뛴다(재호출해도 안정).
  * @returns {number} 요약 치환한 tool_result 수
  */
-export function pruneOldToolResults(messages, { protectTailCount = PRUNE_PROTECT_TAIL } = {}) {
+export function pruneOldToolResults(
+  messages,
+  { protectTailCount = PRUNE_PROTECT_TAIL, protectTailChars = PRUNE_PROTECT_TAIL_CHARS } = {},
+) {
   if (!Array.isArray(messages) || messages.length <= protectTailCount) return 0
   // tool_use_id → 도구 이름 (요약 라벨용). assistant 메시지의 tool_use 블록에서 수집.
   const toolNameById = new Map()
@@ -99,7 +159,7 @@ export function pruneOldToolResults(messages, { protectTailCount = PRUNE_PROTECT
       }
     }
   }
-  const boundary = messages.length - protectTailCount
+  const boundary = findPruneBoundary(messages, protectTailChars, protectTailCount)
   let pruned = 0
   for (let i = 0; i < boundary; i++) {
     const m = messages[i]
@@ -1023,8 +1083,20 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
     // A2-② 컨텍스트 압축: 직전 turn input이 임계 초과면 보호 tail 밖 오래된 tool_result를 요약 치환.
     // 임계 미만이면 prefix 캐시 보존을 위해 무손. lastInputTokens=0으로 리셋해 다음 turn usage로
     // 재평가하기 전까지 재프루닝하지 않음(anti-thrashing). 프루닝 자체도 멱등(마커 가드).
-    if (lastInputTokens > PRUNE_THRESHOLD_TOKENS) {
-      pruneOldToolResults(messages, { protectTailCount: PRUNE_PROTECT_TAIL })
+    //
+    // 우선순위4 프리엠티브 트리거: 직전 turn 실측(lastInputTokens)뿐 아니라 현재 messages의
+    // tool_result char 추정으로도 트리거한다 — 이번 turn에 갑자기 부푼(실측이 아직 없는) 경우도
+    // 넘치기 전에 정리. protect-tail은 개수가 아니라 char 예산 기준(PRUNE_PROTECT_TAIL_CHARS).
+    const estimatedToolChars = estimateMessagesToolResultChars(messages)
+    if (
+      lastInputTokens > PRUNE_THRESHOLD_TOKENS ||
+      estimatedToolChars > PRUNE_THRESHOLD_TOKENS * CHARS_PER_TOKEN
+    ) {
+      const pruned = pruneOldToolResults(messages, {
+        protectTailCount: PRUNE_PROTECT_TAIL,
+        protectTailChars: PRUNE_PROTECT_TAIL_CHARS,
+      })
+      if (pruned > 0) ctx.onPrune?.({ pruned })
       lastInputTokens = 0
     }
 
@@ -1203,6 +1275,12 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
         }
       }
     }
+
+    // 우선순위1: 이 turn의 tool_result 합계가 예산 초과면 큰 것부터 파일로 오프로드(프리뷰만 잔존).
+    // push 이전에 mutate하므로 아래 messages와 yield(cloud DB 저장분) 모두 오프로드된 프리뷰로 일관.
+    await enforceTurnResultBudget(toolResults, {
+      onOffload: (info) => ctx.onOffload?.(info),
+    })
 
     // 다음 turn에 push할 assistant + user(tool_result) 메시지
     messages.push({ role: 'assistant', content: finalAssistantBlocks })
