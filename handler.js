@@ -231,6 +231,19 @@ function isOutwardSendTool(toolName) {
   return OUTWARD_SEND_TOOL_SUFFIXES.some((s) => toolName === s || toolName.endsWith(`__${s}`))
 }
 
+/**
+ * 비가역 파괴적 도구 — config.write를 가진 주체(오너/멤버)라도 항상 결재를 강제한다(isOutwardSendTool 대칭).
+ * 위키 삭제(rm -f, 복구 불가)는 web 오너(toolOverrides 미주입=전권)라도 자동 통과시키지 않는다.
+ * cloud policy.ts의 ALWAYS_APPROVE_TOOLS와 동기화 유지. 외부/API 채널은 config.write 미보유라
+ * toolOverrides.deny로 이미 차단되어 이 판정에 도달하지 않는다.
+ */
+const DESTRUCTIVE_TOOL_NAMES = new Set(['wiki_delete'])
+function isDestructiveTool(toolName) {
+  if (!toolName) return false
+  const bareName = toolName.replace(/^mcp__.+?__/, '')
+  return DESTRUCTIVE_TOOL_NAMES.has(toolName) || DESTRUCTIVE_TOOL_NAMES.has(bareName)
+}
+
 /** 기본 정책 — 클라우드에서 policy를 보내지 않은 경우 fallback */
 const DEFAULT_POLICY = {
   security: 'allowlist',
@@ -624,6 +637,18 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
     const summary = summarizeToolInput(toolName, input)
     return askOrFallback({ askFallback: policy?.askFallback ?? 'deny' }, toolName, summary, hasUiChannel, 'outward-send')
   }
+
+  // 비가역 파괴적 도구(wiki_delete 등 rm -f)는 config.write 보유자라도 항상 결재. override.deny(외부/API)는
+  // 위에서 걸러졌으므로 여기 도달 = 권한 보유(오너/멤버). 결재 채널이 없으면(헤드리스) 보수적 deny —
+  // askFallback='full'(autonomous)이라도 비가역 삭제를 무인 자동 실행시키지 않는다. cloud policy.ts와 동기화.
+  if (isDestructiveTool(toolName)) {
+    const summary = summarizeToolInput(toolName, input)
+    if (!hasUiChannel) {
+      return { kind: 'deny', reason: 'ask-fallback-deny', toolName, commandSummary: summary }
+    }
+    return { kind: 'plan_request', reason: 'always', toolName, commandSummary: summary }
+  }
+
   if (!RISKY_TOOL_NAMES.has(toolName)) {
     return { kind: 'allow', reason: 'non-risky' }
   }
