@@ -20,6 +20,7 @@ import {
   stripThinkingBlocks,
   streamWithStaleGuard,
   pruneOldToolResults,
+  estimateMessagesToolResultChars,
 } from './turn-manager.js'
 import { sdkMessageToLLMEvents } from './llm-wrapper.js'
 
@@ -1704,5 +1705,46 @@ describe('pruneOldToolResults (REF-1 A2-②)', () => {
   it('메시지 수가 protectTail 이하면 no-op', () => {
     const msgs = buildMessages(500).slice(0, 4)
     assert.equal(pruneOldToolResults(msgs, { protectTailCount: 6 }), 0)
+  })
+
+  it('char 예산 초과 시 개수 보호보다 aggressive하게 프루닝 (큰 결과가 tail에 몰려도 잘림)', () => {
+    // 최근 6개 안에 큰 tool_result가 몰린 케이스. protectTailChars를 작게 줘 개수 보호를 넘어선다.
+    const msgs = buildMessages(50_000) // 5쌍 × 50k = 250k chars
+    // protectTailCount 6개(=3쌍)면 개수 기준으로 3쌍(150k) 보호 → char 예산 40k면 그 이상 잘려야.
+    const n = pruneOldToolResults(msgs, { protectTailCount: 6, protectTailChars: 40_000 })
+    // 하드 플로어(2개) 밖 tool_result는 모두 프루닝 대상. 최근 50k 1개만 예산 내 → 나머지 4개 프루닝.
+    assert.ok(n >= 3, `expected aggressive prune, got ${n}`)
+    // 최소한 가장 오래된 것은 마커.
+    assert.ok(msgs[1].content[0].content.startsWith('…[이전 도구 결과 생략]'))
+  })
+
+  it('char 예산이 여유로우면 개수 기준 보호 유지 (작은 결과는 기존 동작)', () => {
+    const msgs = buildMessages(500) // 총 2.5k, 기본 예산(160k) 여유
+    const n = pruneOldToolResults(msgs, { protectTailCount: 4 }) // protectTailChars 기본
+    assert.equal(n, 3) // 개수 기준과 동일
+  })
+
+  it('하드 플로어 — 최근 2개는 예산과 무관하게 보존', () => {
+    const msgs = buildMessages(50_000)
+    pruneOldToolResults(msgs, { protectTailCount: 6, protectTailChars: 1 }) // 극단적으로 작은 예산
+    // 마지막 tool_result(msgs[9]=user)는 하드 플로어로 원본 유지.
+    const lastTr = msgs[msgs.length - 1].content[0]
+    assert.equal(lastTr.content.length, 50_000)
+  })
+})
+
+describe('estimateMessagesToolResultChars', () => {
+  it('user 메시지의 tool_result char만 합산', () => {
+    const msgs = [
+      { role: 'user', content: 'plain prompt' }, // 문자열 content는 tool_result 아님 → 0
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't0', name: 'Bash', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't0', content: 'x'.repeat(1000) }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'y'.repeat(500) }] }] },
+    ]
+    assert.equal(estimateMessagesToolResultChars(msgs), 1500)
+  })
+  it('빈/비배열 방어', () => {
+    assert.equal(estimateMessagesToolResultChars(null), 0)
+    assert.equal(estimateMessagesToolResultChars([]), 0)
   })
 })
