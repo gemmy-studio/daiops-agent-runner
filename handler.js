@@ -68,32 +68,6 @@ async function isKeyInIntegrationsEnv(keyName) {
  */
 const DEFAULT_FALLBACK_MODEL = 'claude-sonnet-4-6'
 
-/**
- * cloud가 보낸 history(이전 user/assistant 발화)를 prompt 앞에 transcript로 prepend.
- *
- * 래퍼 인터페이스(runAnthropicSdkStream)는 prompt: string 단일 입력(SDK 호환)이라 messages
- * 배열을 직접 못 넘긴다. sandbox idle hibernate 후 cold start되면 진행 중 conversation
- * 컨텍스트도 사라지므로, history를 텍스트로 합쳐 같은 turn 내 컨텍스트로 전달.
- *
- * @param {Array<{role: string, content: string}>|undefined} history
- * @param {string} userMessage
- * @returns {string}
- */
-function buildPromptWithHistory(history, userMessage) {
-  if (!Array.isArray(history) || history.length === 0) return userMessage
-  const lines = ['<conversation_history>']
-  for (const h of history) {
-    const role = h?.role === 'assistant' ? 'Assistant' : 'User'
-    lines.push(`<turn role="${role}">`)
-    lines.push(String(h?.content ?? ''))
-    lines.push('</turn>')
-  }
-  lines.push('</conversation_history>')
-  lines.push('')
-  lines.push(userMessage)
-  return lines.join('\n')
-}
-
 /** 결재 대기 기본 타임아웃 (10분). cloud가 Vercel timeout으로 끊겨도 T4/T5 resume으로 회복. */
 const DEFAULT_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000
 
@@ -208,7 +182,7 @@ function emitEphemeralSse(sessionId, event, data) {
 const CONTINUATION_NOTICE = `
 ## Continuing conversation (follow-up turn)
 
-This call is a follow-up turn in an ongoing conversation, not the first turn of a new session. The prior conversation and tool results are in the <conversation_history> above.
+This call is a follow-up turn in an ongoing conversation, not the first turn of a new session. The prior conversation and tool results are the earlier messages in this conversation.
 
 - Do not greet again ("hello", "I'm back", etc.) or re-introduce yourself — you have already done so.
 - Do not repeat any session-start setup. It has already run this session; only revisit it if the user explicitly points at persistent memory/knowledge or instructs a fact change.
@@ -1327,7 +1301,13 @@ export async function handleChat(rawParams, res, req) {
 
     // 하이브리드 구조: SDK 호출은 llm-wrapper로 격리. 마이그레이션 트리거 시 wrapper만 교체.
     // emitLLMEvent는 호환 layer — 현재는 noop, 마이그레이션 시점에 LLMEvent 처리 활성화.
-    const sdkPrompt = buildPromptWithHistory(params.history, params.message)
+    // 히스토리를 XML(<conversation_history>/<turn>)로 납작하게 만들지 않고 role 분리 messages 배열로
+    // 넘긴다 — 모델이 내부 태그를 흉내내 답변에 뱉는 프라이밍 제거(내부 태그 누출 근본 수정).
+    // 시드 정규화(role 교대·첫 user 보정)는 turn-manager.normalizeConversationMessages가 담당.
+    const sdkMessages = [
+      ...(Array.isArray(params.history) ? params.history : []),
+      { role: 'user', content: params.message },
+    ]
 
     // turn-manager 가 text 블록의 text_delta 도착 시점마다 호출. 토큰 단위 라이브 표시용.
     // partial 이 한 번이라도 흐른 turn 은 block 단위 'text' emit 을 skip(중복 방지).
@@ -1338,7 +1318,7 @@ export async function handleChat(rawParams, res, req) {
     // SSE seq 정합 오염 위험이 있으므로 raw surface (retry-utils.asyncIteratorWithFirstYieldRetry).
     const retryingSdkStream = asyncIteratorWithFirstYieldRetry(
       () => runAnthropicSdkStream(
-        { prompt: sdkPrompt, options: queryOptions },
+        { messages: sdkMessages, options: queryOptions },
         {
           signal: abortController.signal,
           onPartialText: (delta) => {

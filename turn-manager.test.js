@@ -21,6 +21,7 @@ import {
   streamWithStaleGuard,
   pruneOldToolResults,
   estimateMessagesToolResultChars,
+  normalizeConversationMessages,
 } from './turn-manager.js'
 import { sdkMessageToLLMEvents } from './llm-wrapper.js'
 
@@ -511,7 +512,122 @@ describe('accumulateTurn — server tool 블록 보존', () => {
   })
 })
 
+// ── normalizeConversationMessages (role 분리 시드) ─────────────────────
+
+describe('normalizeConversationMessages', () => {
+  it('role은 user/assistant로 강제 — 알 수 없는 role은 user', () => {
+    const out = normalizeConversationMessages([
+      { role: 'user', content: 'a' },
+      { role: 'assistant', content: 'b' },
+      { role: 'system', content: 'c' },
+    ])
+    assert.deepEqual(out, [
+      { role: 'user', content: 'a' },
+      { role: 'assistant', content: 'b' },
+      { role: 'user', content: 'c' },
+    ])
+  })
+
+  it('연속 동일 role(문자열)은 병합 — API role 교대 요구 충족', () => {
+    const out = normalizeConversationMessages([
+      { role: 'user', content: '첫' },
+      { role: 'user', content: '둘' },
+      { role: 'assistant', content: 'A' },
+    ])
+    assert.deepEqual(out, [
+      { role: 'user', content: '첫\n\n둘' },
+      { role: 'assistant', content: 'A' },
+    ])
+  })
+
+  it('선행 assistant turn은 제거 — 첫 메시지는 user여야 함', () => {
+    const out = normalizeConversationMessages([
+      { role: 'assistant', content: '먼저' },
+      { role: 'user', content: '진짜 시작' },
+    ])
+    assert.deepEqual(out, [{ role: 'user', content: '진짜 시작' }])
+  })
+
+  it('배열(블록) content는 병합하지 않고 보존 — Phase 4 native 블록 대비', () => {
+    const blocks = [{ type: 'tool_result', content: 'x' }]
+    const out = normalizeConversationMessages([
+      { role: 'user', content: 'txt' },
+      { role: 'user', content: blocks },
+    ])
+    assert.equal(out.length, 2)
+    assert.deepEqual(out[1].content, blocks)
+  })
+
+  it('비배열/빈 입력 방어', () => {
+    assert.deepEqual(normalizeConversationMessages(undefined), [])
+    assert.deepEqual(normalizeConversationMessages(null), [])
+    assert.deepEqual(normalizeConversationMessages([]), [])
+  })
+})
+
 // ── runAnthropicTurnManager ────────────────────────────────────────────
+
+/** 요청 body를 캡처하는 mock fetch — messages 시드가 API에 도달하는지 검증용. */
+function capturingFetch(sseText) {
+  const calls = []
+  const fn = async function (_url, init) {
+    calls.push(JSON.parse(init.body))
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(sseText))
+        c.close()
+      },
+    })
+    return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+  fn.calls = calls
+  return fn
+}
+
+const END_TURN_SSE = sse([
+  { event: 'message_start', data: { message: { usage: { input_tokens: 10, output_tokens: 0 } } } },
+  { event: 'content_block_start', data: { index: 0, content_block: { type: 'text', text: '' } } },
+  { event: 'content_block_delta', data: { index: 0, delta: { type: 'text_delta', text: 'ok' } } },
+  { event: 'content_block_stop', data: { index: 0 } },
+  { event: 'message_delta', data: { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } } },
+  { event: 'message_stop', data: {} },
+])
+
+describe('runAnthropicTurnManager — messages 시드(role 분리)', () => {
+  it('input.messages를 role 분리 그대로 API messages로 전송 (XML flatten 안 함)', async () => {
+    const fetchFn = capturingFetch(END_TURN_SSE)
+    for await (const _ of runAnthropicTurnManager(
+      {
+        messages: [
+          { role: 'user', content: '이전 질문' },
+          { role: 'assistant', content: '이전 답변' },
+          { role: 'user', content: '새 질문' },
+        ],
+        options: { model: 'claude-sonnet-4-6', cacheControl: false },
+      },
+      { fetchFn, apiKey: 'sk-test' },
+    )) { /* drain */ }
+    assert.equal(fetchFn.calls.length, 1)
+    assert.deepEqual(fetchFn.calls[0].messages, [
+      { role: 'user', content: '이전 질문' },
+      { role: 'assistant', content: '이전 답변' },
+      { role: 'user', content: '새 질문' },
+    ])
+    // XML 프라이밍 흔적이 없어야 함.
+    const serialized = JSON.stringify(fetchFn.calls[0].messages)
+    assert.ok(!serialized.includes('<conversation_history>'))
+    assert.ok(!serialized.includes('<turn'))
+  })
+
+  it('messages 미지정 시 prompt 단일 user로 폴백 (하위호환)', async () => {
+    const fetchFn = capturingFetch(END_TURN_SSE)
+    for await (const _ of runAnthropicTurnManager(
+      { prompt: '안녕', options: { model: 'claude-sonnet-4-6', cacheControl: false } },
+      { fetchFn, apiKey: 'sk-test' },
+    )) { /* drain */ }
+    assert.deepEqual(fetchFn.calls[0].messages, [{ role: 'user', content: '안녕' }])
+  })
+})
 
 describe('runAnthropicTurnManager — 기본 round-trip', () => {
   it('단일 turn end_turn → assistant + result(success)', async () => {

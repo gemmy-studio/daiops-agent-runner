@@ -275,7 +275,11 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
  * @typedef {{ name: string, description?: string, input_schema?: object }} ToolDef
  *
  * @typedef {Object} TurnManagerInput
- * @property {string} prompt — 첫 turn user message 텍스트
+ * @property {Array<{role:string, content: string | Array<unknown>}>} [messages] — role 분리 대화 시드.
+ *   지정 시 이 배열로 messages를 시드한다(히스토리를 <conversation_history>/<turn> XML로 납작하게
+ *   만들지 않아 모델이 내부 태그를 흉내내 뱉는 프라이밍을 제거 — 내부 태그 누출 근본 수정).
+ *   Anthropic API 제약(role 교대·첫 메시지 user)은 normalizeConversationMessages가 보정한다.
+ * @property {string} [prompt] — messages 미지정 시 단일 user turn 폴백(하위호환: 테스트·단발 변환 경로).
  * @property {Object} options
  * @property {string} options.model
  * @property {string | Array<{type:'text', text:string, cache_control?:object}>} [options.systemPrompt]
@@ -946,6 +950,37 @@ export function resolveUpstream(ctx = {}) {
 }
 
 /**
+ * 대화 시드 messages를 Anthropic Messages API 제약에 맞게 정규화한다.
+ *  - role은 'user' | 'assistant'로 강제 (그 외는 'user' 취급)
+ *  - 연속 동일 role(문자열 content 한정)은 하나로 병합 — API는 role 교대를 요구한다
+ *  - 선행 assistant turn은 제거 — 첫 메시지는 user여야 한다
+ * content가 배열(블록)인 경우는 병합하지 않고 그대로 둔다(Phase 4 native tool_use/tool_result 대비).
+ * 히스토리를 XML로 감싸지 않고 role별로 넘기는 게 목적 — 내부 태그(<turn>/<conversation_history> 등)
+ * 프라이밍 제거의 핵심.
+ *
+ * @param {Array<{role?:string, content?: unknown}>|undefined} raw
+ * @returns {Array<{role:'user'|'assistant', content: string | Array<unknown>}>}
+ */
+export function normalizeConversationMessages(raw) {
+  if (!Array.isArray(raw)) return []
+  /** @type {Array<{role:'user'|'assistant', content: string | Array<unknown>}>} */
+  const out = []
+  for (const m of raw) {
+    const role = m?.role === 'assistant' ? 'assistant' : 'user'
+    const content = /** @type {string | Array<unknown>} */ (m?.content ?? '')
+    // 선행 assistant 제거 — 첫 메시지는 user여야 한다.
+    if (out.length === 0 && role === 'assistant') continue
+    const prev = out[out.length - 1]
+    if (prev && prev.role === role && typeof prev.content === 'string' && typeof content === 'string') {
+      prev.content = prev.content ? `${prev.content}\n\n${content}` : content
+    } else {
+      out.push({ role, content })
+    }
+  }
+  return out
+}
+
+/**
  * runAnthropicTurnManager — multi-turn loop 본체.
  *
  * 호출자(handler.js 또는 llm-wrapper.js swap 후)는 본 함수가 yield하는 SDK 호환 메시지를
@@ -1004,8 +1039,12 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       }
     : userRunTool
 
+  // 대화 시드: role 분리 messages 배열(input.messages)을 우선. 미지정/빈 경우 단일 user prompt 폴백.
+  const seeded = normalizeConversationMessages(input.messages)
   /** @type {Array<{role:'user'|'assistant', content: string | Array<unknown>}>} */
-  const messages = [{ role: 'user', content: input.prompt }]
+  const messages = seeded.length > 0
+    ? seeded
+    : [{ role: 'user', content: input.prompt ?? '' }]
 
   let turn = 0
   let thinkingSigRetryDone = false
