@@ -134,6 +134,33 @@ describe('evaluatePolicy — 외향 발신 도구는 항상 결재', () => {
   })
 })
 
+describe('evaluatePolicy — 파괴적 도구(wiki_delete)는 항상 결재', () => {
+  // 비가역 rm -f. config.write 보유자(오너/멤버)라도 결재. 외부/API는 toolOverrides.deny로 별도 차단.
+  const fullAccess = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [] }
+
+  for (const tool of ['wiki_delete', 'mcp__daiops-mcp__wiki_delete']) {
+    it(`security:'full' + owner(overrides 없음)여도 결재 강등: ${tool}`, () => {
+      const d = evaluatePolicy(fullAccess, tool, { page_name: 'x.md' }, true)
+      assert.equal(d.kind, 'plan_request')
+      assert.equal(d.reason, 'always')
+    })
+  }
+
+  it('UI 채널 없으면(헤드리스) askFallback=full 이라도 deny (비가역 무인 삭제 금지)', () => {
+    const d = evaluatePolicy(fullAccess, 'mcp__daiops-mcp__wiki_delete', { page_name: 'x.md' }, false)
+    assert.equal(d.kind, 'deny')
+  })
+
+  it('capability 미보유(외부/API)는 toolOverrides.deny로 먼저 차단 → channel-deny', () => {
+    const policy = { ...fullAccess, toolOverrides: { deny: ['wiki_delete'] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_delete', {}, true).reason, 'channel-deny')
+  })
+
+  it('삭제 아닌 상태변경 도구(wiki_save)는 파괴적 아님 → 영향 없음', () => {
+    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__wiki_save', {}, true).kind, 'allow')
+  })
+})
+
 // ADR 21 §5.3 — 채널-인식 도구 게이트(toolOverrides). cloud(policy.ts)가 채널 capability로
 // deny/ask 목록을 계산해 정책에 실으면 agent-runner가 RISKY 분기보다 먼저 강제한다.
 describe('채널-인식 도구 게이트 (toolOverrides, ADR 21)', () => {
