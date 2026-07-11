@@ -84,4 +84,23 @@ describe('enforceTurnResultBudget', () => {
     assert.equal(n, 1) // 텍스트만 오프로드
     assert.ok(Array.isArray(results[0].content)) // 이미지 결과는 배열 그대로
   })
+
+  it('budgetChars 지정 시 그 예산으로 판정 (A4)', async () => {
+    // 기본 예산(200K)보다 훨씬 작은 예산을 넘겨, 12K짜리 결과가 오프로드되게.
+    const mid = 'C'.repeat(12_000)
+    const results = [{ type: 'tool_result', tool_use_id: 't', content: mid }]
+    let notified = null
+    const n = await enforceTurnResultBudget(results, { budgetChars: 10_000, onOffload: (i) => { notified = i } })
+    assert.equal(n, 1)
+    assert.ok(String(results[0].content).includes(OFFLOAD_MARKER))
+    assert.ok(notified && notified.offloaded === 1)
+  })
+
+  it('budgetChars 이내면 no-op (같은 결과라도 큰 예산이면 유지)', async () => {
+    const mid = 'C'.repeat(12_000)
+    const results = [{ type: 'tool_result', tool_use_id: 't', content: mid }]
+    const n = await enforceTurnResultBudget(results, { budgetChars: 50_000 })
+    assert.equal(n, 0)
+    assert.equal(results[0].content, mid)
+  })
 })

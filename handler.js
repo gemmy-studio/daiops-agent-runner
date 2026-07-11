@@ -1350,6 +1350,14 @@ export async function handleChat(rawParams, res, req) {
           getToolEnv: () => Object.fromEntries(workspaceSecrets),
           // P3-a — 도구(Bash) 실행 중 stdout/stderr tail 라이브 전송. 휘발성(buffer 미누적).
           onToolProgress: (p) => emitEphemeralSse(sessionId, 'tool_progress', p),
+          // A3 — 컨텍스트 관리(대용량 tool_result 오프로드 / 오래된 결과 프루닝) 발동 시 사용자 고지.
+          //   기존엔 무성(silent)이라 "자료 일부가 왜 요약됐지"를 알 수 없었다. cloud가 diagnostic으로 노출.
+          onOffload: ({ offloaded, freedChars }) => {
+            emitSseEvent(sessionId, 'context_managed', { kind: 'offload', offloaded, freed_chars: freedChars })
+          },
+          onPrune: ({ pruned }) => {
+            emitSseEvent(sessionId, 'context_managed', { kind: 'prune', pruned })
+          },
         },
       ),
       {

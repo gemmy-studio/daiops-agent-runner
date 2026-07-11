@@ -93,11 +93,15 @@ async function writeOffload(text) {
  * 이미지 블록 포함 결과(base64는 char로 안 잡힘)·이미 오프로드된 것·작은 것은 건드리지 않음.
  *
  * @param {Array<{content: string | Array<unknown>, is_error?: boolean}>} toolResults
- * @param {{ onOffload?: (info: {offloaded:number, freedChars:number}) => void }} [opts]
+ * @param {{ onOffload?: (info: {offloaded:number, freedChars:number}) => void, budgetChars?: number }} [opts]
+ *   budgetChars: 이 turn 예산(chars). 미지정 시 모듈 기본(TURN_RESULT_BUDGET_CHARS). 호출자(turn-manager)가
+ *   모델 컨텍스트 window에서 산출한 값을 넘겨 200K chars 고정(≈50K토큰) 단위 불일치를 해소한다(A4).
  * @returns {Promise<number>} 오프로드한 결과 수
  */
-export async function enforceTurnResultBudget(toolResults, { onOffload } = {}) {
+export async function enforceTurnResultBudget(toolResults, { onOffload, budgetChars } = {}) {
   if (!Array.isArray(toolResults) || toolResults.length === 0) return 0
+
+  const budget = Number.isFinite(budgetChars) && budgetChars > 0 ? budgetChars : TURN_RESULT_BUDGET_CHARS
 
   let total = 0
   const sized = []
@@ -107,7 +111,7 @@ export async function enforceTurnResultBudget(toolResults, { onOffload } = {}) {
     total += text.length
     sized.push({ r, text, len: text.length, hasImage })
   }
-  if (total <= TURN_RESULT_BUDGET_CHARS) return 0
+  if (total <= budget) return 0
 
   // 큰 것부터 — 최소 개수의 오프로드로 예산 아래로 내려가게(hermes: 큰 것부터).
   sized.sort((a, b) => b.len - a.len)
@@ -115,7 +119,7 @@ export async function enforceTurnResultBudget(toolResults, { onOffload } = {}) {
   let offloaded = 0
   let freedChars = 0
   for (const s of sized) {
-    if (total <= TURN_RESULT_BUDGET_CHARS) break
+    if (total <= budget) break
     if (s.hasImage) continue
     if (s.len < OFFLOAD_SINGLE_MIN_CHARS) continue
     if (typeof s.r.content === 'string' && s.r.content.startsWith(OFFLOAD_MARKER)) continue

@@ -367,6 +367,41 @@ export function getAnthropicMaxOutput(model) {
   return bestVal
 }
 
+// ── 모델별 컨텍스트 윈도우(입력 토큰 한도) ─────────────────────────────────
+// offload per-turn 예산 산출(A4)에 사용. 표준 Claude=200K, 1M 베타 변형만 예외.
+// (max_tokens는 출력 한도라 별개 — 위 ANTHROPIC_OUTPUT_LIMITS.)
+export const ANTHROPIC_DEFAULT_CONTEXT_WINDOW = 200_000
+export const ANTHROPIC_1M_CONTEXT_WINDOW = 1_000_000
+/** 1M 컨텍스트 베타를 나타내는 모델 ID 마커(lowercase, normalizeModelName 후 매칭). */
+const CONTEXT_1M_SUBSTRINGS = Object.freeze(['[1m]', '-1m', '1m-context'])
+
+/** @param {string} model @returns {number} 컨텍스트 윈도우(토큰) */
+export function getAnthropicContextWindow(model) {
+  const m = normalizeModelName(model)
+  return CONTEXT_1M_SUBSTRINGS.some((s) => m.includes(s))
+    ? ANTHROPIC_1M_CONTEXT_WINDOW
+    : ANTHROPIC_DEFAULT_CONTEXT_WINDOW
+}
+
+/** offload per-turn 예산이 차지할 컨텍스트 윈도우 비율(openclaw calculateMaxToolResultChars window×0.3 차용). */
+const OFFLOAD_WINDOW_FRACTION = (() => {
+  const v = Number(process.env.AGENT_RUNNER_OFFLOAD_WINDOW_FRACTION)
+  return Number.isFinite(v) && v > 0 && v < 1 ? v : 0.3
+})()
+
+/**
+ * offload per-turn 예산(chars) 산출.
+ * env override(AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS)가 있으면 절대값 우선(운영 override),
+ * 없으면 모델 컨텍스트 window × fraction × CHARS_PER_TOKEN. 200K chars 고정이 실제 200K '토큰'
+ * window와 단위 불일치(≈50K토큰)라 큰 window 모델에서 과도 오프로드하던 것을 정합(A4).
+ * @param {string} model @returns {number}
+ */
+export function resolveOffloadBudgetChars(model) {
+  const envRaw = Number(process.env.AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS)
+  if (Number.isFinite(envRaw) && envRaw > 0) return envRaw
+  return Math.round(getAnthropicContextWindow(model) * OFFLOAD_WINDOW_FRACTION * CHARS_PER_TOKEN)
+}
+
 /** @param {string} model */
 export function supportsAdaptiveThinking(model) {
   const m = normalizeModelName(model)
@@ -1318,6 +1353,7 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
     // 우선순위1: 이 turn의 tool_result 합계가 예산 초과면 큰 것부터 파일로 오프로드(프리뷰만 잔존).
     // push 이전에 mutate하므로 아래 messages와 yield(cloud DB 저장분) 모두 오프로드된 프리뷰로 일관.
     await enforceTurnResultBudget(toolResults, {
+      budgetChars: resolveOffloadBudgetChars(input.options.model),
       onOffload: (info) => ctx.onOffload?.(info),
     })
 

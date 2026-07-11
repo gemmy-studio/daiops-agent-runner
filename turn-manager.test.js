@@ -22,6 +22,10 @@ import {
   pruneOldToolResults,
   estimateMessagesToolResultChars,
   normalizeConversationMessages,
+  getAnthropicContextWindow,
+  resolveOffloadBudgetChars,
+  ANTHROPIC_DEFAULT_CONTEXT_WINDOW,
+  ANTHROPIC_1M_CONTEXT_WINDOW,
 } from './turn-manager.js'
 import { sdkMessageToLLMEvents } from './llm-wrapper.js'
 
@@ -1862,5 +1866,31 @@ describe('estimateMessagesToolResultChars', () => {
   it('빈/비배열 방어', () => {
     assert.equal(estimateMessagesToolResultChars(null), 0)
     assert.equal(estimateMessagesToolResultChars([]), 0)
+  })
+})
+
+describe('getAnthropicContextWindow / resolveOffloadBudgetChars (A4)', () => {
+  it('표준 모델은 200K window', () => {
+    assert.equal(getAnthropicContextWindow('claude-opus-4-8'), ANTHROPIC_DEFAULT_CONTEXT_WINDOW)
+    assert.equal(getAnthropicContextWindow('anthropic/claude-sonnet-4-6'), 200_000)
+  })
+  it('1M 마커 모델은 1M window', () => {
+    assert.equal(getAnthropicContextWindow('claude-opus-4-8[1m]'), ANTHROPIC_1M_CONTEXT_WINDOW)
+    assert.equal(getAnthropicContextWindow('claude-sonnet-4-6-1m'), 1_000_000)
+  })
+  it('예산은 window에 비례(200K→240K chars, 1M→1.2M chars)', () => {
+    // 기본 fraction 0.3 × CHARS_PER_TOKEN 4 = window × 1.2
+    assert.equal(resolveOffloadBudgetChars('claude-opus-4-8'), 240_000)
+    assert.equal(resolveOffloadBudgetChars('claude-opus-4-8[1m]'), 1_200_000)
+  })
+  it('env override(AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS)가 절대값으로 우선', () => {
+    const prev = process.env.AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS
+    process.env.AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS = '55555'
+    try {
+      assert.equal(resolveOffloadBudgetChars('claude-opus-4-8[1m]'), 55_555)
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS
+      else process.env.AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS = prev
+    }
   })
 })
