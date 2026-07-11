@@ -605,6 +605,15 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
     }
   }
 
+  // 배타적 화이트리스트(P2) — 지정 시 목록 밖 도구는 전부 deny. RISKY/server-side 무관하게 여기서
+  // 먼저 강제(위키 전용 등 "이 도구만"). MCP 접두사 벗겨 bare 매칭. cloud policy.ts와 동기화.
+  if (Array.isArray(policy?.toolAllowlist)) {
+    const bareName = toolName.replace(/^mcp__.+?__/, '')
+    if (!policy.toolAllowlist.includes(toolName) && !policy.toolAllowlist.includes(bareName)) {
+      return { kind: 'deny', reason: 'channel-deny', toolName, commandSummary: summarizeToolInput(toolName, input) }
+    }
+  }
+
   // 외향 발신(슬랙/이메일 등 직원 정체성으로 외부에 메시지)은 보안 설정과 무관하게 항상 결재.
   // UI 채널이 없으면(스케줄 등 무인 실행) askFallback을 따른다(기본 deny — 무인 능동 발신 차단).
   if (isOutwardSendTool(toolName)) {
@@ -1018,7 +1027,17 @@ export async function handleChat(rawParams, res, req) {
     const userTools = Array.isArray(params.tools) && params.tools.length > 0
       ? params.tools
       : []
-    const allowedTools = [...new Set([...SDK_BUILTIN_TOOLS, ...userTools])]
+    let allowedTools = [...new Set([...SDK_BUILTIN_TOOLS, ...userTools])]
+    // 배타적 화이트리스트(P3): WebSearch/WebFetch는 server-side tool이라 canUseTool(evaluatePolicy)을
+    // 안 타므로, allowedTools 목록에서 직접 빼야 request tools[] 자동 등록을 막을 수 있다. allowlist가
+    // 오면 목록 밖 SDK 빌트인(웹검색·파일읽기 등)을 제거 — "위키 전용" 시 웹 이탈 원천 차단. bare 매칭.
+    const toolAllowlist = params.policy?.toolAllowlist
+    if (Array.isArray(toolAllowlist) && toolAllowlist.length > 0) {
+      allowedTools = allowedTools.filter((t) => {
+        const bare = t.replace(/^mcp__.+?__/, '')
+        return toolAllowlist.includes(t) || toolAllowlist.includes(bare)
+      })
+    }
 
     // MCP 서버 설정 (HTTP transport)
     const mcpServers = Array.isArray(params.mcp_servers) ? params.mcp_servers : []
