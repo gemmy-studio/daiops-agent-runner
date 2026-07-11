@@ -2,6 +2,14 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.7.6] — 2026-07-12
+
+### Changed
+- **offload per-turn 예산을 모델 컨텍스트 window에 정합 (A4)** — 기존 `TURN_RESULT_BUDGET_CHARS`는 200K **chars** 고정이라 실제 200K **토큰** window와 단위가 어긋났다(≈50K 토큰). `getAnthropicContextWindow(model)`(표준 200K, `[1m]`/`-1m` 마커→1M) + `resolveOffloadBudgetChars`(env override 절대값 우선, 없으면 window×0.3×CHARS_PER_TOKEN)로 산출해 `enforceTurnResultBudget(budgetChars)`에 전달한다. 200K window=240K chars(≈기존), 1M window=1.2M chars — 큰 window 모델에서 도구 결과를 불필요하게 오프로드하던 것을 해소. env `AGENT_RUNNER_OFFLOAD_WINDOW_FRACTION`(기본 0.3) override. (openclaw `calculateMaxToolResultChars` window×0.3 차용)
+
+### Added
+- **컨텍스트 관리 발동 사용자 고지 (A3)** — 대용량 tool_result 오프로드/오래된 결과 프루닝이 그동안 완전 무성(silent)이라 "자료 일부가 왜 요약됐는지" 사용자가 알 수 없었다. `handler.js` 콜백에 `onOffload`/`onPrune`을 배선해 `context_managed` SSE(`{kind:'offload'|'prune', offloaded/freed_chars/pruned}`)를 발신한다(cloud가 diagnostic으로 노출). llm-wrapper·turn-manager는 이미 콜백을 호출했고 handler가 전달만 누락했던 갭.
+
 ## [0.5.16] — 2026-07-05
 
 ### Fixed
