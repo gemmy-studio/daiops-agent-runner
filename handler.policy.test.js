@@ -1,6 +1,38 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { hasUnquotedShellMetachar, evaluatePolicy, isDangerousCommand, isSafeAllowlistPattern, isSandboxSafeCommand, isUnderSandbox } from './handler.js'
+import { hasUnquotedShellMetachar, evaluatePolicy, isDangerousCommand, isSafeAllowlistPattern, isSandboxSafeCommand, isUnderSandbox, resolveAllowedTools } from './handler.js'
+
+const SDK_BUILTINS = ['Read', 'Edit', 'Glob', 'Grep', 'Bash', 'Write', 'BashOutput', 'KillShell', 'WebSearch', 'WebFetch']
+
+describe('resolveAllowedTools (P3 — 위키 전용 회귀 방지)', () => {
+  it('allowlist 미지정 → 빌트인 ∪ userTools 그대로 (제한 없음)', () => {
+    const out = resolveAllowedTools({ builtins: SDK_BUILTINS, userTools: ['custom_tool'], toolAllowlist: undefined })
+    assert.deepEqual(out, [...SDK_BUILTINS, 'custom_tool'])
+  })
+
+  it('위키 전용(cloud 확장된 allowlist) → 웹/파일 빌트인 제거 + MCP 위키 도구 정식 이름 노출', () => {
+    // cloud resolveToolAllowlist가 만든 형태: bare + mcp__ 정식 이름 동반.
+    const allowlist = [
+      'wiki_search', 'mcp__daiops-mcp__wiki_search',
+      'wiki_read', 'mcp__daiops-mcp__wiki_read',
+      'wiki_list', 'mcp__daiops-mcp__wiki_list',
+    ]
+    const out = resolveAllowedTools({ builtins: SDK_BUILTINS, userTools: [], toolAllowlist: allowlist })
+    // 웹 이탈 차단: server-side 웹 도구가 목록에서 빠져야 한다.
+    assert.equal(out.includes('WebSearch'), false)
+    assert.equal(out.includes('WebFetch'), false)
+    assert.equal(out.includes('Read'), false)
+    // 회귀 핵심: MCP 위키 도구가 정식 이름으로 살아있어 SDK가 노출한다.
+    assert.equal(out.includes('mcp__daiops-mcp__wiki_search'), true)
+    assert.equal(out.includes('mcp__daiops-mcp__wiki_read'), true)
+    assert.equal(out.includes('mcp__daiops-mcp__wiki_list'), true)
+  })
+
+  it('빌트인만 담긴 allowlist → 해당 빌트인만 유지, MCP 항목 없음', () => {
+    const out = resolveAllowedTools({ builtins: SDK_BUILTINS, userTools: [], toolAllowlist: ['Bash', 'Read'] })
+    assert.deepEqual(out.sort(), ['Bash', 'Read'])
+  })
+})
 
 // SEC-T7: 셸 메타문자로 in-flight 결재 게이트를 우회하는 P0 회귀 테스트.
 // cloud(policy.ts)와 동일 동작을 agent-runner 측에서도 보장한다(드리프트 방지).

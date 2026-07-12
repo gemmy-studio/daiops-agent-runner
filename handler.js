@@ -100,6 +100,31 @@ export function decideTurnBudget({ turnCount, turnBudget, extensionsUsed, maxTur
 }
 
 /**
+ * SDK에 넘길 allowedTools 최종 목록 계산 (P3 — 배타적 화이트리스트).
+ * - toolAllowlist 미지정: [빌트인 ∪ userTools] 그대로 (제한 없음).
+ * - toolAllowlist 지정(위키 전용 등): 목록 밖 도구 제거(bare 매칭) → WebSearch/WebFetch server-side
+ *   도구까지 request tools[]에서 빠져 웹 이탈 차단. **단** MCP 도구(mcp__daiops-mcp__wiki_search)는
+ *   mcpServers로 별도 주입되어 [빌트인+userTools] 배열엔 없으므로, cloud(resolveToolAllowlist)가 정식
+ *   이름으로 해석해 넣어준 mcp__ 항목을 되살려야 SDK가 노출한다(availability). 러너는 이름 구성 로직
+ *   없이 opaque 식별자만 전달 — cloud=해석 단일지점, 러너=데이터 강제(ADR21).
+ * @returns {string[]}
+ */
+export function resolveAllowedTools({ builtins, userTools, toolAllowlist }) {
+  let allowedTools = [...new Set([...(builtins ?? []), ...(userTools ?? [])])]
+  if (Array.isArray(toolAllowlist) && toolAllowlist.length > 0) {
+    allowedTools = allowedTools.filter((t) => {
+      const bare = t.replace(/^mcp__.+?__/, '')
+      return toolAllowlist.includes(t) || toolAllowlist.includes(bare)
+    })
+    const mcpAllowEntries = toolAllowlist.filter((t) => t.startsWith('mcp__'))
+    if (mcpAllowEntries.length > 0) {
+      allowedTools = [...new Set([...allowedTools, ...mcpAllowEntries])]
+    }
+  }
+  return allowedTools
+}
+
+/**
  * SSE heartbeat 간격 (ms). 프록시/CDN idle timeout(일반적 60초)의 절반.
  * 결재 대기·도구 무응답 구간에서도 30초 안에 한 번씩 빈 comment를 push해
  * idle proxy timeout(SSE 무응답 종료)을 방지한다.
@@ -1023,21 +1048,18 @@ export async function handleChat(rawParams, res, req) {
     // 6개 파일 도구 + 백그라운드 잡 도구 2종(BashOutput/KillShell) + web server tool 2종.
     // WebSearch/WebFetch는 로컬 실행기가 없는 Anthropic server-side tool — allowlist에 노출되면
     // turn-manager가 request tools[]에 web_search_20250305 / web_fetch_20250910로 자동 등록한다 (llm-wrapper webTools 경유).
+    // 배타적 화이트리스트(P3): WebSearch/WebFetch는 server-side tool이라 canUseTool(evaluatePolicy)을
+    // 안 타므로, allowedTools 목록에서 직접 빼야 request tools[] 자동 등록을 막을 수 있다. MCP 위키 도구
+    // 노출(availability) 복원 로직은 resolveAllowedTools에 위치(테스트 seam). 자세한 근거는 그 함수 doc 참조.
     const SDK_BUILTIN_TOOLS = ['Read', 'Edit', 'Glob', 'Grep', 'Bash', 'Write', 'BashOutput', 'KillShell', 'WebSearch', 'WebFetch']
     const userTools = Array.isArray(params.tools) && params.tools.length > 0
       ? params.tools
       : []
-    let allowedTools = [...new Set([...SDK_BUILTIN_TOOLS, ...userTools])]
-    // 배타적 화이트리스트(P3): WebSearch/WebFetch는 server-side tool이라 canUseTool(evaluatePolicy)을
-    // 안 타므로, allowedTools 목록에서 직접 빼야 request tools[] 자동 등록을 막을 수 있다. allowlist가
-    // 오면 목록 밖 SDK 빌트인(웹검색·파일읽기 등)을 제거 — "위키 전용" 시 웹 이탈 원천 차단. bare 매칭.
-    const toolAllowlist = params.policy?.toolAllowlist
-    if (Array.isArray(toolAllowlist) && toolAllowlist.length > 0) {
-      allowedTools = allowedTools.filter((t) => {
-        const bare = t.replace(/^mcp__.+?__/, '')
-        return toolAllowlist.includes(t) || toolAllowlist.includes(bare)
-      })
-    }
+    const allowedTools = resolveAllowedTools({
+      builtins: SDK_BUILTIN_TOOLS,
+      userTools,
+      toolAllowlist: params.policy?.toolAllowlist,
+    })
 
     // MCP 서버 설정 (HTTP transport)
     const mcpServers = Array.isArray(params.mcp_servers) ? params.mcp_servers : []
