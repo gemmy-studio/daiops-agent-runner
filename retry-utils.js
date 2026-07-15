@@ -92,6 +92,13 @@ export function classifyLlmError(err) {
     return { reason: 'billing', retryable: false, status }
   }
   if (status === 401 || status === 403) return { reason: 'auth', retryable: false, status }
+  if (status === 413) {
+    // 요청 body 과대 — LLM 프록시 전송 한도(예: Vercel FUNCTION_PAYLOAD_TOO_LARGE)에 걸린 것.
+    // 키 결함 아님. retryable:false — daiops의 generic 재시도는 body를 줄이지 않아 같은 크기로
+    // 재전송하면 또 413이 된다. 사전 축소는 발신 전 크기 가드가 담당(payload budget guard).
+    // (hermes는 retryable+compress지만 그 재시도는 압축을 동반 — daiops 재시도 인프라와 다르다.)
+    return { reason: 'payload_too_large', retryable: false, status }
+  }
   // context window 초과 — 400의 한 갈래. bad_request보다 먼저 매칭해 사용자에게 "새 대화" 유도.
   if (status === 400 && /prompt is too long|context length|context window|maximum.*tokens|too many tokens/.test(message)) {
     return { reason: 'context_overflow', retryable: false, status }

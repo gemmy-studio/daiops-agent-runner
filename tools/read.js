@@ -74,7 +74,7 @@ export async function runRead(input, ctx = {}) {
     }
     if (stat.size > MAX_VISION_IMAGE_BYTES) {
       return {
-        content: `Read: '${resolved}' is too large to inspect inline (${stat.size} bytes; limit ${MAX_VISION_IMAGE_BYTES}). Resize or downscale it below ~3.75MB first.`,
+        content: `Read: '${resolved}' is too large to inspect inline (${stat.size} bytes; limit ${MAX_VISION_IMAGE_BYTES} bytes ≈ ${(MAX_VISION_IMAGE_BYTES / 1_000_000).toFixed(1)}MB). Resize or downscale it below the limit first.`,
         is_error: true,
       }
     }

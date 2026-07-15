@@ -139,3 +139,73 @@ export async function enforceTurnResultBudget(toolResults, { onOffload, budgetCh
   if (offloaded > 0) onOffload?.({ offloaded, freedChars })
   return offloaded
 }
+
+/** 이미지 evict 시 남기는 플레이스홀더 마커(재-evict 무한 방지 = 멱등). */
+export const IMAGE_EVICT_MARKER = '…[이미지 문맥에서 내림]'
+
+function isImageBlock(blk) {
+  return !!(blk && blk.type === 'image' && blk.source && typeof blk.source.data === 'string')
+}
+
+/** 같은 컨테이너의 텍스트 블록에서 원본 경로 추출 (read.js: `Image '<path>' (...)`). 없으면 null. */
+function extractImagePath(container) {
+  for (const b of container) {
+    if (b && b.type === 'text' && typeof b.text === 'string') {
+      const m = b.text.match(/Image '([^']+)'/)
+      if (m) return m[1]
+    }
+  }
+  return null
+}
+
+/**
+ * 메시지 트리 전체에서 base64 이미지 블록을 시간순(오래된 것부터)으로 찾아, 최근 keepRecentImages개는
+ * 보호하고 나머지를 경로 참조 텍스트로 치환한다(in-place). char 예산(enforceTurnResultBudget)이 못 잡는
+ * 이미지 byte를 발신 전 크기 가드(turn-manager)에서 덜어내기 위한 수단.
+ *
+ * 원본 이미지는 샌드박스 FS(/workspace/.attachments 등)에 그대로 남아, 모델이 Read(path)로 재로드 가능.
+ *
+ * @param {Array<{role?:string, content?:unknown}>} messages
+ * @param {{ bytesToFree?: number, keepRecentImages?: number }} [opts]
+ *   bytesToFree: 최소 이만큼(base64 chars) 회수하면 중단. 미지정 시 evictable 전부.
+ *   keepRecentImages: 가장 최근 N개 이미지는 보호(현재 turn 분석 대상 가능성). 기본 1.
+ * @returns {{ evicted: number, freedBytes: number }}
+ */
+export function evictImagesForBudget(messages, { bytesToFree = Infinity, keepRecentImages = 1 } = {}) {
+  if (!Array.isArray(messages)) return { evicted: 0, freedBytes: 0 }
+
+  // 이미지 블록 수집 — 두 형태: (a) 메시지 top-level 블록, (b) tool_result.content 중첩 블록.
+  const refs = []
+  for (const m of messages) {
+    if (!m || !Array.isArray(m.content)) continue
+    for (let i = 0; i < m.content.length; i++) {
+      const blk = m.content[i]
+      if (isImageBlock(blk)) {
+        refs.push({ container: m.content, index: i })
+      } else if (blk && Array.isArray(blk.content)) {
+        for (let j = 0; j < blk.content.length; j++) {
+          if (isImageBlock(blk.content[j])) refs.push({ container: blk.content, index: j })
+        }
+      }
+    }
+  }
+
+  // 최근 keepRecentImages개 보호 → 나머지를 오래된 것부터 evict.
+  const evictable = refs.slice(0, Math.max(0, refs.length - Math.max(0, keepRecentImages)))
+  let evicted = 0
+  let freedBytes = 0
+  for (const ref of evictable) {
+    if (freedBytes >= bytesToFree) break
+    const img = ref.container[ref.index]
+    const path = extractImagePath(ref.container)
+    freedBytes += img.source.data.length
+    ref.container[ref.index] = {
+      type: 'text',
+      text: path
+        ? `${IMAGE_EVICT_MARKER} 필요하면 Read("${path}") 로 다시 여세요.`
+        : `${IMAGE_EVICT_MARKER} (원본 경로 미상)`,
+    }
+    evicted++
+  }
+  return { evicted, freedBytes }
+}

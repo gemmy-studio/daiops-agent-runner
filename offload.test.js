@@ -8,8 +8,15 @@ import os from 'node:os'
 const TMP = path.join(os.tmpdir(), `offload-test-${process.pid}`)
 process.env.AGENT_RUNNER_OFFLOAD_DIR = TMP
 
-const { enforceTurnResultBudget, truncateMiddle, TURN_RESULT_BUDGET_CHARS, OFFLOAD_MARKER } =
+const { enforceTurnResultBudget, truncateMiddle, TURN_RESULT_BUDGET_CHARS, OFFLOAD_MARKER, evictImagesForBudget, IMAGE_EVICT_MARKER } =
   await import('./offload.js')
+
+function imgBlock(bytes) {
+  return { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(bytes) } }
+}
+function toolResultWithImage(path, bytes) {
+  return { type: 'tool_result', content: [{ type: 'text', text: `Image '${path}' (png, ${bytes} bytes):` }, imgBlock(bytes)] }
+}
 
 describe('truncateMiddle', () => {
   it('maxChars 이하면 원본 유지', () => {
@@ -102,5 +109,44 @@ describe('enforceTurnResultBudget', () => {
     const n = await enforceTurnResultBudget(results, { budgetChars: 50_000 })
     assert.equal(n, 0)
     assert.equal(results[0].content, mid)
+  })
+})
+
+describe('evictImagesForBudget', () => {
+  it('오래된 이미지부터 evict, 최근 1개는 보호', () => {
+    const messages = [
+      { role: 'user', content: [toolResultWithImage('/workspace/a.png', 1000)] },
+      { role: 'user', content: [toolResultWithImage('/workspace/b.png', 1000)] },
+      { role: 'user', content: [toolResultWithImage('/workspace/c.png', 1000)] },
+    ]
+    const { evicted, freedBytes } = evictImagesForBudget(messages, { keepRecentImages: 1 })
+    assert.equal(evicted, 2) // 3개 중 최근 1개 보호
+    assert.equal(freedBytes, 2000)
+    // 오래된 두 개는 경로 참조 텍스트로 치환됨
+    assert.match(messages[0].content[0].content[1].text, /a\.png/)
+    assert.ok(messages[0].content[0].content[1].text.startsWith(IMAGE_EVICT_MARKER))
+    // 최근 것은 이미지 블록 유지
+    assert.equal(messages[2].content[0].content[1].type, 'image')
+  })
+
+  it('bytesToFree 충족 시 조기 중단', () => {
+    const messages = [
+      { role: 'user', content: [toolResultWithImage('/a.png', 1000)] },
+      { role: 'user', content: [toolResultWithImage('/b.png', 1000)] },
+      { role: 'user', content: [toolResultWithImage('/c.png', 1000)] },
+    ]
+    const { evicted } = evictImagesForBudget(messages, { bytesToFree: 500, keepRecentImages: 0 })
+    assert.equal(evicted, 1) // 1개(1000B)면 500B 충족
+  })
+
+  it('top-level 이미지 블록도 evict, 경로 미상은 안내 텍스트', () => {
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'attached' }, imgBlock(500)] },
+      { role: 'user', content: [toolResultWithImage('/keep.png', 100)] },
+    ]
+    const { evicted } = evictImagesForBudget(messages, { keepRecentImages: 1 })
+    assert.equal(evicted, 1)
+    assert.equal(messages[0].content[1].type, 'text')
+    assert.match(messages[0].content[1].text, /원본 경로 미상/)
   })
 })

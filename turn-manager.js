@@ -23,7 +23,7 @@
 
 import { createMcpToolRegistry, isMcpToolName } from './mcp-client.js'
 import { withJitteredRetry } from './retry-utils.js'
-import { enforceTurnResultBudget } from './offload.js'
+import { enforceTurnResultBudget, evictImagesForBudget } from './offload.js'
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -72,6 +72,16 @@ const PRUNE_PROTECT_TAIL_CHARS = (() => {
 })()
 /** char↔token 대략 환산(hermes _CHARS_PER_TOKEN=4). 프리엠티브 추정 전용. */
 const CHARS_PER_TOKEN = 4
+
+/**
+ * 발신 전 요청 body byte 상한. LLM 프록시(Vercel 함수)의 요청 body 한도(~4.5MB, 엣지가 함수 실행 전
+ * FUNCTION_PAYLOAD_TOO_LARGE로 반려)보다 낮게 잡아 사전에 축소·차단한다. char 예산·token 추정이 못 잡는
+ * base64 이미지 누적까지 "실제 직렬화 byte"라는 단일 진실 지표로 방어(opencode Buffer.byteLength 차용).
+ */
+const REQUEST_BYTE_BUDGET = (() => {
+  const v = Number(process.env.AGENT_RUNNER_REQUEST_BYTE_BUDGET)
+  return Number.isFinite(v) && v > 0 ? v : 4_000_000
+})()
 /** 이 길이 이하 tool_result는 요약 이득이 없어 건너뜀. */
 const PRUNE_MIN_CHARS = 200
 /** 이미 프루닝된 결과를 식별하는 마커(재프루닝 무한 방지 = 멱등). */
@@ -1090,7 +1100,7 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   // 소비한 뒤에야 결과를 반환하므로 — turn-manager가 아직 아무것도 yield하지 않은 시점 — 이 함수 전체를
   // 재시도해도 SSE seq 중복/상태 오염이 없다 (retry-utils 원칙: 첫 yield 전까지만 재시도).
   const runTurnRequest = async () => {
-    const body = buildAnthropicRequest({
+    const buildBody = () => buildAnthropicRequest({
       model: input.options.model,
       systemPrompt: input.options.systemPrompt,
       messages,
@@ -1106,6 +1116,38 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       // end_turn 감지 후 forcing phase에서만 tool_choice를 강제한다(AGENT-API-5).
       toolChoice: structuredForcing ? { type: 'tool', name: structuredToolName } : undefined,
     })
+    let body = buildBody()
+    let payload = JSON.stringify(body)
+
+    // B2 발신 전 크기 가드: 직렬화 byte가 전송 예산 초과면 prune + 이미지 evict로 축소 후 재측정.
+    // 그래도 초과면 무의미한 413 왕복 대신 조기 종료(classifyLlmError → payload_too_large → cloud 친화 안내).
+    let payloadBytes = Buffer.byteLength(payload, 'utf8')
+    if (payloadBytes > REQUEST_BYTE_BUDGET) {
+      pruneOldToolResults(messages, {
+        protectTailCount: PRUNE_PROTECT_TAIL,
+        protectTailChars: PRUNE_PROTECT_TAIL_CHARS,
+      })
+      const over = payloadBytes - REQUEST_BYTE_BUDGET
+      // base64 팽창 여유를 위해 초과분보다 조금 더 회수(over × 1.2).
+      const { evicted, freedBytes } = evictImagesForBudget(messages, {
+        bytesToFree: Math.ceil(over * 1.2),
+        keepRecentImages: 1,
+      })
+      body = buildBody()
+      payload = JSON.stringify(body)
+      payloadBytes = Buffer.byteLength(payload, 'utf8')
+      ctx.onOffload?.({ reason: 'payload_budget', evictedImages: evicted, freedBytes, payloadBytes })
+      if (payloadBytes > REQUEST_BYTE_BUDGET) {
+        throw Object.assign(
+          new Error(
+            `LLM 요청 payload 과대 413: 축소 후에도 ${payloadBytes} bytes > 예산 ${REQUEST_BYTE_BUDGET} ` +
+            `(이미지 ${evicted}개 내림)`,
+          ),
+          { status: 413, body: 'payload exceeds transport budget after compaction' },
+        )
+      }
+    }
+
     // 요청 전용 AbortController — 부모 signal(세션 abort)을 링크하되, stale watchdog이
     // *이 요청만* 끊을 수 있게 분리한다(부모를 직접 abort하면 세션 전체가 죽는다).
     const reqController = new AbortController()
@@ -1118,13 +1160,16 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       const res = await fetchFn(upstream.url, {
         method: 'POST',
         headers: upstream.headers,
-        body: JSON.stringify(body),
+        body: payload, // 위에서 직렬화·크기검증 완료 (재직렬화 회피)
         signal: reqController.signal,
       })
       if (!res.ok) {
         const errText = await safeReadText(res)
+        // 413은 대개 upstream이 Anthropic이 아니라 LLM 프록시(Vercel) 전송 한도 초과 —
+        // "Anthropic API"로 라벨하면 원인 오인. status로 분기해 정확히 표기(classifyLlmError는 status로 분류).
+        const prefix = res.status === 413 ? 'LLM 요청 payload 과대' : 'Anthropic API'
         throw Object.assign(
-          new Error(`Anthropic API ${res.status}: ${errText.slice(0, 500)}`),
+          new Error(`${prefix} ${res.status}: ${errText.slice(0, 500)}`),
           { status: res.status, body: errText },
         )
       }

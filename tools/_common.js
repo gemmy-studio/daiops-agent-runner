@@ -90,10 +90,16 @@ export const VISION_MEDIA_TYPES = Object.freeze({
 })
 
 /**
- * vision 인라인 상한. Anthropic API는 이미지당 base64 페이로드 5MB가 한도이고
- * base64는 원본의 약 1.37배이므로, 원본 ~3.75MB까지만 인라인한다(초과 시 안내로 폴백, resize 유도).
+ * vision 인라인 상한. 종전엔 Anthropic 이미지 한도(base64 5MB)에 맞춰 원본 ~3.75MB였으나, 실제 병목은
+ * LLM 프록시(Vercel 함수)의 요청 body 한도(~4.5MB)다. base64(원본×4/3) 한 장이 이 전송 예산을 단독으로
+ * 위협하지 않도록 base64 ≤ ~3.3MB(원본 ~2.5MB) 기준으로 낮춘다. 초과분은 안내로 폴백(resize 유도),
+ * 여러 장 누적은 turn-manager 발신 전 크기 가드가 오래된 것부터 evict한다. (다운스케일은 러너 deps=0라 미채택.)
+ * env AGENT_RUNNER_MAX_VISION_IMAGE_BYTES로 override.
  */
-export const MAX_VISION_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) // ≈ 3.75MB
+export const MAX_VISION_IMAGE_BYTES = (() => {
+  const v = Number(process.env.AGENT_RUNNER_MAX_VISION_IMAGE_BYTES)
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 2_500_000 // 원본 ~2.5MB → base64 ~3.33MB
+})()
 
 /**
  * 경로 해석:

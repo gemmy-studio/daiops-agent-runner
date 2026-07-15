@@ -51,6 +51,11 @@ describe('classifyLlmError', () => {
     assert.equal(c.reason, 'overloaded')
     assert.equal(c.retryable, true)
   })
+  it('413 → payload_too_large, non-retryable (같은 크기 재전송 방지)', () => {
+    const c = classifyLlmError({ status: 413, message: 'Request Entity Too Large FUNCTION_PAYLOAD_TOO_LARGE', body: 'FUNCTION_PAYLOAD_TOO_LARGE' })
+    assert.equal(c.reason, 'payload_too_large')
+    assert.equal(c.retryable, false)
+  })
   it('500 → server_error retryable', () => {
     const c = classifyLlmError({ status: 500 })
     assert.equal(c.reason, 'server_error')
