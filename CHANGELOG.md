@@ -2,6 +2,11 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.7.9] — 2026-07-17
+
+### Removed
+- **성공/실패 무관 반복 도구 하드 중단(`REPEATED_TOOL_THRESHOLD=10`) 제거 (ADR38 Phase 3)** — 같은 도구·같은 입력을 연속 10회 호출하면 성공/실패와 무관하게 `abortController.abort()`로 루프를 하드 종료(`repeated_tool_loop` 에러)하던 옛 가드를 제거했다. 상태 폴링·같은 파일 반복 읽기처럼 **매번 성공하며 진전하는** 정상 워크플로우를 루프로 오판해 중단하던 문제였다. 반복 루프 판단은 실패 기반 `RepeatFailureGuard`(0.7 이전 도입: 같은 `(도구,입력)` 실패 3회 또는 성공 없는 연속 실패 6회 시 해당 호출만 deny)로 일원화한다. 성공만 반복하는 무해한 경우는 진전으로 보고 통과시키되, 전체 폭주는 turn budget(`max_turns` 기본 50)이 백스톱으로 잡는다. schemaVersion 불변(§2 계약 무변경).
+
 ## [0.7.6] — 2026-07-12
 
 ### Changed

@@ -79,9 +79,6 @@ const MAX_AUTO_EXTENSIONS = 3
 /** 한 번 자동 연장 시 추가되는 turn budget. 기본 50 + 3회 연장 = 최대 140 silent. */
 const AUTO_EXTEND_INCREMENT = 30
 
-/** 같은 도구 연속 호출 임계 — 초과하면 루프 의심으로 자동 종료. */
-const REPEATED_TOOL_THRESHOLD = 10
-
 /** SDK maxTurns의 절대 상한. 자체 카운터가 단독 통제하므로 SDK는 brake 역할만. */
 const SDK_HARD_MAX_TURNS = 300
 
@@ -1326,13 +1323,7 @@ export async function handleChat(rawParams, res, req) {
     let turnBudget = params.max_turns
     let extensionsUsed = 0
 
-    // 같은 도구 + 같은 입력 연속 호출 감지 — 루프 의심 자동 종료 신호.
-    // toolName만 비교하면 한글 파일 분석 등 정상 워크플로우(서로 다른 Bash 명령 N회)도 false
-    // positive로 잡히므로 toolKey = name + 입력 fingerprint로 식별. 입력이 바뀌면 진행 신호로
-    // 간주해 카운터 리셋.
-    let lastToolKey = ''
-    let repeatedToolCount = 0
-    /** 도구 루프/턴 한도로 자연 종료 결정 시 outer for-await을 break하기 위한 플래그. */
+    /** 턴 한도로 자연 종료 결정 시 outer for-await을 break하기 위한 플래그. */
     let forceTerminate = false
 
     // MCP 서버가 있으면 SDK에 전달 (네이티브 HTTP transport)
@@ -1463,32 +1454,10 @@ export async function handleChat(rawParams, res, req) {
             const toolName = String(block.name ?? '')
             const toolInput = block.input ?? {}
 
-            // 같은 도구 + 같은 입력 연속 호출만 루프로 판단. 입력이 달라지면 진행 신호로 보고
-            // 카운터 리셋(예: Bash로 서로 다른 명령 N회, Read로 다른 파일 N회는 정상).
-            // 진짜 stuck 패턴은 동일 input을 반복하는 상태(예: 같은 명령·같은 파일 N회).
-            let inputFingerprint = ''
-            try {
-              inputFingerprint = JSON.stringify(toolInput) ?? ''
-            } catch {
-              /* 순환 참조 등 — 빈 문자열로 안전 처리 */
-            }
-            const toolKey = `${toolName}:${inputFingerprint}`
-            if (toolKey === lastToolKey) {
-              repeatedToolCount++
-            } else {
-              lastToolKey = toolKey
-              repeatedToolCount = 1
-            }
-            if (repeatedToolCount >= REPEATED_TOOL_THRESHOLD) {
-              emitSseEvent(sessionId, 'error', {
-                code: 'repeated_tool_loop',
-                message: `같은 도구(${toolName})를 같은 입력으로 ${repeatedToolCount}번 반복해 루프로 판단해 멈췄어요. 다른 방식으로 접근이 필요해요`,
-                recoverable: false,
-              })
-              abortController.abort()
-              forceTerminate = true
-              break
-            }
+            // 반복 루프 판단은 RepeatFailureGuard(canUseTool 사전 차단 + tool_result 기록)로 일원화.
+            // 성공/실패 무관하게 동일 호출을 세던 옛 가드(REPEATED_TOOL_THRESHOLD)는 제거 — 성공하는
+            // 폴링·읽기 도구를 루프로 오판해 하드 중단하던 문제(ADR38 Phase 3). 성공만 반복하는
+            // 무해한 경우는 진전으로 보고 통과시키되, 전체 폭주는 turn budget(max_turns)이 백스톱.
 
             // 지식 경로 접근 감지 — /workspace/knowledge/ 하위를 읽는 도구면 플래그.
             // 클라우드 측 stream-handler가 이 플래그를 보고 recordDocumentAccess로 기록.
