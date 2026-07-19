@@ -994,14 +994,90 @@ export function resolveUpstream(ctx = {}) {
   return { url: ANTHROPIC_API_URL, headers: directHeaders() }
 }
 
+function isToolUseBlock(b) {
+  return b && typeof b === 'object' && b.type === 'tool_use' && typeof b.id === 'string'
+}
+function isToolResultBlock(b) {
+  return b && typeof b === 'object' && b.type === 'tool_result' && typeof b.tool_use_id === 'string'
+}
+
+/** content(문자열 또는 블록배열)를 블록배열로 승격. 빈 문자열은 빈 배열. */
+function toBlockArray(c) {
+  if (Array.isArray(c)) return c
+  if (typeof c === 'string' && c.length > 0) return [{ type: 'text', text: c }]
+  return []
+}
+
+/** 두 content 병합 — 둘 다 문자열이면 문자열, 하나라도 배열이면 배열로 이어붙인다. */
+function mergeContent(a, b) {
+  if (typeof a === 'string' && typeof b === 'string') {
+    return a ? (b ? `${a}\n\n${b}` : a) : b
+  }
+  return [...toBlockArray(a), ...toBlockArray(b)]
+}
+
+/** 연속 동일 role 병합 + 선행 assistant 제거(첫 메시지는 user여야 한다). 배열 content도 병합. */
+function mergeAndAlign(messages) {
+  const out = []
+  for (const m of messages) {
+    const role = m?.role === 'assistant' ? 'assistant' : 'user'
+    const content = m?.content ?? ''
+    if (out.length === 0 && role === 'assistant') continue
+    const prev = out[out.length - 1]
+    if (prev && prev.role === role) {
+      prev.content = mergeContent(prev.content, content)
+    } else {
+      out.push({ role, content })
+    }
+  }
+  return out
+}
+
+/**
+ * orphan tool_use/tool_result 제거로 Anthropic 짝 불변식을 보장한다.
+ * Anthropic은 매칭 tool_result 없는 tool_use(및 그 역)를 400으로 거부한다. 윈도우 경계에서
+ * leading assistant(tool_use)가 잘리면 뒤따르는 tool_result가 orphan이 되는 등에 대응.
+ * hermes convert_messages_to_anthropic / opencode·vellum pairing repair와 동일 취지.
+ * content가 전부 orphan이라 비면 메시지 자체를 드롭한다.
+ */
+function repairToolPairing(messages) {
+  const toolUseIds = new Set()
+  const toolResultIds = new Set()
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue
+    for (const b of m.content) {
+      if (isToolUseBlock(b)) toolUseIds.add(b.id)
+      if (isToolResultBlock(b)) toolResultIds.add(b.tool_use_id)
+    }
+  }
+  const out = []
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) {
+      out.push(m)
+      continue
+    }
+    const kept = m.content.filter((b) => {
+      if (isToolResultBlock(b)) return toolUseIds.has(b.tool_use_id)
+      if (isToolUseBlock(b)) return toolResultIds.has(b.id)
+      return true
+    })
+    if (kept.length > 0) out.push({ role: m.role, content: kept })
+  }
+  return out
+}
+
 /**
  * 대화 시드 messages를 Anthropic Messages API 제약에 맞게 정규화한다.
  *  - role은 'user' | 'assistant'로 강제 (그 외는 'user' 취급)
- *  - 연속 동일 role(문자열 content 한정)은 하나로 병합 — API는 role 교대를 요구한다
+ *  - 연속 동일 role은 하나로 병합 — API는 role 교대를 요구한다 (배열 content도 병합; ADR 18 Phase 3b)
  *  - 선행 assistant turn은 제거 — 첫 메시지는 user여야 한다
- * content가 배열(블록)인 경우는 병합하지 않고 그대로 둔다(Phase 4 native tool_use/tool_result 대비).
+ *  - orphan tool_use/tool_result 제거 — dangling 짝은 API 400을 유발한다
  * 히스토리를 XML로 감싸지 않고 role별로 넘기는 게 목적 — 내부 태그(<turn>/<conversation_history> 등)
  * 프라이밍 제거의 핵심.
+ *
+ * merge/strip이 짝을 깨고(leading strip → orphan result), repair의 drop이 다시 인접/선행을 만들 수
+ * 있어 안정될 때까지(최대 5회) 반복한다. 문자열-only 입력은 tool 블록이 없어 repair가 no-op이라
+ * 기존 동작과 100% 동일하다.
  *
  * @param {Array<{role?:string, content?: unknown}>|undefined} raw
  * @returns {Array<{role:'user'|'assistant', content: string | Array<unknown>}>}
@@ -1009,20 +1085,17 @@ export function resolveUpstream(ctx = {}) {
 export function normalizeConversationMessages(raw) {
   if (!Array.isArray(raw)) return []
   /** @type {Array<{role:'user'|'assistant', content: string | Array<unknown>}>} */
-  const out = []
-  for (const m of raw) {
-    const role = m?.role === 'assistant' ? 'assistant' : 'user'
-    const content = /** @type {string | Array<unknown>} */ (m?.content ?? '')
-    // 선행 assistant 제거 — 첫 메시지는 user여야 한다.
-    if (out.length === 0 && role === 'assistant') continue
-    const prev = out[out.length - 1]
-    if (prev && prev.role === role && typeof prev.content === 'string' && typeof content === 'string') {
-      prev.content = prev.content ? `${prev.content}\n\n${content}` : content
-    } else {
-      out.push({ role, content })
-    }
+  let msgs = raw.map((m) => ({
+    role: m?.role === 'assistant' ? 'assistant' : 'user',
+    content: /** @type {string | Array<unknown>} */ (m?.content ?? ''),
+  }))
+  for (let iter = 0; iter < 5; iter++) {
+    const prevLen = msgs.length
+    msgs = repairToolPairing(mergeAndAlign(msgs))
+    // 안정(길이 불변) 시 종료 — 한 번 더 돌려도 변화 없음을 확인하고 멈춘다.
+    if (msgs.length === prevLen) break
   }
-  return out
+  return msgs
 }
 
 /**

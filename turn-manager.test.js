@@ -552,14 +552,48 @@ describe('normalizeConversationMessages', () => {
     assert.deepEqual(out, [{ role: 'user', content: '진짜 시작' }])
   })
 
-  it('배열(블록) content는 병합하지 않고 보존 — Phase 4 native 블록 대비', () => {
-    const blocks = [{ type: 'tool_result', content: 'x' }]
+  it('연속 동일 role의 배열 content는 블록으로 병합(ADR18 Phase3b — role 교대 충족)', () => {
     const out = normalizeConversationMessages([
       { role: 'user', content: 'txt' },
-      { role: 'user', content: blocks },
+      { role: 'user', content: [{ type: 'text', text: 'more' }] },
     ])
-    assert.equal(out.length, 2)
-    assert.deepEqual(out[1].content, blocks)
+    assert.equal(out.length, 1)
+    assert.deepEqual(out[0].content, [
+      { type: 'text', text: 'txt' },
+      { type: 'text', text: 'more' },
+    ])
+  })
+
+  it('구조화 tool_use/tool_result 짝은 보존 + role 교대 유지', () => {
+    const out = normalizeConversationMessages([
+      { role: 'user', content: '해줘' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '완료' }] },
+      { role: 'user', content: '다음' },
+    ])
+    assert.deepEqual(out.map((m) => m.role), ['user', 'assistant', 'user', 'assistant', 'user'])
+    assert.deepEqual(out[1].content, [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }])
+    assert.deepEqual(out[2].content, [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }])
+  })
+
+  it('leading assistant(tool_use) 제거 시 orphan tool_result도 함께 제거(윈도우 경계 컷)', () => {
+    const out = normalizeConversationMessages([
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '완료' }] },
+      { role: 'user', content: '다음' },
+    ])
+    assert.deepEqual(out, [{ role: 'user', content: '다음' }])
+  })
+
+  it('매칭 tool_result 없는 orphan tool_use는 제거(dangling 방지)', () => {
+    const out = normalizeConversationMessages([
+      { role: 'user', content: '시작' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
+      { role: 'user', content: '다음' },
+    ])
+    assert.deepEqual(out, [{ role: 'user', content: '시작\n\n다음' }])
   })
 
   it('비배열/빈 입력 방어', () => {
