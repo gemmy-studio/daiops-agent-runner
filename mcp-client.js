@@ -42,6 +42,9 @@ const MAX_LIST_PAGES = 20
  * @property {string} url — JSON-RPC 엔드포인트 URL
  * @property {'http'} [transport] — 현재 'http'만 지원
  * @property {Record<string, string>} [headers] — outbound 헤더 (Authorization 등). 로그 마스킹 대상.
+ * @property {boolean} [allowLoopback] — true면 loopback(127.0.0.0/8·localhost·::1) URL을 예외 허용.
+ *   샌드박스 로컬 MCP 서버(127.0.0.1:PORT) 도달용. 신뢰된 호출자(cloud)만 설정한다.
+ *   메타데이터/내부 엔드포인트는 이 값과 무관하게 항상 차단된다.
  *
  * @typedef {Object} McpTool
  * @property {string} name — 원본 도구 이름 (프리픽스 전)
@@ -154,11 +157,15 @@ export function maskSecretValues(text, secretValues) {
  * MCP 서버 URL의 SSRF 가드. MCP 서버는 호출자(cloud)가 설정하므로 내부 호스트가
  * 정당할 수 있어 사설 IP 전체를 막지는 않는다. 대신 가장 위험한 벡터만 차단:
  *  - http/https 외 스킴(file:/ftp:/gopher: 등) 거부
- *  - 클라우드 메타데이터 엔드포인트(IMDS 169.254.169.254, *.internal) 거부
- *  - loopback(127.0.0.0/8, ::1, localhost) 거부
+ *  - 클라우드 메타데이터/내부 엔드포인트(IMDS 169.254.*, *.internal, 0.0.0.0, ::) — **항상** 거부
+ *  - loopback(127.0.0.0/8, ::1, localhost) 거부 — 단 `opts.allowLoopback`이면 예외 허용
+ *
+ * loopback 예외는 샌드박스 로컬 MCP 서버(127.0.0.1:PORT) 도달용이며, 신뢰된 호출자(cloud)가
+ * spec 단위로 명시 opt-in 했을 때만 열린다. 메타데이터/내부 차단은 opt-in과 무관하게 유지된다.
  * @param {string} rawUrl
+ * @param {{ allowLoopback?: boolean }} [opts]
  */
-function assertSafeMcpUrl(rawUrl) {
+function assertSafeMcpUrl(rawUrl, opts = {}) {
   let u
   try {
     u = new URL(rawUrl)
@@ -169,17 +176,22 @@ function assertSafeMcpUrl(rawUrl) {
     throw new Error(`createMcpHttpClient: unsupported URL scheme '${u.protocol}' (http/https only)`)
   }
   const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '')
-  const blocked =
-    host === 'localhost' ||
+
+  // 메타데이터/내부/wildcard 바인드 — allowLoopback와 무관하게 항상 차단 (SSRF 최우선 벡터).
+  const metadataBlocked =
     host.endsWith('.internal') ||
     host === '169.254.169.254' ||
     host.startsWith('169.254.') ||
     host === '0.0.0.0' ||
-    host === '::1' ||
-    host === '::' ||
-    /^127\./.test(host)
-  if (blocked) {
-    throw new Error(`createMcpHttpClient: blocked URL host '${u.hostname}' (loopback/metadata not allowed)`)
+    host === '::'
+  if (metadataBlocked) {
+    throw new Error(`createMcpHttpClient: blocked URL host '${u.hostname}' (metadata/internal not allowed)`)
+  }
+
+  // loopback — 기본 차단. 신뢰된 호출자가 allowLoopback로 opt-in 했을 때만 허용.
+  const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host)
+  if (loopback && !opts.allowLoopback) {
+    throw new Error(`createMcpHttpClient: blocked URL host '${u.hostname}' (loopback not allowed)`)
   }
 }
 
@@ -206,7 +218,7 @@ export function createMcpHttpClient(spec, ctx = {}) {
   if (spec.transport && spec.transport !== 'http') {
     throw new Error(`createMcpHttpClient: only 'http' transport is supported (got '${spec.transport}')`)
   }
-  assertSafeMcpUrl(spec.url)
+  assertSafeMcpUrl(spec.url, { allowLoopback: spec.allowLoopback === true })
 
   const fetchFn = ctx.fetchFn ?? globalThis.fetch
   if (typeof fetchFn !== 'function') {

@@ -408,6 +408,24 @@ describe('createMcpHttpClient — 기본', () => {
     assert.doesNotThrow(mk('https://mcp.example.com/rpc'))
   })
 
+  it('allowLoopback — loopback 예외는 spec opt-in 시에만 허용', () => {
+    const mk = (spec) => () => createMcpHttpClient(spec, {})
+    // opt-in 없으면 종전대로 차단
+    assert.throws(mk({ name: 'a', url: 'http://127.0.0.1:8790/' }), /loopback not allowed/)
+    // allowLoopback:true면 loopback 허용 (샌드박스 로컬 MCP 서버 도달)
+    assert.doesNotThrow(mk({ name: 'a', url: 'http://127.0.0.1:8790/', allowLoopback: true }))
+    assert.doesNotThrow(mk({ name: 'a', url: 'http://localhost:8790/', allowLoopback: true }))
+    // allowLoopback:true여도 메타데이터/내부 엔드포인트는 여전히 차단 (opt-in 무관)
+    assert.throws(
+      mk({ name: 'a', url: 'http://169.254.169.254/', allowLoopback: true }),
+      /metadata\/internal not allowed/,
+    )
+    assert.throws(
+      mk({ name: 'a', url: 'http://foo.internal/', allowLoopback: true }),
+      /metadata\/internal not allowed/,
+    )
+  })
+
   it('close 후 호출은 closed 에러', async () => {
     const { fetchFn } = mockMcpServer({
       routes: { initialize: () => ({}), 'tools/list': () => ({ tools: [] }) },

@@ -2,6 +2,11 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.8.0] — 2026-07-19
+
+### Added
+- **MCP SSRF 가드에 loopback opt-in 예외(`spec.allowLoopback`) — 샌드박스 로컬 MCP 서버 도달 허용 (daiops ADR34)** — `assertSafeMcpUrl`이 모든 loopback(`127.0.0.0/8`·`localhost`·`::1`)을 무조건 차단해, 샌드박스 안 로컬 MCP 서버(`http://127.0.0.1:8790`, knowledge-core `serve` — wiki fact 3형제)에 러너가 붙지 못했다(ADR34 로컬화 설계가 이 가드와 충돌). 이제 `McpServerSpec.allowLoopback === true`인 spec에 한해 loopback URL을 예외 허용한다. **opt-in은 신뢰된 호출자(cloud)가 자기 로컬 서버 spec에만 설정**하며, 메타데이터/내부 엔드포인트(IMDS `169.254.*`, `*.internal`, `0.0.0.0`, `::`)는 `allowLoopback`과 무관하게 **항상 차단**돼 SSRF 방어선은 유지된다. 에러 메시지도 `loopback not allowed` / `metadata/internal not allowed`로 분리. schemaVersion 불변(§2 계약 무변경).
+
 ## [0.7.9] — 2026-07-17
 
 ### Removed
