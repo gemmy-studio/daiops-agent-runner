@@ -26,7 +26,38 @@ export const MAX_READ_LIMIT = 2000
  * LLM이 셸에서 읽으면 프롬프트 인젝션으로 유출돼 워크스페이스 사칭에 악용될 수 있다.
  * 사용자 연동 시크릿은 BASH_ENV(/workspace/.integrations.env)로 의도적 주입이므로 건드리지 않는다.
  */
-const TOOL_ENV_DENYLIST = Object.freeze(['AGENT_RUNNER_TOKEN', 'LLM_PROXY_URL'])
+const TOOL_ENV_DENYLIST = Object.freeze([
+  'AGENT_RUNNER_TOKEN', 'LLM_PROXY_URL',
+  // 크레덴셜 주입 프록시 내부 설정 — 자식은 HTTP_PROXY/CA 형태로만 받고 원본 설정은 못 봐야 한다.
+  'DAIOPS_INJECTION_PROXY_URL', 'DAIOPS_INJECTION_CA_PATH',
+])
+
+/**
+ * 크레덴셜 주입 프록시가 활성(server.js가 DAIOPS_INJECTION_PROXY_URL 설정)이면,
+ * 자식 셸 env에 프록시/CA 변수를 주입한다. 러너 본체 process.env에는 HTTP_PROXY를 두지 않으므로
+ * (LLM/MCP 본체 fetch는 프록시 우회) 자식만 프록시를 탄다.
+ *  - curl=CURL_CA_BUNDLE, python requests=REQUESTS_CA_BUNDLE, node=NODE_EXTRA_CA_CERTS로 CA 신뢰
+ *  - NO_PROXY로 loopback은 프록시 우회(자기참조 루프 방지)
+ * @param {Record<string,string>} env
+ */
+function applyInjectionProxyEnv(env) {
+  const proxyUrl = process.env.DAIOPS_INJECTION_PROXY_URL
+  const caPath = process.env.DAIOPS_INJECTION_CA_PATH
+  if (!proxyUrl) return env
+  env.HTTP_PROXY = proxyUrl
+  env.HTTPS_PROXY = proxyUrl
+  env.http_proxy = proxyUrl
+  env.https_proxy = proxyUrl
+  env.NO_PROXY = 'localhost,127.0.0.1,::1'
+  env.no_proxy = 'localhost,127.0.0.1,::1'
+  if (caPath) {
+    env.NODE_EXTRA_CA_CERTS = caPath
+    env.SSL_CERT_FILE = caPath
+    env.CURL_CA_BUNDLE = caPath
+    env.REQUESTS_CA_BUNDLE = caPath
+  }
+  return env
+}
 
 /**
  * 내부 시크릿을 제거한 자식 프로세스 env를 구성한다.
@@ -48,7 +79,7 @@ export function buildToolEnv(extra = {}) {
     if (TOOL_ENV_DENYLIST.includes(k) || v === undefined) continue
     base[k] = v
   }
-  return base
+  return applyInjectionProxyEnv(base)
 }
 
 /** 절대 deny되는 쓰기 prefix — 시스템 디렉토리 보호. */

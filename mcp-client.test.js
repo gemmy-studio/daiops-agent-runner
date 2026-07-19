@@ -117,6 +117,37 @@ describe('maskTokensInText', () => {
     assert.equal(maskTokensInText(`token: ${jwt}`), 'token: ***')
   })
 
+  it('벤더 prefix 토큰 마스킹 (GitHub/Slack/Stripe/AWS/Google 등)', () => {
+    // 픽스처는 연결(concatenation)로 조립 — 소스에 실제 시크릿 리터럴이 남지 않아
+    // GitHub push protection(secret scanning) 오탐을 피하면서 런타임 값은 패턴과 일치.
+    const masked = [
+      'ghp_' + 'a'.repeat(36),
+      'xoxb-' + '1'.repeat(12) + '-' + 'a'.repeat(16),
+      'sk_' + 'live_' + 'a'.repeat(20),
+      'AKIA' + 'A'.repeat(16),
+      'AIza' + 'x'.repeat(35), // Google API key = AIza + 정확히 35자
+      'glpat-' + 'a'.repeat(20),
+    ]
+    for (const tok of masked) {
+      assert.equal(maskTokensInText(`val=${tok}`), 'val=***', `masked: ${tok}`)
+    }
+  })
+
+  it('PEM private key 블록 마스킹', () => {
+    const pem = '-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----'
+    assert.equal(maskTokensInText(pem), '***')
+  })
+
+  it('URL 내 자격증명(user:pass@) 마스킹', () => {
+    assert.ok(maskTokensInText('curl https://user:secretpass@api.example.com').includes('***'))
+  })
+
+  it('오탐 방지 — commit SHA·정상 URL·일반 텍스트는 보존', () => {
+    assert.equal(maskTokensInText('commit 9f8e7d6c5b4a3f2e1d0c9b8a7'), 'commit 9f8e7d6c5b4a3f2e1d0c9b8a7')
+    assert.equal(maskTokensInText('see https://github.com/anthropics/claude'), 'see https://github.com/anthropics/claude')
+    assert.equal(maskTokensInText('the quick brown fox 12345'), 'the quick brown fox 12345')
+  })
+
   it('non-string도 안전', () => {
     assert.equal(maskTokensInText(undefined), '')
     assert.equal(maskTokensInText({ a: 1 }), '[object Object]')

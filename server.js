@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
+import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -55,6 +56,56 @@ const AUTH_TOKEN = process.env.AGENT_RUNNER_TOKEN
 if (!AUTH_TOKEN) {
   console.error('[agent-runner] AGENT_RUNNER_TOKEN 환경변수가 설정되지 않았습니다. 종료합니다.')
   process.exit(1)
+}
+
+// ── 크레덴셜 주입 프록시 (Phase 1) — 상시 활성 ─────────────────────────────
+// 사용자 설정 시크릿은 placeholder로만 샌드박스에 두고, 프록시가 허용 호스트로 나갈 때만 실값 치환.
+const WORKSPACE_ID = process.env.WORKSPACE_ID ?? ''
+const INTEGRATIONS_ENV_PATH = process.env.AGENT_RUNNER_INTEGRATIONS_ENV ?? '/workspace/.integrations.env'
+
+/** @type {Awaited<ReturnType<typeof startInjectionBroker>> | null} */
+let injectionBroker = null
+
+/**
+ * 주입 프록시 (재)초기화: cloud materialize → 프록시 기동/맵 갱신 → placeholder .integrations.env 기록.
+ * 진짜 값은 프록시 프로세스 메모리에만. 실패는 fail-open(로그만) — 러너 자체는 계속 동작.
+ * 필수 설정(LLM_PROXY_ORIGIN/WORKSPACE_ID/토큰) 누락 시(로컬 dev 등) 프록시 없이 진행.
+ * @returns {Promise<{ ok: boolean, count?: number, error?: string }>}
+ */
+async function initInjectionProxy() {
+  if (!LLM_PROXY_ORIGIN || !WORKSPACE_ID || !AUTH_TOKEN) {
+    console.warn('[injection-proxy] 필수 설정 누락(LLM_PROXY_ORIGIN/WORKSPACE_ID/토큰) — 프록시 미기동')
+    return { ok: false, error: 'missing config' }
+  }
+  try {
+    const secrets = await fetchMaterializedSecrets({
+      proxyOrigin: LLM_PROXY_ORIGIN,
+      workspaceId: WORKSPACE_ID,
+      token: AUTH_TOKEN,
+    })
+    if (injectionBroker) {
+      // 이미 기동됨 → 맵만 교체 + 파일 재작성 (재기동 없이 다음 요청부터 반영)
+      const { buildInjectionMap } = await import('./proxy/injection-core.js')
+      const normalized = secrets.map((s) => ({ key: s.key, realValue: s.value, allowedHosts: s.allowedHosts ?? [] }))
+      const { placeholderByKey, injectionMap } = buildInjectionMap(normalized)
+      injectionBroker.injectionMap = injectionMap
+      injectionBroker.placeholderByKey = placeholderByKey
+      injectionBroker.proxy.updateMap(injectionMap)
+      await writePlaceholderEnvFile(INTEGRATIONS_ENV_PATH, placeholderByKey)
+      console.log(`[injection-proxy] 갱신 — 시크릿 ${secrets.length}건`)
+      return { ok: true, count: secrets.length }
+    }
+    injectionBroker = await startInjectionBroker({ secrets, logger: console })
+    // 자식 셸이 프록시/CA를 쓰도록 process.env에 설정 (buildToolEnv가 자식 env로만 번역).
+    process.env.DAIOPS_INJECTION_PROXY_URL = injectionBroker.proxyUrl
+    process.env.DAIOPS_INJECTION_CA_PATH = injectionBroker.caCertPath
+    await writePlaceholderEnvFile(INTEGRATIONS_ENV_PATH, injectionBroker.placeholderByKey)
+    console.log(`[injection-proxy] 기동 ${injectionBroker.proxyUrl} — 시크릿 ${secrets.length}건`)
+    return { ok: true, count: secrets.length }
+  } catch (err) {
+    console.error('[injection-proxy] 초기화 실패(fail-open):', err instanceof Error ? err.message : err)
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 /** @param {import('node:http').IncomingMessage} req */
@@ -278,6 +329,18 @@ const server = createServer(async (req, res) => {
     return
   }
 
+  // POST /v1/secrets/refresh — cloud가 시크릿 변경 시 호출 → 재-materialize + 프록시 맵/파일 갱신.
+  // (syncSecretsToSandbox가 호출. 프록시가 다음 요청부터 새 값/allowed_hosts 반영.)
+  if (req.method === 'POST' && url.pathname === '/v1/secrets/refresh') {
+    if (!verifyAuth(req)) {
+      sendJson(res, 401, { error: 'Unauthorized' })
+      return
+    }
+    const result = await initInjectionProxy()
+    sendJson(res, result.ok ? 200 : 500, result)
+    return
+  }
+
   sendJson(res, 404, { error: 'Not found' })
 })
 
@@ -323,4 +386,7 @@ process.on('unhandledRejection', (reason) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[agent-runner] listening on ${HOST}:${PORT}`)
+  // 크레덴셜 주입 프록시 상시 부팅. 실패해도 러너는 계속 동작(fail-open).
+  initInjectionProxy().catch((err) =>
+    console.error('[injection-proxy] 부팅 오류:', err instanceof Error ? err.message : err))
 })

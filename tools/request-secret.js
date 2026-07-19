@@ -62,6 +62,10 @@ export const RESERVED_SECRET_KEYS = Object.freeze(new Set([
   'NODE_OPTIONS', 'NODE_PATH', 'NODE_ENV', 'PYTHONPATH', 'PYTHONHOME', 'RUBYLIB', 'PERL5LIB',
   // daiops 인프라 시크릿/식별자
   'LLM_PROXY_URL', 'WORKSPACE_ID', 'AGENT_RUNNER_TOKEN', 'AGENT_RUNNER_PORT', 'ANTHROPIC_API_KEY',
+  // 크레덴셜 주입 프록시 제어 (Phase 1 사용자 시크릿 브로커) — 에이전트가 프록시 경로/CA 신뢰를
+  // 덮어써 MITM 주입을 우회하는 것을 사전 차단. (Agent Vault NODE_EXTRA_CA_CERTS/HTTPS_PROXY 모델)
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
   // OAuth 관리명 (harness-bundler가 우선 주입 — 충돌 방지)
   'SLACK_TOKEN', 'NOTION_TOKEN',
 ]))

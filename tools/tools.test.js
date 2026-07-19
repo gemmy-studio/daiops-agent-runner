@@ -56,6 +56,37 @@ describe('buildToolEnv — 내부 시크릿 스크럽', () => {
       process.env = prev
     }
   })
+
+  it('주입 프록시 활성 시 자식 env에 HTTP_PROXY/CA 주입', () => {
+    const prev = { ...process.env }
+    process.env.DAIOPS_INJECTION_PROXY_URL = 'http://127.0.0.1:19999'
+    process.env.DAIOPS_INJECTION_CA_PATH = '/tmp/ca.crt'
+    try {
+      const env = buildToolEnv()
+      assert.equal(env.HTTP_PROXY, 'http://127.0.0.1:19999')
+      assert.equal(env.HTTPS_PROXY, 'http://127.0.0.1:19999')
+      assert.equal(env.NODE_EXTRA_CA_CERTS, '/tmp/ca.crt')
+      assert.equal(env.CURL_CA_BUNDLE, '/tmp/ca.crt')
+      assert.equal(env.REQUESTS_CA_BUNDLE, '/tmp/ca.crt')
+      assert.match(env.NO_PROXY, /127\.0\.0\.1/)
+      // 원본 설정 변수는 자식에 노출 안 됨(denylist)
+      assert.equal(env.DAIOPS_INJECTION_PROXY_URL, undefined)
+      assert.equal(env.DAIOPS_INJECTION_CA_PATH, undefined)
+    } finally {
+      process.env = prev
+    }
+  })
+
+  it('주입 프록시 비활성(기본)이면 HTTP_PROXY 미주입', () => {
+    const prev = { ...process.env }
+    delete process.env.DAIOPS_INJECTION_PROXY_URL
+    try {
+      const env = buildToolEnv()
+      assert.equal(env.HTTP_PROXY, undefined)
+    } finally {
+      process.env = prev
+    }
+  })
 })
 
 /** 일회용 tmp 디렉토리 생성. */

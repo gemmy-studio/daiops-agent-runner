@@ -78,14 +78,49 @@ const SENSITIVE_HEADER_KEYS = new Set([
   'proxy-authorization',
 ])
 
-/** 인증 토큰 안에 포함될 가능성이 높은 패턴 — 에러 메시지에 우연히 노출됐을 때 마스킹.
- *  문자 클래스에 base64 변형 문자(`+/=`)도 포함해 sk-ant/Bearer 토큰의 padding까지 흡수.
- *  JWT는 3-segment 구조만 검사 (eyJ + base64url + . + base64url + . + base64url). */
+/** 인증 토큰 안에 포함될 가능성이 높은 패턴 — 에러 메시지·Bash stdout에 우연히 노출됐을 때 마스킹.
+ *  값 기반 마스킹(maskSecretValues)이 1차 방어(정확 일치), 이 패턴은 2차(모양 기반 — 값을 몰라도 잡음).
+ *  벤더 prefix 목록은 hermes-agent `agent/redact.py` `_PREFIX_PATTERNS`를 이식·보수화.
+ *  prefix-anchored라 일반 텍스트 오탐이 낮음(commit SHA·일반 base64는 prefix 불일치로 통과).
+ *  ⚠️ 이 마스킹은 심층방어이지 1차 방어가 아니다 — 1차는 애초에 진짜 값을 샌드박스에 안 두는 것
+ *  (Phase 1 placeholder 브로커). 짧은 토큰·인코딩 변형은 못 잡는다. */
 const TOKEN_VALUE_PATTERNS = [
+  // PEM private key 블록 (여러 줄)
+  /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/g,
+  // Bearer 헤더 값 (base64 padding까지 흡수)
   /Bearer\s+[A-Za-z0-9._\-+/=]+/gi,
+  // Anthropic / OpenAI (sk-ant-·sk-proj-·sk-admin-은 generic sk- 로 흡수)
   /sk-ant-[A-Za-z0-9_\-+/=]+/g,
   /sk-[A-Za-z0-9_\-+/=]{20,}/g,
-  /eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+/g, // JWT (3-segment)
+  // GitHub (PAT/OAuth/App/refresh + fine-grained pat)
+  /gh[posur]_[A-Za-z0-9]{36,}/g,
+  /github_pat_[A-Za-z0-9_]{22,}/g,
+  // GitLab PAT
+  /glpat-[A-Za-z0-9_\-]{20,}/g,
+  // Slack (bot/user/app/refresh/legacy)
+  /xox[baprs]-[A-Za-z0-9-]{10,}/g,
+  // Stripe 결제 (secret/restricted live·test + webhook signing)
+  /(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g,
+  /whsec_[A-Za-z0-9]{16,}/g,
+  // AWS access key id (장기 AKIA / 임시 ASIA)
+  /(?:AKIA|ASIA)[0-9A-Z]{16}/g,
+  // Google API 키 / OAuth access token
+  /AIza[0-9A-Za-z_\-]{35}/g,
+  /ya29\.[0-9A-Za-z_\-]+/g,
+  // SendGrid
+  /SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}/g,
+  // npm
+  /npm_[A-Za-z0-9]{36}/g,
+  // Twilio (Account SID / API Key SID — 32 hex, 하이픈 없어 generic sk- 와 무충돌)
+  /(?:AC|SK)[0-9a-fA-F]{32}/g,
+  // Notion internal integration token
+  /(?:secret_|ntn_)[A-Za-z0-9]{40,}/g,
+  // Telegram bot token
+  /\d{8,10}:[A-Za-z0-9_-]{35}/g,
+  // JWT (eyJ + base64url . base64url . base64url)
+  /eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+/g,
+  // URL 내 자격증명 (scheme://user:pass@host — scheme 앵커로 오탐 방지)
+  /\b[a-z][a-z0-9+.\-]*:\/\/[^\s:@/]+:[^\s:@/]+@/gi,
 ]
 
 /**
