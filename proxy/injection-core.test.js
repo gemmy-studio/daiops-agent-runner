@@ -8,6 +8,7 @@ import {
   isHostAllowed,
   substituteInText,
   substituteHeaders,
+  detectBlockedSecrets,
 } from './injection-core.js'
 
 describe('generatePlaceholder', () => {
@@ -122,5 +123,48 @@ describe('substituteHeaders', () => {
     const orig = { Authorization: `token ${gh}` }
     substituteHeaders(orig, 'api.github.com', injectionMap)
     assert.equal(orig.Authorization, `token ${gh}`)
+  })
+})
+
+describe('detectBlockedSecrets', () => {
+  const { placeholderByKey, injectionMap } = buildInjectionMap([
+    { key: 'GH_TOKEN', realValue: 'ghp_REAL', allowedHosts: ['api.github.com'] },
+    { key: 'NO_HOSTS', realValue: 'secret2', allowedHosts: [] },
+  ])
+  const gh = placeholderByKey.get('GH_TOKEN')
+  const nh = placeholderByKey.get('NO_HOSTS')
+
+  it('placeholder 존재 + 미허용 호스트 → 차단 목록에 포함', () => {
+    const blocked = detectBlockedSecrets([`Bearer ${gh}`], 'evil.example.com', injectionMap)
+    assert.deepEqual(blocked.map((b) => b.key), ['GH_TOKEN'])
+  })
+
+  it('placeholder 존재 + 허용 호스트 → 차단 아님', () => {
+    const blocked = detectBlockedSecrets([`Bearer ${gh}`], 'api.github.com', injectionMap)
+    assert.deepEqual(blocked, [])
+  })
+
+  it('allowedHosts 비면(fail-closed) 어느 호스트든 차단', () => {
+    const blocked = detectBlockedSecrets([`x ${nh}`], 'api.github.com', injectionMap)
+    assert.deepEqual(blocked.map((b) => b.key), ['NO_HOSTS'])
+  })
+
+  it('placeholder 없는 요청 → 차단 없음', () => {
+    const blocked = detectBlockedSecrets(['Bearer normal-token', '/path'], 'evil.example.com', injectionMap)
+    assert.deepEqual(blocked, [])
+  })
+
+  it('여러 문자열(헤더·path·body) 중 하나라도 있으면 탐지', () => {
+    const blocked = detectBlockedSecrets(['Authorization: x', '/api?k=' + gh, ''], 'evil.example.com', injectionMap)
+    assert.deepEqual(blocked.map((b) => b.key), ['GH_TOKEN'])
+  })
+
+  it('빈 injectionMap → 차단 없음', () => {
+    assert.deepEqual(detectBlockedSecrets([`Bearer ${gh}`], 'evil.example.com', new Map()), [])
+  })
+
+  it('값(realValue)은 반환에 포함하지 않음', () => {
+    const blocked = detectBlockedSecrets([`Bearer ${gh}`], 'evil.example.com', injectionMap)
+    assert.ok(!JSON.stringify(blocked).includes('ghp_REAL'))
   })
 })

@@ -44,11 +44,13 @@ function requestThroughProxy({ proxyPort, upstreamPort, caPem, authHeader }) {
       let data = ''
       t.on('data', (d) => (data += d))
       t.on('end', () => {
+        const statusMatch = data.match(/^HTTP\/\d\.\d (\d+)/)
+        const status = statusMatch ? Number(statusMatch[1]) : 0
         // chunked 인코딩일 수 있어 JSON 본문만 견고하게 추출({ ... })
         const start = data.indexOf('{')
         const end = data.lastIndexOf('}')
         const body = start >= 0 && end > start ? data.slice(start, end + 1) : data
-        try { resolve(JSON.parse(body)) } catch { reject(new Error(`parse: ${data}`)) }
+        try { resolve({ status, json: JSON.parse(body) }) } catch { reject(new Error(`parse: ${data}`)) }
       })
       t.on('error', reject)
     })
@@ -93,10 +95,11 @@ describe('InjectionProxy — CONNECT MITM + 치환 (실제 TLS)', () => {
       proxyPort, upstreamPort, caPem: cm.caCertPem,
       authHeader: `Bearer ${ph}`,
     })
-    assert.equal(res.auth, 'Bearer REAL_SECRET_VALUE')
+    assert.equal(res.status, 200)
+    assert.equal(res.json.auth, 'Bearer REAL_SECRET_VALUE')
   })
 
-  it('비허용 호스트 → placeholder 유지(진짜 값 유출 없음)', async () => {
+  it('비허용 호스트 → 403 차단(업스트림 미도달·진짜 값 유출 없음)', async () => {
     const { placeholderByKey, injectionMap } = buildInjectionMap([
       { key: 'MY_TOKEN', realValue: 'REAL_SECRET_VALUE', allowedHosts: ['api.other.com'] },
     ])
@@ -107,8 +110,26 @@ describe('InjectionProxy — CONNECT MITM + 치환 (실제 TLS)', () => {
       proxyPort, upstreamPort, caPem: cm.caCertPem,
       authHeader: `Bearer ${ph}`,
     })
-    // localhost는 allowedHosts에 없음 → 치환 안 됨 → 업스트림은 placeholder를 받음
-    assert.equal(res.auth, `Bearer ${ph}`)
-    assert.ok(!res.auth.includes('REAL_SECRET_VALUE'))
+    // localhost는 allowedHosts에 없음 → 프록시가 403으로 차단, 업스트림(echo)에 도달하지 않음
+    assert.equal(res.status, 403)
+    assert.equal(res.json.error, 'secret_host_not_allowed')
+    assert.equal(res.json.secret, 'MY_TOKEN')
+    assert.equal(res.json.host, 'localhost')
+    assert.equal(res.json.auth, undefined) // 업스트림 echo 없음
+    assert.ok(!JSON.stringify(res.json).includes('REAL_SECRET_VALUE'))
+  })
+
+  it('placeholder 없는 일반 요청 → 그대로 통과(차단 아님)', async () => {
+    const { injectionMap } = buildInjectionMap([
+      { key: 'MY_TOKEN', realValue: 'REAL_SECRET_VALUE', allowedHosts: ['api.other.com'] },
+    ])
+    proxy.updateMap(injectionMap)
+
+    const res = await requestThroughProxy({
+      proxyPort, upstreamPort, caPem: cm.caCertPem,
+      authHeader: 'Bearer some-normal-token',
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.json.auth, 'Bearer some-normal-token')
   })
 })

@@ -156,3 +156,30 @@ export function substituteHeaders(headers, host, injectionMap) {
   }
   return { headers: out, substituted: [...substituted] }
 }
+
+/**
+ * 요청(헤더 값·URL·바디)에 존재하지만 목적지 host가 allowedHosts에 없어 치환이 막히는
+ * placeholder들을 찾아낸다.
+ *
+ * 이런 요청은 placeholder를 그대로 업스트림에 흘리면 (a) 진짜 시크릿을 쓰려던 요청이 단순
+ * 인증 실패(401)로 나타나 원인 파악이 어렵고, (b) placeholder 자체가 미허용 호스트로 샌다.
+ * 프록시는 이 결과로 요청을 차단하고 "허용 호스트 미지정"을 명확히 알린다(fail-closed 유지).
+ *
+ * @param {string[]} texts — 검사할 문자열들(헤더 값·path·body 등)
+ * @param {string} host — 요청 목적지 호스트
+ * @param {Map<string,InjectionEntry>} injectionMap
+ * @returns {{ key: string, allowedHosts: string[] }[]} 차단된 시크릿(값 미포함)
+ */
+export function detectBlockedSecrets(texts, host, injectionMap) {
+  /** @type {{ key: string, allowedHosts: string[] }[]} */
+  const blocked = []
+  if (!injectionMap || injectionMap.size === 0) return blocked
+  const list = Array.isArray(texts) ? texts.filter((t) => typeof t === 'string' && t) : []
+  if (list.length === 0) return blocked
+  for (const [placeholder, entry] of injectionMap) {
+    if (!list.some((t) => t.includes(placeholder))) continue
+    if (isHostAllowed(host, entry.allowedHosts)) continue // 허용된 목적지면 정상 치환 — 차단 아님
+    blocked.push({ key: entry.key, allowedHosts: entry.allowedHosts })
+  }
+  return blocked
+}

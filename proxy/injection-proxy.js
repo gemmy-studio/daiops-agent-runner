@@ -14,7 +14,7 @@
 
 import http from 'node:http'
 import https from 'node:https'
-import { substituteInText, substituteHeaders, PLACEHOLDER_PREFIX } from './injection-core.js'
+import { substituteInText, substituteHeaders, detectBlockedSecrets, PLACEHOLDER_PREFIX } from './injection-core.js'
 
 /** hop-by-hop 헤더 — 프록시가 업스트림/클라이언트로 전달하지 않는다(RFC 7230 §6.1 + proxy-*). */
 const HOP_BY_HOP = Object.freeze([
@@ -151,6 +151,34 @@ export class InjectionProxy {
     // 헤더 치환 (원본 복사 — hop-by-hop 헤더 제거)
     const cleaned = { ...headers }
     for (const h of HOP_BY_HOP) delete cleaned[h]
+
+    // 차단 검사 — placeholder가 있으나 목적지가 미허용이면 업스트림에 흘리지 않고 명확한 403 반환.
+    // (그대로 forward하면 진짜 시크릿을 쓰려던 요청이 401로 나타나 원인 파악이 어렵고 placeholder가 샌다.)
+    const bodyHasPlaceholder = !!(bodyBuf && bodyBuf.length && bodyBuf.includes(PLACEHOLDER_PREFIX))
+    const scanTexts = [
+      ...Object.values(cleaned).map((v) => String(v ?? '')),
+      path,
+      bodyHasPlaceholder ? bodyBuf.toString('utf-8') : '',
+    ]
+    const blocked = detectBlockedSecrets(scanTexts, dest, this.injectionMap)
+    if (blocked.length > 0) {
+      const keys = blocked.map((b) => b.key)
+      this.log.warn('[injection-proxy] 시크릿 차단(호스트 미허용)', { host: dest, keys })
+      const payload = JSON.stringify({
+        error: 'secret_host_not_allowed',
+        secret: keys[0],
+        secrets: keys,
+        host: dest,
+        message: `이 시크릿(${keys.join(', ')})은 ${dest}에 대해 허용되지 않았어요. 워크스페이스 오너가 설정 → 시크릿의 허용 호스트에 ${dest}을(를) 추가해야 해요`,
+      })
+      res.writeHead(403, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(payload),
+      })
+      res.end(payload)
+      return
+    }
+
     const { headers: subHeaders } = substituteHeaders(cleaned, dest, this.injectionMap)
 
     // URL 치환 (쿼리파라미터에 placeholder가 있을 수 있음)
