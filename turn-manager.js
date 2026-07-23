@@ -1246,11 +1246,13 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
     // connect/헤더 수신 단계 타임아웃 — res(응답 헤더) 도착 전 hang 방어. res 도착 즉시 해제하므로
     // 스트리밍 body(streamWithStaleGuard 관할)에는 영향이 없다.
     let headersTimedOut = false
+    // unref하지 않는다 — 이 타이머는 반드시 발화해야 하는 방어선이다. unref하면 fetch가 pending인데
+    // 이벤트루프에 다른 활동이 없을 때(격리 실행/테스트) 타이머 발화 전에 루프가 idle 판정돼 abort가
+    // 누락된다. 요청당 생성 + res 도착/에러 시 finally에서 즉시 clear하므로 프로세스 종료를 막지 않는다.
     const headersTimer = setTimeout(() => {
       headersTimedOut = true
       reqController.abort()
     }, connectHeadersTimeoutMs)
-    headersTimer.unref?.()
     try {
       let res
       try {
