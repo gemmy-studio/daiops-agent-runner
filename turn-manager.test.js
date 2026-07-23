@@ -1973,9 +1973,10 @@ describe('runAnthropicTurnManager — connect/헤더 타임아웃 (P1①)', () =
         { fetchFn: hangingFetch(), apiKey: 'sk-test', signal: ac.signal, connectHeadersTimeoutMs: 10_000 },
       )) { /* drain */ }
     })()
-    setTimeout(() => ac.abort(), 30) // 헤더 타임아웃(10s)보다 먼저 부모 abort
+    const abortTimer = setTimeout(() => ac.abort(), 20) // 헤더 타임아웃보다 먼저 부모 abort
     let thrown
     try { await run } catch (err) { thrown = err }
+    clearTimeout(abortTimer)
     // 취소는 timeout 재작성 대상이 아님 — throw되면 ETIMEDOUT이 아니어야 하고, 조용히 종료돼도 무방.
     assert.ok(!thrown || thrown.code !== 'ETIMEDOUT')
   })
