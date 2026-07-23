@@ -12,6 +12,7 @@ import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './tools/request-secret.js'
 import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX } from './tools/remember.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
+import { postTerminalIngest } from './ingest-client.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
 import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail } from './retry-utils.js'
 import { maskTokensInText, maskSecretValues } from './mcp-client.js'
@@ -916,6 +917,11 @@ export async function handleChat(rawParams, res, req) {
     /** 사용자가 명시적으로 plan을 요구한 경우만 true. 메시지 텍스트 분류는 더 이상 사용하지 않음. */
     force_plan_mode: rawParams.force_plan_mode === true,
     session_id: rawParams.session_id ? String(rawParams.session_id) : undefined,
+    /**
+     * 진행 중 thinking 메시지의 DB id(ADR 41 Phase 3a-ii). 존재하면 turn 종료 시 terminal 결과를
+     * cloud `/api/internal/ingest`로 POST(backstop). 미지정(비대화형·구버전 cloud)이면 POST 생략.
+     */
+    message_id: rawParams.message_id ? String(rawParams.message_id) : undefined,
     /** 도구 루프 자체 카운터의 초기 budget. 일반 50, 자율 100. 임계(80%) 도달 시 plan_request로
      *  사용자 결재 → 계속 시 +30씩 budget 증가. 진짜 brake는 timeout_seconds(시간 cap)와
      *  사용자 abort. SDK maxTurns는 별도로 매우 큰 값(SDK_HARD_MAX)으로 고정해 자체 카운터가
@@ -999,6 +1005,11 @@ export async function handleChat(rawParams, res, req) {
   let totalInputTokens = 0
   let totalOutputTokens = 0
   const sessionId = params.session_id ?? crypto.randomUUID()
+  // ADR 41 Phase 3a-ii — turn 종료 시 cloud ingest로 POST할 terminal 결과. try/catch 양쪽에서 갱신하고
+  // finally에서 1회 POST(fail-soft). finalContent가 try 스코프 내부라 여기(outer)에 복제한다.
+  let terminalIngestContent = ''
+  let terminalIngestStatus = 'completed'
+  let terminalIngestErrorCode
   const abortController = new AbortController()
   const approvalManager = new ApprovalManager()
   const approvalTimeoutMs = params.approval_timeout_seconds * 1000
@@ -1586,6 +1597,9 @@ export async function handleChat(rawParams, res, req) {
       total_input_tokens: totalInputTokens,
       total_output_tokens: totalOutputTokens,
     })
+    // Phase 3a-ii backstop: 정상 종료 결과를 finally의 ingest POST가 쓸 수 있게 outer로 복제.
+    terminalIngestContent = finalContent
+    terminalIngestStatus = 'completed'
   } catch (err) {
     // T1: 원문 스택·body는 errors.log(영속)에만. cloud로는 "분류 코드 + 시크릿 마스킹한 한 줄 요약"만 보낸다.
     // (레퍼런스 3사 공통 원칙: 원문 금지, 분류 코드는 필수.) message는 기존 호환을 위해 고정 유지.
@@ -1601,6 +1615,10 @@ export async function handleChat(rawParams, res, req) {
       recoverable: false,
     })
     emitSseEvent(sessionId, 'done', { content: '', session_id: sessionId })
+    // Phase 3a-ii backstop: 에러도 terminal(status='error')로 마감 신호. content는 partial 유실(finalContent는
+    // try 스코프)이나 backstop의 값은 status 전이라 무해 — cloud 생존 시 onComplete의 풍부한 에러가 우선.
+    terminalIngestStatus = 'error'
+    terminalIngestErrorCode = cls.reason
   } finally {
     // 진행 중이던 도구 timer 모두 정리 (정상 종료/abort 무관).
     stopAllToolProgress()
@@ -1621,6 +1639,23 @@ export async function handleChat(rawParams, res, req) {
     } else {
       // 누군가 이미 정리. res 닫기만.
       if (!res.writableEnded) res.end()
+    }
+
+    // Phase 3a-ii backstop — turn 종료 결과를 cloud ingest로 POST(fail-soft, message_id 있을 때만).
+    // 정상 경로에선 cloud onComplete가 먼저 마감 → ingest는 no-op(already_finalized). cloud 릴레이가
+    // 죽은 경로에서만 러너가 실제 결과로 DB를 마감(QA#71). seq=최종 done 이벤트 seq. 예외는 비치명.
+    if (params.message_id) {
+      try {
+        await postTerminalIngest({
+          messageId: params.message_id,
+          seq: getBufferState(sessionId)?.lastSeq ?? 0,
+          status: terminalIngestStatus,
+          content: terminalIngestContent,
+          errorCode: terminalIngestErrorCode,
+        })
+      } catch {
+        /* ingest 실패는 비치명 — Track1 reaper가 2차 backstop */
+      }
     }
   }
 }
