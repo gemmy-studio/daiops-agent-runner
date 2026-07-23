@@ -1928,3 +1928,55 @@ describe('getAnthropicContextWindow / resolveOffloadBudgetChars (A4)', () => {
     }
   })
 })
+
+// ── connect/헤더 타임아웃 (P1① turn-hang 하드닝) ──────────────────────────
+/** 헤더를 영영 주지 않는 fetch — connect/헤더 단계 hang 시뮬레이션. abort되면 AbortError로 reject. */
+function hangingFetch() {
+  return function (_url, init) {
+    return new Promise((_, reject) => {
+      const sig = init?.signal
+      const rejectAbort = () => {
+        const e = new Error('The operation was aborted')
+        e.name = 'AbortError'
+        reject(e)
+      }
+      if (sig) {
+        if (sig.aborted) rejectAbort()
+        else sig.addEventListener('abort', rejectAbort, { once: true })
+      }
+    })
+  }
+}
+
+describe('runAnthropicTurnManager — connect/헤더 타임아웃 (P1①)', () => {
+  it('헤더 수신 전 hang이면 connectHeadersTimeoutMs 후 retryable timeout(ETIMEDOUT)으로 throw', async () => {
+    let thrown
+    try {
+      for await (const _ of runAnthropicTurnManager(
+        { prompt: '안녕', options: { model: 'claude-sonnet-4-6', cacheControl: false } },
+        { fetchFn: hangingFetch(), apiKey: 'sk-test', connectHeadersTimeoutMs: 50 },
+      )) { /* drain */ }
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, '타임아웃으로 throw되어야 함 (hang이면 이 테스트가 멈춤)')
+    // AbortError(classifyLlmError에서 non-retryable 'aborted')가 아니라 ETIMEDOUT(retryable)로 재작성돼야 함.
+    assert.equal(thrown.code, 'ETIMEDOUT')
+    assert.notEqual(thrown.name, 'AbortError')
+  })
+
+  it('부모(세션) signal abort는 ETIMEDOUT로 재작성하지 않는다(진짜 취소)', async () => {
+    const ac = new AbortController()
+    const run = (async () => {
+      for await (const _ of runAnthropicTurnManager(
+        { prompt: '안녕', options: { model: 'claude-sonnet-4-6', cacheControl: false } },
+        { fetchFn: hangingFetch(), apiKey: 'sk-test', signal: ac.signal, connectHeadersTimeoutMs: 10_000 },
+      )) { /* drain */ }
+    })()
+    setTimeout(() => ac.abort(), 30) // 헤더 타임아웃(10s)보다 먼저 부모 abort
+    let thrown
+    try { await run } catch (err) { thrown = err }
+    // 취소는 timeout 재작성 대상이 아님 — throw되면 ETIMEDOUT이 아니어야 하고, 조용히 종료돼도 무방.
+    assert.ok(!thrown || thrown.code !== 'ETIMEDOUT')
+  })
+})

@@ -46,6 +46,18 @@ export const STREAM_STALE_TIMEOUT_MS = (() => {
   return Number.isFinite(v) && v > 0 ? v : 120_000
 })()
 
+/**
+ * connect/헤더 수신 타임아웃 (ms) — fetch가 응답 헤더를 받기 전(connect·TLS·TTFB) 단계의 hang 방어.
+ * streamWithStaleGuard(STREAM_STALE_TIMEOUT_MS)는 res.body가 생긴 *이후* chunk-idle만 감시하므로,
+ * 헤더 수신 전 단계는 무방비였다(undici 기본 headersTimeout ~300s에만 의존 → 사용자 체감 "멈춤").
+ * res(헤더) 도착 즉시 해제되므로 스트리밍 body에는 영향이 없다. hermes httpx.Timeout(connect=10) 대응이되,
+ * Anthropic/LLM 프록시의 TTFB 여유를 감안해 넉넉히 잡는다. env로 override 가능(테스트·튜닝).
+ */
+export const CONNECT_HEADERS_TIMEOUT_MS = (() => {
+  const v = Number(process.env.AGENT_RUNNER_CONNECT_TIMEOUT_MS)
+  return Number.isFinite(v) && v > 0 ? v : 30_000
+})()
+
 /** stale watchdog이 read race를 끊을 때 던지는 내부 sentinel. */
 const STREAM_STALE = Symbol('stream-stale')
 
@@ -1115,6 +1127,8 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   if (typeof fetchFn !== 'function') {
     throw new Error('runAnthropicTurnManager: fetch is not available; provide ctx.fetchFn')
   }
+  // connect/헤더 타임아웃(ms) — 테스트·튜닝용 주입 허용(fetchFn 주입 철학과 동일). 미지정 시 모듈 기본값.
+  const connectHeadersTimeoutMs = ctx.connectHeadersTimeoutMs ?? CONNECT_HEADERS_TIMEOUT_MS
   const upstream = resolveUpstream(ctx)
   const { signal } = ctx
 
@@ -1229,13 +1243,37 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       if (signal.aborted) reqController.abort()
       else signal.addEventListener('abort', onParentAbort, { once: true })
     }
+    // connect/헤더 수신 단계 타임아웃 — res(응답 헤더) 도착 전 hang 방어. res 도착 즉시 해제하므로
+    // 스트리밍 body(streamWithStaleGuard 관할)에는 영향이 없다.
+    let headersTimedOut = false
+    const headersTimer = setTimeout(() => {
+      headersTimedOut = true
+      reqController.abort()
+    }, connectHeadersTimeoutMs)
+    headersTimer.unref?.()
     try {
-      const res = await fetchFn(upstream.url, {
-        method: 'POST',
-        headers: upstream.headers,
-        body: payload, // 위에서 직렬화·크기검증 완료 (재직렬화 회피)
-        signal: reqController.signal,
-      })
+      let res
+      try {
+        res = await fetchFn(upstream.url, {
+          method: 'POST',
+          headers: upstream.headers,
+          body: payload, // 위에서 직렬화·크기검증 완료 (재직렬화 회피)
+          signal: reqController.signal,
+        })
+      } catch (err) {
+        // 우리 headers 타임아웃으로 인한 abort는 retryable timeout(ETIMEDOUT)으로 재작성한다. 그대로 두면
+        // AbortError가 classifyLlmError에서 non-retryable('aborted')로 분류돼 재시도되지 않는다(stale guard와 동일 정책).
+        // 부모(세션) abort는 진짜 취소이므로 재작성하지 않고 그대로 전파.
+        if (headersTimedOut && !signal?.aborted) {
+          throw Object.assign(
+            new Error(`Anthropic API connect/headers timeout (no response headers for ${connectHeadersTimeoutMs}ms)`),
+            { code: 'ETIMEDOUT' },
+          )
+        }
+        throw err
+      } finally {
+        clearTimeout(headersTimer)
+      }
       if (!res.ok) {
         const errText = await safeReadText(res)
         // 413은 대개 upstream이 Anthropic이 아니라 LLM 프록시(Vercel) 전송 한도 초과 —
