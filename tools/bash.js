@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { resolvePath, resolveCwd, buildToolEnv } from './_common.js'
 import { ensureJobKeepalive } from '../job-keepalive.js'
+import { isHeavyCommand, acquireHeavyLane, buildSpawnArgs } from '../tool-cpu-lane.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const MAX_TIMEOUT_MS = 5 * 60 * 1000
@@ -80,8 +81,18 @@ export async function runBash(input, ctx = {}) {
     typeof input.timeout === 'number' && input.timeout > 0 ? input.timeout : DEFAULT_TIMEOUT_MS,
   )
 
+  // CPU 무거운 명령이면 레인 슬롯 획득(다른 세션 turn 스톨 방지) + nice 저우선 실행. 경량은 무제한.
+  const heavy = isHeavyCommand(input.command)
+  const releaseLane = heavy ? await acquireHeavyLane() : null
+  if (releaseLane && ctx.signal?.aborted) {
+    releaseLane()
+    return { content: 'Bash: aborted', is_error: true }
+  }
+
+  try {
   return await new Promise((resolve) => {
-    const child = spawn('/bin/bash', ['-c', input.command], {
+    const { file, args } = buildSpawnArgs(heavy, ['-c', input.command])
+    const child = spawn(file, args, {
       cwd,
       env: buildToolEnv(ctx.env),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -177,6 +188,9 @@ export async function runBash(input, ctx = {}) {
       settle({ content: body, ...(code !== 0 ? { is_error: true } : {}) })
     })
   })
+  } finally {
+    if (releaseLane) releaseLane()
+  }
 }
 
 /**
@@ -215,9 +229,14 @@ function runBackground(input, ctx, cwd) {
   // 건너뛰는 것을 막는다. exitPath는 UUID 기반이라 안전하나 공백 대비 single-quote.
   const wrapped = `( ${input.command} )\n__daiops_rc=$?; echo "$__daiops_rc" > '${exitPath}'; exit $__daiops_rc`
 
+  // 백그라운드 잡은 fire-and-forget이라 세마포어 슬롯을 보유/반납할 수 없다 → nice 저우선만 적용해
+  // 장기 백그라운드 파싱이 인터랙티브 turn의 CPU를 굶기지 않게 한다.
+  const heavy = isHeavyCommand(input.command)
+  const { file, args } = buildSpawnArgs(heavy, ['-c', wrapped])
+
   let child
   try {
-    child = spawn('/bin/bash', ['-c', wrapped], {
+    child = spawn(file, args, {
       cwd,
       env: buildToolEnv(ctx.env),
       detached: true,
