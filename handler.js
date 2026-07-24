@@ -241,6 +241,18 @@ function isDestructiveTool(toolName) {
   return DESTRUCTIVE_TOOL_NAMES.has(toolName) || DESTRUCTIVE_TOOL_NAMES.has(bareName)
 }
 
+/**
+ * 루틴 쓰기 도구 — 반복 업무(스케줄) CRUD (ADR37). 대화형이면 그 자리에서 결재(plan_request),
+ * 무인이면 통과시켜 cloud mcp-bridge가 오너 결재 큐에 적재하게 한다(파괴적 도구와 반대 — 무인은 큐로).
+ * cloud policy.ts의 ROUTINE_WRITE_TOOLS와 동기화 유지. MCP 접두사를 벗겨 bare 이름으로도 매칭.
+ */
+const ROUTINE_WRITE_TOOL_NAMES = new Set(['routine_create', 'routine_update', 'routine_delete'])
+function isRoutineWriteTool(toolName) {
+  if (!toolName) return false
+  const bareName = toolName.replace(/^mcp__.+?__/, '')
+  return ROUTINE_WRITE_TOOL_NAMES.has(toolName) || ROUTINE_WRITE_TOOL_NAMES.has(bareName)
+}
+
 /** 기본 정책 — 클라우드에서 policy를 보내지 않은 경우 fallback */
 const DEFAULT_POLICY = {
   security: 'allowlist',
@@ -653,6 +665,15 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
       return { kind: 'deny', reason: 'ask-fallback-deny', toolName, commandSummary: summary }
     }
     return { kind: 'plan_request', reason: 'always', toolName, commandSummary: summary }
+  }
+
+  // 루틴 쓰기(반복 업무 CRUD, ADR37): 대화형이면 그 자리 결재, 무인이면 통과시켜 cloud mcp-bridge가
+  // 결재 큐에 적재하게 한다(파괴적 deny와 반대 — 무인은 큐로). cloud policy.ts와 동기화.
+  if (isRoutineWriteTool(toolName)) {
+    if (hasUiChannel) {
+      return { kind: 'plan_request', reason: 'routine-write-ask', toolName, commandSummary: summarizeToolInput(toolName, input) }
+    }
+    return { kind: 'allow', reason: 'routine-write-enqueue' }
   }
 
   if (!RISKY_TOOL_NAMES.has(toolName)) {

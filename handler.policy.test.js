@@ -193,6 +193,35 @@ describe('evaluatePolicy — 파괴적 도구(wiki_delete)는 항상 결재', ()
   })
 })
 
+describe('evaluatePolicy — 루틴 쓰기(반복 업무 CRUD)는 대화형이면 항상 결재 (QA #64)', () => {
+  // 대화형(hasUiChannel=true)이면 그 자리 결재, 무인이면 통과(cloud mcp-bridge가 큐로).
+  // 이전엔 이 규칙이 러너 baked 평가에 없어 승인 없이 즉시 반영되던 결재 우회 버그.
+  const fullAccess = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [] }
+
+  for (const tool of ['routine_create', 'routine_update', 'routine_delete', 'mcp__daiops-mcp__routine_update']) {
+    it(`대화형: security:'full'여도 결재 강등: ${tool}`, () => {
+      const d = evaluatePolicy(fullAccess, tool, { command: '매일 9시 보고' }, true)
+      assert.equal(d.kind, 'plan_request')
+      assert.equal(d.reason, 'routine-write-ask')
+    })
+  }
+
+  it('무인(헤드리스)이면 통과 — cloud mcp-bridge가 결재 큐에 적재', () => {
+    const d = evaluatePolicy(fullAccess, 'mcp__daiops-mcp__routine_update', { command: 'x' }, false)
+    assert.equal(d.kind, 'allow')
+    assert.equal(d.reason, 'routine-write-enqueue')
+  })
+
+  it('capability 미보유(외부/API)는 toolOverrides.deny로 먼저 차단 → channel-deny', () => {
+    const policy = { ...fullAccess, toolOverrides: { deny: ['routine_update'] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__routine_update', {}, true).reason, 'channel-deny')
+  })
+
+  it('조회 도구(routine_list)는 쓰기 아님 → 영향 없음', () => {
+    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__routine_list', {}, true).kind, 'allow')
+  })
+})
+
 // ADR 21 §5.3 — 채널-인식 도구 게이트(toolOverrides). cloud(policy.ts)가 채널 capability로
 // deny/ask 목록을 계산해 정책에 실으면 agent-runner가 RISKY 분기보다 먼저 강제한다.
 describe('채널-인식 도구 게이트 (toolOverrides, ADR 21)', () => {
