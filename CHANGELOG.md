@@ -2,6 +2,28 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.10.0] — 2026-07-26
+
+### ⚠️ BREAKING
+- **cloud가 `toolOverrides.v >= 2`를 보내지 않으면 `mcp__*` 도구가 결재 대상이 된다.** `minRunnerVersion` 0.10.0 — **cloud `AGENT_RUNNER_IMAGE` 핀을 함께 올려야 한다.** 정상 운영에서는 모든 cloud 실행 경로가 v2 overrides를 싣기 때문에 도달하지 않고, 구버전 cloud와 만나는 과도기에만 **과잉 결재로 안전하게 틀린다**(게이트가 사라지는 방향으로는 틀리지 않는다).
+
+### Removed
+- **도구 이름 게이트 3종 삭제 — 러너를 순수 실행기로** — `OUTWARD_SEND_TOOL_SUFFIXES`·`DESTRUCTIVE_TOOL_NAMES`·`ROUTINE_WRITE_TOOL_NAMES` + 판정 함수 3개 + `SANDBOX_GATE_TOOL_SETS` export를 제거했다. 이 사본들이 cloud와 갈라져 사고가 두 번 났고(daiops QA #31 = cloud만 수정 / QA #64 = 러너 핀 상향에만 의존), **목록이 존재하는 한 드리프트는 언제든 재발한다**. 0.9.9가 cloud 지시(v2 overrides)를 강제하게 만들었으므로 목록의 존재 이유가 사라졌다 — 이름 목록이 없으면 드리프트라는 실패 모드 자체가 없어진다.
+  - **폴백은 목록 복원이 아니라 "이름을 모르는 규칙"** — cloud가 v2를 선언하지 않으면 `mcp__` 도구 전체가 결재를 요구한다.
+  - `summarizeToolInput`의 발신 요약도 이름 판정 → **입력 모양**(수신자 + 본문) 판정으로 전환. 표시 로직까지 이름 의존을 끊어, 새 발신 도구가 목록 등록 없이 같은 요약을 받는다.
+  - `policy-sandbox-gate.json` v4: `toolGates` 제거(0.9.8에서 편입했으나 동기화할 대상 자체가 소멸). 남은 스냅샷 대상은 **입력 패턴 게이트(정규식) + 결재 사유 키**.
+- schemaVersion 불변 — §2 HTTP API 표면·인증·SSE 종류가 그대로이고, 신구 호환은 `minRunnerVersion` ↔ cloud 핀 사슬(§4 밖의 별도 장치)로 강제한다.
+
+## [0.9.9] — 2026-07-26
+
+### Added
+- **게이트 프로토콜 v2 — cloud 지시를 강제하고 러너 하드코딩 판정을 폴백으로 강등** — 도구 게이트 판정이 cloud·러너 양쪽에 사본으로 존재해 한쪽만 고치는 사고가 반복됐다(QA #31·#64). parity 스냅샷(0.9.8)은 **사후 감지일 뿐 원인 제거가 아니다.** 근본 원인은 cloud가 `deny`만 표현할 수 있어서 "결재시키자"는 정책을 러너 릴리스 없이 보낼 방법이 없었던 것.
+  - `toolOverrides.askSoft` 신설: 결재 채널이 없으면 `askFallback`을 따른다. 기존 `ask`(hard)는 그대로 deny. **등급마다 무인 처리가 다르므로**(비가역=무조건 deny / 외향발신=자율설정 존중) 하나로 합치면 둘 중 하나가 반드시 회귀한다.
+  - `toolOverrides.askReasons`: 도구별 결재 사유 키. 한국어 문구는 러너가 계속 소유한다.
+  - `toolOverrides.v` 핸드셰이크: `v >= 2`면 cloud가 전 등급을 보냈다는 뜻이라 러너의 하드코딩 판정(외향발신·비가역·루틴)을 끈다. 미선언(구버전 cloud)이면 종전대로 — **신구 어느 조합에서도 게이트가 사라지지 않는다.**
+  - `REASON_LABEL_KO`에 `routine-write-ask`·`irreversible`·`external-write` 문구 추가 — daiops P1에서 `external-write` 결재 카드의 "왜" 줄이 공란으로 나가던 것을 메운다.
+  - `policy-sandbox-gate.json` v3: `askReasonKeys` 편입 — 사유 키를 늘리면서 문구를 빠뜨리면 양쪽 parity 테스트가 잡는다.
+
 ## [0.9.8] — 2026-07-26
 
 ### Added
