@@ -502,8 +502,8 @@ function doubleQuoteForShell(s) {
  * LLM이 cli.js read* 결과를 `.cache/<X>.md`로 redirect할 때, 출력 경로의 basename을
  * **입력 path basename으로 강제 정정**해 SDK에 돌려준다.
  *
- * 배경: 시스템 프롬프트가 `node /workspace/.tools/document-X/cli.js read<Type> <in> > <.cache/X.md>`
- * 같은 패턴을 권장하는데, LLM이 출력 경로를 자기 토큰으로 재생산하면서
+ * 배경: 시스템 프롬프트가 `node /opt/document-X/cli.js read<Type> <in> > <.cache/X.md>`
+ * 같은 패턴을 권장하는데(cloud `DOCUMENT_CLI`가 baked 경로에서 파생), LLM이 출력 경로를 자기 토큰으로 재생산하면서
  *   1) 한국어 한 글자를 한자로 hallucinate (예: '반' → '般')
  *   2) 공백/괄호/따옴표를 임의 정리
  * 가 함께 일어나 캐시 파일명이 원본과 어긋난다. 이 함수가 SDK가 명령을 실행하기 전에
