@@ -2,6 +2,24 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.9.8] — 2026-07-26
+
+### Added
+- **egress 목적지 호스트 관측기 — 도메인 allowlist 전환의 1단계 (daiops ADR42)** — 이 프록시는 이미 샌드박스의 **모든 아웃바운드**(bash curl·python·MCP)를 통과시키고 요청마다 목적지 호스트를 계산하지만, 검사는 **시크릿 placeholder가 실린 요청에만** 한다. 그래서 "어디에서 무엇을 받아오는가"는 cloud의 **명령어 문자열 정규식**(`git clone`·`npm install`…)이 대신 판단하고 있고, 목록에 없는 도구(`gh repo clone`·`svn`·`composer`·`bundle`·`mvn`·`nix-env`·`deno add`·`aria2c`)는 그대로 통과한다. 레퍼런스(Claude Code `allowedDomains` + 프록시 403 · vellum CES egress mode · 업계 사례)는 예외 없이 **목적지 도메인 allowlist**로 수렴한다 — 명령어 글자를 검사하는 곳은 없다.
+  - 전환하려면 "무엇을 허용할지"를 알아야 하는데, 추측으로 목록을 만들면 정상 작업이 반드시 막힌다(npm이 registry 외 CDN을 치는 등). 그래서 **이 릴리스는 아무것도 차단하지 않는다.** 관측만 한다.
+  - `EgressObserver`(`proxy/egress-observer.js`): 메모리 Map에 호스트별 요청 수를 누적하고 60초마다 변경분만 cloud `POST /api/internal/egress-observations`로 보고한다. 요청마다 보내지 않는 이유 — `npm install` 한 번이 수백 요청이라 보고가 관측 대상보다 시끄러워진다.
+  - 보고 실패는 **카운트를 되돌려** 다음 주기에 합쳐 재시도한다(유실보다 누적 정확성 우선). 보고 설정이 없으면(로컬 dev) 집계만 하고 폐기해 무한 누적을 막는다.
+  - 상한: 호스트 종류 2000개(메모리 무한 증가 방지) · 보고당 200개(요청 많은 순).
+  - 수집 지점은 `injection-proxy.js` `_forward()`에서 `dest`가 이미 계산된 자리 한 줄(`observer.record()`). 동기 O(1)이라 hot path에 영향 없고, 관측기 미주입 시 그대로 동작한다(하위호환).
+  - **★호스트와 건수만 넘긴다.** 경로·쿼리·헤더·바디는 관측기에 전달하지 않는다 — 토큰·PII가 섞일 수 있고 allowlist 판단에는 호스트만 필요하다(cloud 라우트도 호스트 정규식으로 이중 검증해 URL이 오면 400).
+  - `blocked` 카운트로 기존 시크릿 호스트 방어(403)가 실제로 발동한 횟수도 함께 관측된다.
+  - `server.js`가 프록시와 생애를 공유해 부팅 시 `start()`, graceful shutdown에서 마지막 `flush()`(샌드박스가 자주 꺼지므로 종료 flush가 유실을 줄인다).
+  - schemaVersion 불변(§2 계약 무변경 — cloud로 나가는 아웃바운드 보고이고 이 서버의 API 표면은 그대로).
+
+### Internal
+- **도구 이름 게이트를 parity 스냅샷에 편입 (스냅샷 v2)** — v1은 Bash 정규식만 담았고, `DESTRUCTIVE_TOOL_NAMES`·`ROUTINE_WRITE_TOOL_NAMES`는 주석("cloud `policy.ts`와 동기화 유지")으로만 cloud와 묶여 있었다. cloud만 규칙을 바꾸고 이쪽을 빠뜨리면 아무 테스트도 깨지지 않는다 — 공급망 게이트가 cloud에만 추가됐던 사고(0.9.7 §Fixed)와 같은 구조다. `SANDBOX_GATE_TOOL_SETS`를 export해 `policy-sandbox-gate.json` `toolGates`와 대조한다. **규칙 변경이 아니라 감지 장치 추가**라 `minRunnerVersion`(0.9.7)은 그대로 둔다.
+  - `OUTWARD_SEND_TOOL_SUFFIXES`는 제외 — 이미 폐지된 `slack_upload_file`이 이쪽에만 남아 있어(존재하지 않는 도구라 기능 차이 없음) cloud와 목록이 다르다. 그 이름을 지우는 릴리스에서 함께 스냅샷에 추가한다.
+
 ## [0.9.7] — 2026-07-25
 
 ### Fixed
