@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
 import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
+import { EgressObserver } from './proxy/egress-observer.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -67,6 +68,14 @@ const INTEGRATIONS_ENV_PATH = process.env.AGENT_RUNNER_INTEGRATIONS_ENV ?? '/wor
 let injectionBroker = null
 
 /**
+ * egress 관측기(A-3 1단계) — 프록시를 지나가는 목적지 호스트를 집계해 cloud에 주기 보고한다.
+ * **차단하지 않는다.** 도메인 allowlist(2단계) 프리셋을 추측이 아니라 실측에서 도출하기 위한 수집.
+ * 프록시보다 먼저 만들어 둔다(프록시 생성 시 주입).
+ * @type {import('./proxy/egress-observer.js').EgressObserver | null}
+ */
+let egressObserver = null
+
+/**
  * 주입 프록시 (재)초기화: cloud materialize → 프록시 기동/맵 갱신 → placeholder .integrations.env 기록.
  * 진짜 값은 프록시 프로세스 메모리에만. 실패는 fail-open(로그만) — 러너 자체는 계속 동작.
  * 필수 설정(LLM_PROXY_ORIGIN/WORKSPACE_ID/토큰) 누락 시(로컬 dev 등) 프록시 없이 진행.
@@ -95,7 +104,17 @@ async function initInjectionProxy() {
       console.log(`[injection-proxy] 갱신 — 시크릿 ${secrets.length}건`)
       return { ok: true, count: secrets.length }
     }
-    injectionBroker = await startInjectionBroker({ secrets, logger: console })
+    // egress 관측기는 프록시와 생애를 공유한다(프록시가 유일한 관측 지점).
+    if (!egressObserver) {
+      egressObserver = new EgressObserver({
+        proxyOrigin: LLM_PROXY_ORIGIN,
+        workspaceId: WORKSPACE_ID,
+        token: AUTH_TOKEN,
+        logger: console,
+      })
+      egressObserver.start()
+    }
+    injectionBroker = await startInjectionBroker({ secrets, logger: console, observer: egressObserver })
     // 자식 셸이 프록시/CA를 쓰도록 process.env에 설정 (buildToolEnv가 자식 env로만 번역).
     process.env.DAIOPS_INJECTION_PROXY_URL = injectionBroker.proxyUrl
     process.env.DAIOPS_INJECTION_CA_PATH = injectionBroker.caCertPath
@@ -357,6 +376,12 @@ function gracefulShutdown(signal) {
   const aborted = abortAllSessions()
   if (aborted > 0) {
     console.log(`[agent-runner] in-flight 세션 ${aborted}건 abort 신호 송신`)
+  }
+
+  // 마지막 egress 관측분 보고 — 샌드박스가 자주 꺼지므로 종료 시 flush해야 유실이 적다.
+  // 실패해도 종료를 막지 않는다(void + catch).
+  if (egressObserver) {
+    void egressObserver.stop().catch(() => {})
   }
 
   server.close(() => {

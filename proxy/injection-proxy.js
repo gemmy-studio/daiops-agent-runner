@@ -38,13 +38,20 @@ export class InjectionProxy {
    *   certManager: import('./cert-manager.js').CertManager,
    *   upstreamCa?: string | string[],   // 업스트림 검증용 추가 CA (테스트/사설 CA)
    *   logger?: { info: Function, warn: Function, error: Function },
+   *   observer?: { record: (host: string, opts?: { blocked?: boolean }) => void },
    * }} opts
    */
-  constructor({ injectionMap, certManager, upstreamCa, logger }) {
+  constructor({ injectionMap, certManager, upstreamCa, logger, observer }) {
     this.injectionMap = injectionMap ?? new Map()
     this.certManager = certManager
     this.upstreamCa = upstreamCa
     this.log = logger ?? { info() {}, warn() {}, error() {} }
+    /**
+     * egress 관측기(A-3 1단계) — 목적지 호스트만 집계해 cloud에 주기 보고한다. 차단하지 않는다.
+     * 도메인 allowlist(2단계)의 프리셋을 추측이 아니라 실측에서 도출하기 위한 데이터 수집.
+     * 미주입이면 관측 없이 동작(하위호환).
+     */
+    this.observer = observer ?? null
     this.server = null
     this.mitm = null
   }
@@ -161,6 +168,10 @@ export class InjectionProxy {
       bodyHasPlaceholder ? bodyBuf.toString('utf-8') : '',
     ]
     const blocked = detectBlockedSecrets(scanTexts, dest, this.injectionMap)
+
+    // A-3 1단계 — 목적지 호스트 관측(차단 아님). 경로·쿼리·헤더는 넘기지 않는다(토큰·PII 혼입 방지).
+    this.observer?.record(dest, { blocked: blocked.length > 0 })
+
     if (blocked.length > 0) {
       const keys = blocked.map((b) => b.key)
       this.log.warn('[injection-proxy] 시크릿 차단(호스트 미허용)', { host: dest, keys })

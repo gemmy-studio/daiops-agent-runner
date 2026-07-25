@@ -65,10 +65,11 @@ export async function fetchMaterializedSecrets({ proxyOrigin, workspaceId, token
  *   proxyPort?: number, host?: string,
  *   certManager?: import('./cert-manager.js').CertManager,
  *   logger?: object,
+ *   observer?: { record: (host: string, opts?: { blocked?: boolean }) => void },
  * }} opts
  * @returns {Promise<{ proxy: InjectionProxy, injectionMap: Map, placeholderByKey: Map, proxyUrl: string, caCertPath: string }>}
  */
-export async function startInjectionBroker({ secrets, proxyPort = 0, host = '127.0.0.1', certManager, logger }) {
+export async function startInjectionBroker({ secrets, proxyPort = 0, host = '127.0.0.1', certManager, logger, observer }) {
   const cm = certManager ?? new CertManager()
   await cm.init()
 
@@ -80,7 +81,8 @@ export async function startInjectionBroker({ secrets, proxyPort = 0, host = '127
   }))
   const { placeholderByKey, injectionMap } = buildInjectionMap(normalized)
 
-  const proxy = new InjectionProxy({ injectionMap, certManager: cm, logger })
+  // observer는 egress 관측기(A-3 1단계). 미전달이면 관측 없이 동작(테스트·로컬 dev).
+  const proxy = new InjectionProxy({ injectionMap, certManager: cm, logger, observer })
   const addr = await proxy.start(proxyPort, host)
   const proxyUrl = `http://${host}:${addr.port}`
 
