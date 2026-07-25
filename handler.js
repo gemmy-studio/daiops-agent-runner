@@ -465,6 +465,21 @@ export const SANDBOX_GATE_REGEXES = {
 }
 
 /**
+ * 도구 이름 기반 게이트 — 정규식과 같은 이유로 parity 스냅샷 대상(런타임 판정에는 쓰지 않음).
+ *
+ * 스냅샷 v1은 정규식만 담았고 도구 게이트는 주석("cloud policy.ts와 동기화 유지")으로만 묶여
+ * 있었다. 그 상태에서 cloud만 규칙을 바꾸고 이쪽을 빠뜨리면 아무 테스트도 깨지지 않는다 —
+ * QA #31을 만든 것과 같은 구조. v2에서 두 집합을 스냅샷에 편입한다.
+ *
+ * 제외: OUTWARD_SEND_TOOL_SUFFIXES. cloud는 폐지된 `slack_upload_file`을 이미 지웠고 이쪽엔
+ * 남아 있다(존재하지 않는 도구라 기능 차이 없음). 이 이름을 지우는 릴리스에서 함께 추가한다.
+ */
+export const SANDBOX_GATE_TOOL_SETS = {
+  alwaysApprove: DESTRUCTIVE_TOOL_NAMES,
+  routineWrite: ROUTINE_WRITE_TOOL_NAMES,
+}
+
+/**
  * 샌드박스 내부에서 결재 없이 허용해도 되는 Bash 명령인지
  * (원격실행·네트워크 egress·공급망 반입만 게이트).
  */

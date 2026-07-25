@@ -407,6 +407,17 @@ describe('샌드박스 게이트 parity 스냅샷 (드리프트 감지)', () => 
     )
   })
 
+  // v2 추가 — 도구 이름 게이트도 같은 방식으로 묶는다. 정규식만 스냅샷하던 동안 이 두 집합은
+  // 주석("cloud policy.ts와 동기화 유지")으로만 묶여 있었다(QA #64가 그 상태에서 핀 상향으로 봉합됨).
+  it('handler.js의 도구 게이트 집합이 스냅샷과 일치한다', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { SANDBOX_GATE_TOOL_SETS } = await import('./handler.js')
+    const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
+
+    assert.deepEqual([...SANDBOX_GATE_TOOL_SETS.alwaysApprove].sort(), [...snap.toolGates.alwaysApprove].sort())
+    assert.deepEqual([...SANDBOX_GATE_TOOL_SETS.routineWrite].sort(), [...snap.toolGates.routineWrite].sort())
+  })
+
   it('스냅샷 minRunnerVersion이 이 패키지 버전을 넘지 않는다', async () => {
     const { readFileSync } = await import('node:fs')
     const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
