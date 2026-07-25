@@ -292,3 +292,129 @@ describe('evaluatePolicy — 샌드박스 격리 예외 (ADR 21 §2.4)', () => {
     assert.equal(isUnderSandbox('/workspace-evil/a', '/workspace'), false)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QA #31 — 공급망 반입 명령(git clone·npm/pip install) 결재 게이트.
+// Bash는 cloud가 볼 수 없어 여기가 유일한 집행 지점이다. cloud policy.ts에만 규칙이 있고
+// 러너에 없어 `curl`은 결재가 뜨고 `git clone`은 무사통과했던 우회로를 막는다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('isSandboxSafeCommand — 공급망 반입 게이트 (QA #31)', () => {
+  const gated = [
+    'git clone https://github.com/foo/bar.git',
+    'git -C /workspace clone https://github.com/foo/bar',
+    'git fetch origin',
+    'git pull --rebase',
+    'git ls-remote https://github.com/foo/bar',
+    'git remote add upstream https://github.com/foo/bar',
+    'git submodule update --init',
+    'npm install lodash',
+    'npm i -g typescript',
+    'npm ci',
+    'pnpm add zod',
+    'yarn install',
+    'bun add hono',
+    'npx create-next-app x',
+    'uvx ruff check .',
+    'pip install requests',
+    'pip3 install --upgrade pip',
+    'python3 -m pip install pymupdf',
+    'uv add httpx',
+    'poetry install',
+    'gem install bundler',
+    'cargo install ripgrep',
+    'go get github.com/foo/bar',
+    'apt-get install -y poppler-utils',
+    'apk add curl-dev',
+    'brew install jq',
+    'docker pull alpine',
+  ]
+  for (const cmd of gated) {
+    it(`결재 대상: ${cmd}`, () => {
+      assert.equal(isSandboxSafeCommand(cmd), false)
+    })
+  }
+
+  const allowed = [
+    // 로컬 전용 git — 네트워크 없음
+    'git status',
+    'git add -A',
+    'git commit -m "wip"',
+    'git log --oneline -5',
+    'git diff HEAD~1',
+    'git checkout -b feature',
+    // 로컬 전용 패키지 매니저 서브커맨드
+    'npm run build',
+    'npm test',
+    'pnpm run lint',
+    'pip list',
+    'pip show requests',
+    'cargo build --release',
+    'go build ./...',
+    // 일반 파일 작업
+    'ls -la /workspace',
+    'cat /workspace/notes.md',
+    'node /opt/document-core/cli.js readPdf a.pdf',
+  ]
+  for (const cmd of allowed) {
+    it(`자동 허용: ${cmd}`, () => {
+      assert.equal(isSandboxSafeCommand(cmd), true)
+    })
+  }
+
+  it('git 서브커맨드 판정 — 인자에 clone 문자열이 들어가도 원격 명령이 아니면 통과', () => {
+    // 옵션을 건너뛴 뒤 *서브커맨드 위치*를 보므로 커밋 메시지의 'clone'은 매칭되지 않는다.
+    assert.equal(isSandboxSafeCommand('git commit -m "add clone helper"'), true)
+    assert.equal(isSandboxSafeCommand('git log --grep="clone"'), true)
+  })
+
+  it('인용문 안 설치 명령은 보수적으로 결재 대상 (의도된 오탐)', () => {
+    // 명령 위치를 따지지 않고 단어로 매칭하므로 grep 패턴 안의 'npm install'도 걸린다.
+    // 놓치는 것(fail-open)보다 승인창이 한 번 더 뜨는 편(fail-closed)이 안전하다는 판단.
+    // 명령 위치 파싱은 `x=1 npm install` 같은 우회를 새로 만들 수 있어 채택하지 않았다.
+    assert.equal(isSandboxSafeCommand('grep -r "npm install" /workspace/docs'), false)
+  })
+
+  it('전각 문자 우회는 NFKC 정규화로 차단', () => {
+    assert.equal(isSandboxSafeCommand('ｇｉｔ　ｃｌｏｎｅ https://github.com/foo/bar'), false)
+  })
+
+  it('결재 채널이 있는 대화형에서는 결재 카드(plan_request)로 뜬다', () => {
+    const sb = { security: 'allowlist', ask: 'on-miss', askFallback: 'deny', allowlist: [], sandboxRoot: '/workspace' }
+    assert.equal(evaluatePolicy(sb, 'Bash', { command: 'git clone https://github.com/foo/bar' }, true).kind, 'plan_request')
+  })
+
+  it('무인 실행(결재 채널 없음)에서는 askFallback=deny로 차단', () => {
+    const sb = { security: 'allowlist', ask: 'on-miss', askFallback: 'deny', allowlist: [], sandboxRoot: '/workspace' }
+    assert.equal(evaluatePolicy(sb, 'Bash', { command: 'npm install left-pad' }, false).kind, 'deny')
+  })
+})
+
+describe('샌드박스 게이트 parity 스냅샷 (드리프트 감지)', () => {
+  // 이 테스트가 깨지면: 코드와 policy-sandbox-gate.json이 갈라졌다는 뜻이다.
+  // 규칙을 바꾸려면 ①이 저장소 코드 ②이 스냅샷 ③daiops 쪽 코드+스냅샷
+  // ④minRunnerVersion ⑤package.json version ⑥daiops AGENT_RUNNER_IMAGE 핀을 함께 갱신한다.
+  it('handler.js의 정규식이 스냅샷과 일치한다', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { SANDBOX_GATE_REGEXES } = await import('./handler.js')
+    const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
+
+    assert.equal(SANDBOX_GATE_REGEXES.networkEgress.source, snap.networkEgress)
+    assert.equal(SANDBOX_GATE_REGEXES.supplyChain.source, snap.supplyChain)
+    assert.deepEqual(
+      SANDBOX_GATE_REGEXES.dangerousCommands.map((re) => re.source),
+      snap.dangerousCommands,
+    )
+  })
+
+  it('스냅샷 minRunnerVersion이 이 패키지 버전을 넘지 않는다', async () => {
+    const { readFileSync } = await import('node:fs')
+    const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
+    const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+    const num = (v) => v.split('.').map(Number).reduce((a, n) => a * 1000 + n, 0)
+    assert.ok(
+      num(pkg.version) >= num(snap.minRunnerVersion),
+      `package.json version(${pkg.version})이 스냅샷 minRunnerVersion(${snap.minRunnerVersion})보다 낮다 — 버전을 올려라`,
+    )
+  })
+})

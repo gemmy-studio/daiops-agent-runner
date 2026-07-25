@@ -1,0 +1,17 @@
+{
+  "_comment": "ADR 21 §2.4 샌드박스 격리 예외 게이트의 정규식 스냅샷. daiops(src/lib/daytona/policy.ts)와 agent-runner(handler.js)가 동일 사본을 보유하며 양쪽 parity 테스트가 코드와의 일치를 단정한다. 규칙 변경 시 ①양쪽 코드 ②양쪽 스냅샷 ③minRunnerVersion ④러너 package.json version ⑤cloud AGENT_RUNNER_IMAGE 핀을 함께 갱신해야 테스트가 통과한다.",
+  "version": 1,
+  "minRunnerVersion": "0.9.7",
+  "networkEgress": "\\b(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|sftp|ftp|rsync|socat)\\b",
+  "supplyChain": "git\\s+(?:-[cC]\\s+\\S+\\s+|--?\\S+\\s+)*(?:clone|fetch|pull|ls-remote|remote\\s+(?:add|set-url)|submodule\\s+(?:update|add))\\b|(?:npm|pnpm|yarn|bun)\\s+(?:install|i|add|ci|dlx|create|exec|update|upgrade)\\b|npx\\s|uvx\\s|pip[23]?\\s+(?:install|download)\\b|python[23]?\\s+-m\\s+pip\\s+(?:install|download)\\b|(?:uv|poetry|pipenv)\\s+(?:add|install|sync)\\b|gem\\s+install\\b|cargo\\s+(?:install|add)\\b|go\\s+(?:get|install)\\b|(?:apt|apt-get|dnf|yum|apk|zypper|pacman)\\s+(?:install|add|-S)\\b|brew\\s+(?:install|tap)\\b|docker\\s+(?:pull|run)\\b",
+  "dangerousCommands": [
+    "\\b(?:bash|sh|zsh|ksh|dash|fish)\\s+-[^\\s]*c(?:\\s|$)",
+    "\\b(?:python[\\d.]*|perl[\\d.]*|ruby[\\d.]*|node[\\d.]*|nodejs|deno|bun|php[\\d.]*)\\s+-[ec]\\s",
+    "\\b(?:python[\\d.]*|perl[\\d.]*|ruby[\\d.]*|node[\\d.]*|nodejs|deno|bun|php[\\d.]*|bash|sh|zsh|ksh)\\s*<<",
+    "\\b(?:curl|wget)\\b[^\\n]*\\|\\s*(?:ba)?sh\\b",
+    "\\bxargs\\b[^\\n]*\\brm\\b",
+    "\\bfind\\b[^\\n]*-exec\\b",
+    "\\bchmod\\s+\\+x\\b[^\\n]*[;&|]+\\s*\\.\\/",
+    "\\beval\\b"
+  ]
+}

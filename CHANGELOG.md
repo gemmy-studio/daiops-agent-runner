@@ -2,6 +2,16 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.9.7] — 2026-07-25
+
+### Fixed
+- **공급망 반입 명령(`git clone`·`npm/pip install` 등)이 결재 없이 통과하던 우회로 차단 (daiops QA #31)** — `isSandboxSafeCommand`가 네트워크 여부를 `NETWORK_EGRESS_RE`(curl/wget/ssh 등 직접 유출 도구)로만 판정해, 원격에서 코드·패키지를 받아오는 반입 명령이 위험 명령·egress 어느 목록에도 없어 `sandbox` 사유로 자동 허용됐다. 같은 파일을 `curl`로 받으면 결재 카드가 뜨고 `git`으로 받으면 무사통과 — 문지기가 정문만 지키고 옆문을 열어둔 상태였다. `SUPPLY_CHAIN_EGRESS_RE`를 신설해 git(clone/fetch/pull/ls-remote/remote add·set-url/submodule), node 패키지 매니저(npm·pnpm·yarn·bun·npx), python(pip·uv·poetry·pipenv·uvx), gem/cargo/go, 시스템 패키지 매니저(apt·dnf·apk 등), brew, docker pull/run을 자동 허용에서 제외한다. **네트워크를 유발하는 서브커맨드만** 매칭해 `git commit/status/add`·`npm run`·`pip list`·`cargo build` 같은 로컬 전용 명령은 그대로 통과(git은 `-C dir`·`-c k=v`·`--opt`를 건너뛰고 서브커맨드 위치를 본다). 인용문 안 문자열(`grep -r "npm install"`)은 보수적으로 결재 대상 — 놓치는 것보다 승인창이 한 번 더 뜨는 편이 안전하고, 명령 위치 파싱은 `x=1 npm install` 같은 새 우회를 만든다. schemaVersion 불변(§2 계약 무변경).
+  - **왜 러너에 넣는가**: Bash 명령은 cloud가 실행 전에 볼 수 없다(샌드박스 안 `canUseTool`이 유일한 집행 지점). 2026-07-14에 cloud `policy.ts`에만 같은 규칙을 추가하고 여기를 빠뜨려, 커밋·테스트·리뷰를 모두 통과한 채 실제로는 통과가 유지됐다.
+  - **드리프트 감지 장치**: 규칙 누락을 주석(`SYNC: ...`)이 아니라 테스트로 잡는다. `policy-sandbox-gate.json` 스냅샷을 cloud와 동일 사본으로 두고, 양쪽이 각자 자기 코드와의 `.source` 일치를 단정한다. 여기에 `minRunnerVersion`을 걸어 cloud 쪽 테스트가 `AGENT_RUNNER_IMAGE` 핀 ≥ `minRunnerVersion`을 요구하므로, 규칙을 올리면 핀 → 러너 릴리스 → 러너 parity 테스트로 사슬이 닫힌다.
+
+### Added
+- **루틴 쓰기(반복 업무 CRUD) 대화형 결재 강제 (daiops QA #64)** — `isRoutineWriteTool`(`routine_create`/`routine_update`/`routine_delete`) 분기를 `evaluatePolicy`에 추가. 대화형(결재 채널 有)은 `plan_request`로 그 자리 결재, 무인은 `allow`로 통과시켜 cloud mcp-bridge가 결재 큐(`pending_write_actions`)에 적재한다(파괴적 도구의 headless=deny와 **반대**). cloud 정책에는 규칙이 있었으나 러너가 정책 config만 받고 해석 코드는 이미지에 baked돼, 채팅에서 반복 업무 수정·삭제가 승인 카드 없이 즉시 실행됐다.
+
 ## [0.8.0] — 2026-07-19
 
 ### Added

@@ -412,7 +412,14 @@ export function isDangerousCommand(command) {
   return DANGEROUS_COMMAND_PATTERNS.some((re) => re.test(normalized))
 }
 
-// -- ADR 21 §2.4: 샌드박스 격리 예외 (SYNC: src/lib/daytona/policy.ts) --
+// -- ADR 21 §2.4: 샌드박스 격리 예외 --
+//
+// ⚠️ 이 블록의 정규식은 cloud `src/lib/daytona/policy.ts`와 **동일해야** 한다. Bash 명령은
+// cloud가 볼 수 없고(샌드박스 안 canUseTool에서 실행 직전 판정) 여기가 유일한 게이트다.
+// 과거 cloud만 공급망 규칙을 추가하고 여기를 빼먹어 `git clone`이 무결재 통과했다(QA #31).
+// 주석 의존을 끊기 위해 `policy-sandbox-gate.json` 스냅샷 + parity 테스트로 강제한다 —
+// 규칙을 바꾸려면 ①양쪽 코드 ②양쪽 스냅샷 ③스냅샷 minRunnerVersion ④러너 package.json 버전
+// ⑤cloud AGENT_RUNNER_IMAGE 핀을 함께 올려야 테스트가 통과한다(어느 하나만 빠지면 실패).
 
 /**
  * 네트워크 egress 도구. 샌드박스는 파일시스템만 격리되고 네트워크는 열려 있으므로,
@@ -420,12 +427,54 @@ export function isDangerousCommand(command) {
  */
 const NETWORK_EGRESS_RE = /\b(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|sftp|ftp|rsync|socat)\b/i
 
-/** 샌드박스 내부에서 결재 없이 허용해도 되는 Bash 명령인지 (원격실행·네트워크 egress만 게이트). */
+/**
+ * 공급망 반입 도구 — 원격에서 코드·패키지를 로컬로 받아오는 명령(git clone·npm/pip install 등).
+ * 임의 원격 코드가 샌드박스로 유입되는 벡터라 curl/wget과 동일하게 결재로 남긴다.
+ *
+ * 네트워크를 유발하는 *서브커맨드*만 매칭한다 — git commit/status/add·npm run·pip list 등 로컬 전용
+ * 명령은 통과시켜 과도한 결재 요구를 피한다. git은 옵션(-C dir, -c k=v, --opt)을 건너뛰고 원격
+ * 서브커맨드를 본다.
+ */
+const SUPPLY_CHAIN_EGRESS_RE = new RegExp(
+  [
+    'git\\s+(?:-[cC]\\s+\\S+\\s+|--?\\S+\\s+)*(?:clone|fetch|pull|ls-remote|remote\\s+(?:add|set-url)|submodule\\s+(?:update|add))\\b',
+    '(?:npm|pnpm|yarn|bun)\\s+(?:install|i|add|ci|dlx|create|exec|update|upgrade)\\b',
+    'npx\\s',
+    'uvx\\s',
+    'pip[23]?\\s+(?:install|download)\\b',
+    'python[23]?\\s+-m\\s+pip\\s+(?:install|download)\\b',
+    '(?:uv|poetry|pipenv)\\s+(?:add|install|sync)\\b',
+    'gem\\s+install\\b',
+    'cargo\\s+(?:install|add)\\b',
+    'go\\s+(?:get|install)\\b',
+    '(?:apt|apt-get|dnf|yum|apk|zypper|pacman)\\s+(?:install|add|-S)\\b',
+    'brew\\s+(?:install|tap)\\b',
+    'docker\\s+(?:pull|run)\\b',
+  ].join('|'),
+  'i',
+)
+
+/**
+ * 샌드박스 격리 예외 게이트의 정규식 묶음 — parity 테스트(`handler.policy.test.js`)가
+ * `policy-sandbox-gate.json` 스냅샷과 `.source` 일치를 단정한다. 런타임 판정에는 쓰지 않는다.
+ */
+export const SANDBOX_GATE_REGEXES = {
+  networkEgress: NETWORK_EGRESS_RE,
+  supplyChain: SUPPLY_CHAIN_EGRESS_RE,
+  dangerousCommands: DANGEROUS_COMMAND_PATTERNS,
+}
+
+/**
+ * 샌드박스 내부에서 결재 없이 허용해도 되는 Bash 명령인지
+ * (원격실행·네트워크 egress·공급망 반입만 게이트).
+ */
 export function isSandboxSafeCommand(command) {
   const cmd = String(command ?? '')
   if (!cmd.trim()) return true
   if (isDangerousCommand(cmd)) return false
-  if (NETWORK_EGRESS_RE.test(normalizeCommandForDetection(cmd))) return false
+  const normalized = normalizeCommandForDetection(cmd)
+  if (NETWORK_EGRESS_RE.test(normalized)) return false
+  if (SUPPLY_CHAIN_EGRESS_RE.test(normalized)) return false
   return true
 }
 
