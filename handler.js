@@ -247,6 +247,16 @@ function isDestructiveTool(toolName) {
  * cloud policy.ts의 ROUTINE_WRITE_TOOLS와 동기화 유지. MCP 접두사를 벗겨 bare 이름으로도 매칭.
  */
 const ROUTINE_WRITE_TOOL_NAMES = new Set(['routine_create', 'routine_update', 'routine_delete'])
+
+/**
+ * 게이트 프로토콜 핸드셰이크. cloud가 `toolOverrides.v >= 2`를 선언하면 deny/ask/askSoft가
+ * **전 등급**을 담고 있다는 뜻이라, 러너는 자기 하드코딩 목록(외향발신·비가역·루틴)을 끈다.
+ * cloud policy.ts `TOOL_GATES_PROTOCOL_VERSION`과 짝. 미선언(구버전)이면 폴백 유지.
+ */
+const TOOL_GATES_PROTOCOL_MIN = 2
+function cloudOwnsToolGates(overrides) {
+  return Number(overrides?.v ?? 0) >= TOOL_GATES_PROTOCOL_MIN
+}
 function isRoutineWriteTool(toolName) {
   if (!toolName) return false
   const bareName = toolName.replace(/^mcp__.+?__/, '')
@@ -647,11 +657,17 @@ function toolLabelKo(toolName) {
   return TOOL_LABEL_KO[bare] || toolName || '알 수 없는 동작'
 }
 
-const REASON_LABEL_KO = {
+// 결재 사유 → 카드 문구. 키는 cloud policy.ts `ASK_SEMANTICS`의 reason과 일치해야 한다
+// (cloud가 도구별 사유 키를 `toolOverrides.askReasons`로 보내고, 한국어 문구는 여기가 소유).
+export const REASON_LABEL_KO = {
   'risky-default': '위험할 수 있는 동작이라 한 번 확인이 필요해요',
   'on-miss': '허용 목록에 없는 명령이라 확인이 필요해요',
   'always': '이 직원은 모든 도구 사용을 항상 결재받도록 설정되어 있어요',
   'outward-send': '직원 이름으로 외부에 메시지를 보내는 일이라 보내기 전 확인이 필요해요',
+  'routine-write-ask': '반복 업무(자동 실행) 설정을 바꾸는 일이라 확인이 필요해요',
+  'irreversible': '되돌릴 수 없는 일이라 진행 전 확인이 필요해요',
+  'external-write': '바깥 서비스에 기록을 남기는 일이라 진행 전 확인이 필요해요',
+  'channel-ask': '이 경로에서는 바로 진행할 수 없어 확인이 필요해요',
 }
 
 /**
@@ -688,11 +704,12 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
   // 상태변경 MCP 도구(wiki_save 등)는 RISKY_TOOL_NAMES가 아니라 아래 non-risky로 새므로 여기서 막는다.
   // toolOverrides 미존재(web=owner 전권/구버전 cloud) → 무시 = 기존 동작(graceful degradation).
   const overrides = policy?.toolOverrides
+  // MCP 도구는 런타임에 mcp__<server>__<tool> 접두사가 붙는다(예: mcp__daiops-mcp__wiki_save).
+  // cloud는 bare 이름(wiki_save)으로 목록을 계산하므로 양쪽 형태를 모두 매칭한다.
+  const bareName = toolName.replace(/^mcp__.+?__/, '')
   if (overrides) {
-    // MCP 도구는 런타임에 mcp__<server>__<tool> 접두사가 붙는다(예: mcp__daiops-mcp__wiki_save).
-    // cloud는 bare 이름(wiki_save)으로 deny/ask를 계산하므로 양쪽 형태를 모두 매칭한다.
-    const bareName = toolName.replace(/^mcp__.+?__/, '')
     const listed = (list) => Array.isArray(list) && (list.includes(toolName) || list.includes(bareName))
+    const askReason = overrides.askReasons?.[bareName] ?? overrides.askReasons?.[toolName] ?? 'channel-ask'
     if (listed(overrides.deny)) {
       return { kind: 'deny', reason: 'channel-deny', toolName, commandSummary: summarizeToolInput(toolName, input) }
     }
@@ -700,7 +717,13 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
       if (!hasUiChannel) {
         return { kind: 'deny', reason: 'channel-deny', toolName, commandSummary: summarizeToolInput(toolName, input) }
       }
-      return { kind: 'plan_request', reason: 'channel-ask', toolName, commandSummary: summarizeToolInput(toolName, input) }
+      return { kind: 'plan_request', reason: askReason, toolName, commandSummary: summarizeToolInput(toolName, input) }
+    }
+    // askSoft: 결재 채널이 없으면 askFallback을 따른다(hard ask와 달리 자율 직원은 통과).
+    // 종전 외향 발신 분기의 의미를 데이터로 옮긴 것 — cloud policy.ts ToolOverrides 참조.
+    if (listed(overrides.askSoft)) {
+      const summary = summarizeToolInput(toolName, input)
+      return askOrFallback({ askFallback: policy?.askFallback ?? 'deny' }, toolName, summary, hasUiChannel, askReason)
     }
   }
 
@@ -713,31 +736,37 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
     }
   }
 
-  // 외향 발신(슬랙/이메일 등 직원 정체성으로 외부에 메시지)은 보안 설정과 무관하게 항상 결재.
-  // UI 채널이 없으면(스케줄 등 무인 실행) askFallback을 따른다(기본 deny — 무인 능동 발신 차단).
-  if (isOutwardSendTool(toolName)) {
-    const summary = summarizeToolInput(toolName, input)
-    return askOrFallback({ askFallback: policy?.askFallback ?? 'deny' }, toolName, summary, hasUiChannel, 'outward-send')
-  }
-
-  // 비가역 파괴적 도구(wiki_delete 등 rm -f)는 config.write 보유자라도 항상 결재. override.deny(외부/API)는
-  // 위에서 걸러졌으므로 여기 도달 = 권한 보유(오너/멤버). 결재 채널이 없으면(헤드리스) 보수적 deny —
-  // askFallback='full'(autonomous)이라도 비가역 삭제를 무인 자동 실행시키지 않는다. cloud policy.ts와 동기화.
-  if (isDestructiveTool(toolName)) {
-    const summary = summarizeToolInput(toolName, input)
-    if (!hasUiChannel) {
-      return { kind: 'deny', reason: 'ask-fallback-deny', toolName, commandSummary: summary }
+  // ── 레거시 도구 게이트 (구버전 cloud 폴백) ────────────────────────────────────────
+  // cloud가 게이트 프로토콜 v2 이상을 선언하면(overrides.v) 위 deny/ask/askSoft가 **전 등급을
+  // 포함**하므로 아래 하드코딩 판정은 끈다. 이 세 목록이 cloud 사본과 어긋나 사고가 두 번 났고
+  // (QA #31·#64), 판정 지식을 한쪽에만 두는 것이 그 재발을 구조적으로 막는 유일한 방법이다.
+  // 구버전 cloud(v 미선언)에서는 종전대로 동작 — 신구 어느 조합에서도 게이트가 사라지지 않는다.
+  if (!cloudOwnsToolGates(overrides)) {
+    // 외향 발신(슬랙/이메일 등 직원 정체성으로 외부에 메시지)은 보안 설정과 무관하게 항상 결재.
+    // UI 채널이 없으면(스케줄 등 무인 실행) askFallback을 따른다(기본 deny — 무인 능동 발신 차단).
+    if (isOutwardSendTool(toolName)) {
+      const summary = summarizeToolInput(toolName, input)
+      return askOrFallback({ askFallback: policy?.askFallback ?? 'deny' }, toolName, summary, hasUiChannel, 'outward-send')
     }
-    return { kind: 'plan_request', reason: 'always', toolName, commandSummary: summary }
-  }
 
-  // 루틴 쓰기(반복 업무 CRUD, ADR37): 대화형이면 그 자리 결재, 무인이면 통과시켜 cloud mcp-bridge가
-  // 결재 큐에 적재하게 한다(파괴적 deny와 반대 — 무인은 큐로). cloud policy.ts와 동기화.
-  if (isRoutineWriteTool(toolName)) {
-    if (hasUiChannel) {
-      return { kind: 'plan_request', reason: 'routine-write-ask', toolName, commandSummary: summarizeToolInput(toolName, input) }
+    // 비가역 파괴적 도구(wiki_delete 등 rm -f)는 config.write 보유자라도 항상 결재. 결재 채널이
+    // 없으면(헤드리스) 보수적 deny — askFallback='full'(autonomous)이라도 무인 자동 실행 금지.
+    if (isDestructiveTool(toolName)) {
+      const summary = summarizeToolInput(toolName, input)
+      if (!hasUiChannel) {
+        return { kind: 'deny', reason: 'ask-fallback-deny', toolName, commandSummary: summary }
+      }
+      return { kind: 'plan_request', reason: 'always', toolName, commandSummary: summary }
     }
-    return { kind: 'allow', reason: 'routine-write-enqueue' }
+
+    // 루틴 쓰기(반복 업무 CRUD, ADR37): 대화형이면 그 자리 결재, 무인이면 통과시켜 cloud mcp-bridge가
+    // 결재 큐에 적재하게 한다(파괴적 deny와 반대 — 무인은 큐로).
+    if (isRoutineWriteTool(toolName)) {
+      if (hasUiChannel) {
+        return { kind: 'plan_request', reason: 'routine-write-ask', toolName, commandSummary: summarizeToolInput(toolName, input) }
+      }
+      return { kind: 'allow', reason: 'routine-write-enqueue' }
+    }
   }
 
   if (!RISKY_TOOL_NAMES.has(toolName)) {

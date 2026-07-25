@@ -260,6 +260,65 @@ describe('채널-인식 도구 게이트 (toolOverrides, ADR 21)', () => {
   })
 })
 
+// P2 — 게이트 프로토콜 v2. cloud(policy.ts buildToolOverrides)가 전 등급을 실어 보내고
+// 러너는 그 데이터만 강제한다. v 미선언이면 러너가 자기 하드코딩 판정을 유지(구버전 cloud 호환).
+describe('게이트 프로토콜 v2 (askSoft·askReasons·핸드셰이크)', () => {
+  const autonomous = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [] }
+  const conservative = { security: 'full', ask: 'off', askFallback: 'deny', allowlist: [] }
+
+  it('askSoft: UI 있으면 결재', () => {
+    const policy = { ...conservative, toolOverrides: { v: 2, askSoft: ['slack_post_message'] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__slack_post_message', {}, true).kind, 'plan_request')
+  })
+
+  it('askSoft: UI 없으면 askFallback을 따른다 (hard ask와의 차이)', () => {
+    // 자율(full) → 통과. 종전 외향 발신 분기와 동일 의미 — 자율 직원의 무인 보고 발신 보존.
+    const auto = { ...autonomous, toolOverrides: { v: 2, askSoft: ['gmail_send'] } }
+    assert.equal(evaluatePolicy(auto, 'mcp__daiops-mcp__gmail_send', {}, false).kind, 'allow')
+    // 보수(deny) → 차단.
+    const cons = { ...conservative, toolOverrides: { v: 2, askSoft: ['gmail_send'] } }
+    assert.equal(evaluatePolicy(cons, 'mcp__daiops-mcp__gmail_send', {}, false).kind, 'deny')
+  })
+
+  it('hard ask는 askFallback을 무시하고 deny (비가역 삭제가 자율 설정으로 열리지 않게)', () => {
+    const policy = { ...autonomous, toolOverrides: { v: 2, ask: ['wiki_delete'] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_delete', {}, false).kind, 'deny')
+  })
+
+  it('askReasons가 결재 사유를 등급별로 지정한다 (카드 문구 소실 방지)', () => {
+    const policy = {
+      ...conservative,
+      toolOverrides: { v: 2, ask: ['routine_create'], askReasons: { routine_create: 'routine-write-ask' } },
+    }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__routine_create', {}, true).reason, 'routine-write-ask')
+  })
+
+  it('askReasons 미지정이면 channel-ask로 폴백', () => {
+    const policy = { ...conservative, toolOverrides: { v: 2, ask: ['wiki_save'] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_save', {}, true).reason, 'channel-ask')
+  })
+
+  it('v>=2면 러너 하드코딩 판정을 끈다 — cloud가 안 실은 등급은 통과', () => {
+    // cloud가 v2를 선언했는데 outward-send를 목록에 안 넣었다 = "이 채널에선 결재 불필요"라는 뜻.
+    // 러너가 자기 목록으로 덧씌우면 cloud 정책을 무시하는 셈이라 끈다.
+    const policy = { ...conservative, toolOverrides: { v: 2, deny: [], ask: [], askSoft: [] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__slack_post_message', {}, true).kind, 'allow')
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__routine_create', {}, true).kind, 'allow')
+  })
+
+  it('v 미선언(구버전 cloud)이면 러너 하드코딩 판정 유지 — 게이트가 사라지지 않는다', () => {
+    const policy = { ...conservative, toolOverrides: { deny: [] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__slack_post_message', {}, true).reason, 'outward-send')
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_delete', {}, true).reason, 'always')
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__routine_create', {}, true).reason, 'routine-write-ask')
+  })
+
+  it('deny가 askSoft보다 우선', () => {
+    const policy = { ...autonomous, toolOverrides: { v: 2, deny: ['gmail_send'], askSoft: ['gmail_send'] } }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__gmail_send', {}, true).kind, 'deny')
+  })
+})
+
 describe('evaluatePolicy — 샌드박스 격리 예외 (ADR 21 §2.4)', () => {
   // conservative(빈 allowlist)에 sandboxRoot 주입 — 격리 배포 시 러너가 canUseTool에서 얹는 형태
   const sb = { security: 'allowlist', ask: 'on-miss', askFallback: 'deny', allowlist: [], sandboxRoot: '/workspace' }
@@ -416,6 +475,17 @@ describe('샌드박스 게이트 parity 스냅샷 (드리프트 감지)', () => 
 
     assert.deepEqual([...SANDBOX_GATE_TOOL_SETS.alwaysApprove].sort(), [...snap.toolGates.alwaysApprove].sort())
     assert.deepEqual([...SANDBOX_GATE_TOOL_SETS.routineWrite].sort(), [...snap.toolGates.routineWrite].sort())
+  })
+
+  it('cloud가 보내는 결재 사유 키에 전부 한국어 문구가 있다 (P1에서 공란으로 샜던 자리)', async () => {
+    const { readFileSync } = await import('node:fs')
+    // cloud policy.ts ASK_SEMANTICS가 askReasons로 보내는 키 목록. 하나라도 REASON_LABEL_KO에
+    // 없으면 결재 카드의 "왜" 줄이 조용히 사라진다 — P1에서 external-write가 정확히 그랬다.
+    const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
+    const { REASON_LABEL_KO } = await import('./handler.js')
+    for (const key of snap.askReasonKeys) {
+      assert.ok(REASON_LABEL_KO[key], `REASON_LABEL_KO에 '${key}' 문구가 없다 — 결재 카드 사유가 공란이 된다`)
+    }
   })
 
   it('스냅샷 minRunnerVersion이 이 패키지 버전을 넘지 않는다', async () => {

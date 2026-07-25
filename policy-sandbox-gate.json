@@ -1,12 +1,14 @@
 {
   "_comment": "ADR 21 §2.4 샌드박스 격리 예외 게이트의 스냅샷(정규식 + 도구 이름 집합). daiops(src/lib/daytona/policy.ts)와 agent-runner(handler.js)가 동일 사본을 보유하며 양쪽 parity 테스트가 코드와의 일치를 단정한다. 규칙 변경 시 ①양쪽 코드 ②양쪽 스냅샷 ③minRunnerVersion ④러너 package.json version ⑤cloud AGENT_RUNNER_IMAGE 핀을 함께 갱신해야 테스트가 통과한다.",
-  "_comment_toolGates": "v2에서 추가. 정규식만 스냅샷하던 v1에서는 도구 이름 게이트가 주석('동기화 유지')으로만 묶여 있어 QA #64(루틴 쓰기 결재)가 러너 핀 상향에만 의존했다. outwardSend는 이 저장소에 폐지된 slack_upload_file이 남아 있어(기능 차이 없음) 제외 — 정리 릴리스에서 추가한다.",
-  "version": 2,
-  "minRunnerVersion": "0.9.7",
+  "_comment_toolGates": "v2에서 추가. 정규식만 스냅샷하던 v1에서는 도구 이름 게이트가 주석('동기화 유지')으로만 묶여 있어 QA #64(루틴 쓰기 결재)가 러너 핀 상향에만 의존했다. outwardSend는 러너에 폐지된 slack_upload_file이 남아 있어(기능 차이 없음) 제외 — 러너 정리 시 추가한다.",
+  "_comment_askReasons": "P2에서 추가. cloud가 toolOverrides.askReasons로 도구별 결재 사유 키를 보내고 러너 REASON_LABEL_KO가 한국어 문구를 소유한다. 키가 어긋나면 카드 사유가 조용히 공란이 되므로(P1에서 실제로 발생) 양쪽 parity 테스트가 이 목록과의 일치를 단정한다.",
+  "version": 3,
+  "minRunnerVersion": "0.9.9",
   "toolGates": {
     "alwaysApprove": ["wiki_delete"],
     "routineWrite": ["routine_create", "routine_update", "routine_delete"]
   },
+  "askReasonKeys": ["channel-ask", "external-write", "irreversible", "outward-send", "routine-write-ask"],
   "networkEgress": "\\b(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|sftp|ftp|rsync|socat)\\b",
   "supplyChain": "git\\s+(?:-[cC]\\s+\\S+\\s+|--?\\S+\\s+)*(?:clone|fetch|pull|ls-remote|remote\\s+(?:add|set-url)|submodule\\s+(?:update|add))\\b|(?:npm|pnpm|yarn|bun)\\s+(?:install|i|add|ci|dlx|create|exec|update|upgrade)\\b|npx\\s|uvx\\s|pip[23]?\\s+(?:install|download)\\b|python[23]?\\s+-m\\s+pip\\s+(?:install|download)\\b|(?:uv|poetry|pipenv)\\s+(?:add|install|sync)\\b|gem\\s+install\\b|cargo\\s+(?:install|add)\\b|go\\s+(?:get|install)\\b|(?:apt|apt-get|dnf|yum|apk|zypper|pacman)\\s+(?:install|add|-S)\\b|brew\\s+(?:install|tap)\\b|docker\\s+(?:pull|run)\\b",
   "dangerousCommands": [
