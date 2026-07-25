@@ -218,49 +218,18 @@ const RISKY_TOOL_NAMES = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit'])
 const SAFE_BINS = new Set(['jq', 'grep', 'cut', 'sort', 'uniq', 'head', 'tail', 'tr', 'wc'])
 
 /**
- * 외향 발신 MCP 도구 — 직원 정체성으로 외부(슬랙/이메일)에 메시지를 보내는 도구.
- * 능동 발신 오발송(엉뚱한 사람/채널)을 막기 위해 security/ask 설정과 무관하게 항상 결재한다.
- * MCP 도구명은 'mcp__daiops-mcp__slack_post_message' 형태로 오므로 '__<tool>' suffix로 매칭.
- */
-const OUTWARD_SEND_TOOL_SUFFIXES = ['slack_post_message', 'slack_upload_file', 'gmail_send']
-function isOutwardSendTool(toolName) {
-  if (!toolName) return false
-  return OUTWARD_SEND_TOOL_SUFFIXES.some((s) => toolName === s || toolName.endsWith(`__${s}`))
-}
-
-/**
- * 비가역 파괴적 도구 — config.write를 가진 주체(오너/멤버)라도 항상 결재를 강제한다(isOutwardSendTool 대칭).
- * 위키 삭제(rm -f, 복구 불가)는 web 오너(toolOverrides 미주입=전권)라도 자동 통과시키지 않는다.
- * cloud policy.ts의 ALWAYS_APPROVE_TOOLS와 동기화 유지. 외부/API 채널은 config.write 미보유라
- * toolOverrides.deny로 이미 차단되어 이 판정에 도달하지 않는다.
- */
-const DESTRUCTIVE_TOOL_NAMES = new Set(['wiki_delete'])
-function isDestructiveTool(toolName) {
-  if (!toolName) return false
-  const bareName = toolName.replace(/^mcp__.+?__/, '')
-  return DESTRUCTIVE_TOOL_NAMES.has(toolName) || DESTRUCTIVE_TOOL_NAMES.has(bareName)
-}
-
-/**
- * 루틴 쓰기 도구 — 반복 업무(스케줄) CRUD (ADR37). 대화형이면 그 자리에서 결재(plan_request),
- * 무인이면 통과시켜 cloud mcp-bridge가 오너 결재 큐에 적재하게 한다(파괴적 도구와 반대 — 무인은 큐로).
- * cloud policy.ts의 ROUTINE_WRITE_TOOLS와 동기화 유지. MCP 접두사를 벗겨 bare 이름으로도 매칭.
- */
-const ROUTINE_WRITE_TOOL_NAMES = new Set(['routine_create', 'routine_update', 'routine_delete'])
-
-/**
  * 게이트 프로토콜 핸드셰이크. cloud가 `toolOverrides.v >= 2`를 선언하면 deny/ask/askSoft가
- * **전 등급**을 담고 있다는 뜻이라, 러너는 자기 하드코딩 목록(외향발신·비가역·루틴)을 끈다.
- * cloud policy.ts `TOOL_GATES_PROTOCOL_VERSION`과 짝. 미선언(구버전)이면 폴백 유지.
+ * **전 등급**(외향발신·비가역·루틴·외부쓰기)을 담고 있다는 뜻이다.
+ *
+ * P3에서 러너의 도구 이름 목록 3종을 **삭제**했다 — 판정 지식이 양쪽에 있으면 한쪽만 고치는
+ * 사고가 반복되기 때문(QA #31·#64). 러너는 이제 cloud가 보낸 데이터만 강제하는 실행기다.
+ * 이름 목록이 존재하지 않으므로 드리프트라는 실패 모드 자체가 사라진다.
+ *
+ * cloud policy.ts `TOOL_GATES_PROTOCOL_VERSION`과 짝.
  */
 const TOOL_GATES_PROTOCOL_MIN = 2
 function cloudOwnsToolGates(overrides) {
   return Number(overrides?.v ?? 0) >= TOOL_GATES_PROTOCOL_MIN
-}
-function isRoutineWriteTool(toolName) {
-  if (!toolName) return false
-  const bareName = toolName.replace(/^mcp__.+?__/, '')
-  return ROUTINE_WRITE_TOOL_NAMES.has(toolName) || ROUTINE_WRITE_TOOL_NAMES.has(bareName)
 }
 
 /** 기본 정책 — 클라우드에서 policy를 보내지 않은 경우 fallback */
@@ -475,21 +444,6 @@ export const SANDBOX_GATE_REGEXES = {
 }
 
 /**
- * 도구 이름 기반 게이트 — 정규식과 같은 이유로 parity 스냅샷 대상(런타임 판정에는 쓰지 않음).
- *
- * 스냅샷 v1은 정규식만 담았고 도구 게이트는 주석("cloud policy.ts와 동기화 유지")으로만 묶여
- * 있었다. 그 상태에서 cloud만 규칙을 바꾸고 이쪽을 빠뜨리면 아무 테스트도 깨지지 않는다 —
- * QA #31을 만든 것과 같은 구조. v2에서 두 집합을 스냅샷에 편입한다.
- *
- * 제외: OUTWARD_SEND_TOOL_SUFFIXES. cloud는 폐지된 `slack_upload_file`을 이미 지웠고 이쪽엔
- * 남아 있다(존재하지 않는 도구라 기능 차이 없음). 이 이름을 지우는 릴리스에서 함께 추가한다.
- */
-export const SANDBOX_GATE_TOOL_SETS = {
-  alwaysApprove: DESTRUCTIVE_TOOL_NAMES,
-  routineWrite: ROUTINE_WRITE_TOOL_NAMES,
-}
-
-/**
  * 샌드박스 내부에서 결재 없이 허용해도 되는 Bash 명령인지
  * (원격실행·네트워크 egress·공급망 반입만 게이트).
  */
@@ -627,10 +581,13 @@ function summarizeToolInput(toolName, input) {
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
     return String(input.file_path ?? '').slice(0, 200)
   }
-  if (isOutwardSendTool(toolName)) {
-    const to = String(input.channel_id ?? input.user_id ?? input.to ?? '?')
-    const text = String(input.text ?? input.body ?? input.content ?? '')
-    return `→ ${to}: ${text}`.slice(0, 200)
+  // 발신형 입력(수신자 + 본문)은 `→ 받는이: 내용`으로 요약한다. **입력 모양**으로 판정하므로
+  // 도구 이름 목록이 필요 없다 — P3에서 게이트 목록을 지우면서 표시 로직도 이름 의존을 끊었다.
+  // 새 발신 도구가 생겨도 목록 등록 없이 자동으로 같은 요약을 받는다.
+  const recipient = input.channel_id ?? input.user_id ?? input.to
+  const body = input.text ?? input.body ?? input.content
+  if (recipient !== undefined && body !== undefined) {
+    return `→ ${String(recipient)}: ${String(body)}`.slice(0, 200)
   }
   try {
     return JSON.stringify(input).slice(0, 200)
@@ -736,37 +693,18 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
     }
   }
 
-  // ── 레거시 도구 게이트 (구버전 cloud 폴백) ────────────────────────────────────────
-  // cloud가 게이트 프로토콜 v2 이상을 선언하면(overrides.v) 위 deny/ask/askSoft가 **전 등급을
-  // 포함**하므로 아래 하드코딩 판정은 끈다. 이 세 목록이 cloud 사본과 어긋나 사고가 두 번 났고
-  // (QA #31·#64), 판정 지식을 한쪽에만 두는 것이 그 재발을 구조적으로 막는 유일한 방법이다.
-  // 구버전 cloud(v 미선언)에서는 종전대로 동작 — 신구 어느 조합에서도 게이트가 사라지지 않는다.
-  if (!cloudOwnsToolGates(overrides)) {
-    // 외향 발신(슬랙/이메일 등 직원 정체성으로 외부에 메시지)은 보안 설정과 무관하게 항상 결재.
-    // UI 채널이 없으면(스케줄 등 무인 실행) askFallback을 따른다(기본 deny — 무인 능동 발신 차단).
-    if (isOutwardSendTool(toolName)) {
-      const summary = summarizeToolInput(toolName, input)
-      return askOrFallback({ askFallback: policy?.askFallback ?? 'deny' }, toolName, summary, hasUiChannel, 'outward-send')
-    }
-
-    // 비가역 파괴적 도구(wiki_delete 등 rm -f)는 config.write 보유자라도 항상 결재. 결재 채널이
-    // 없으면(헤드리스) 보수적 deny — askFallback='full'(autonomous)이라도 무인 자동 실행 금지.
-    if (isDestructiveTool(toolName)) {
-      const summary = summarizeToolInput(toolName, input)
-      if (!hasUiChannel) {
-        return { kind: 'deny', reason: 'ask-fallback-deny', toolName, commandSummary: summary }
-      }
-      return { kind: 'plan_request', reason: 'always', toolName, commandSummary: summary }
-    }
-
-    // 루틴 쓰기(반복 업무 CRUD, ADR37): 대화형이면 그 자리 결재, 무인이면 통과시켜 cloud mcp-bridge가
-    // 결재 큐에 적재하게 한다(파괴적 deny와 반대 — 무인은 큐로).
-    if (isRoutineWriteTool(toolName)) {
-      if (hasUiChannel) {
-        return { kind: 'plan_request', reason: 'routine-write-ask', toolName, commandSummary: summarizeToolInput(toolName, input) }
-      }
-      return { kind: 'allow', reason: 'routine-write-enqueue' }
-    }
+  // ── 게이트 지시 부재 시 fail-safe (P3) ──────────────────────────────────────────
+  // cloud가 v2 핸드셰이크를 선언하지 않았다 = 이 러너가 아는 게이트 지시가 없다는 뜻.
+  // 종전에는 여기서 러너가 들고 있던 도구 이름 목록 3종으로 판정했지만, 그 사본이 cloud와
+  // 갈라져 사고가 두 번 났다(QA #31·#64). 목록을 되살리는 대신 **이름을 모르는 규칙**으로 막는다:
+  // 상태변경 가능성이 있는 MCP 도구는 결재를 요구한다. 드리프트할 데이터가 없으므로 재발 불가.
+  //
+  // 정상 운영에서는 도달하지 않는다(cloud의 모든 실행 경로가 v2 overrides를 싣는다). 구버전
+  // cloud와 새 러너가 만나는 과도기에만 발동하며, 그 경우 과잉 결재(조회 도구까지)가 나되
+  // 게이트가 뚫리지는 않는다 — 안전한 쪽으로 틀린다.
+  if (!cloudOwnsToolGates(overrides) && toolName.startsWith('mcp__')) {
+    const summary = summarizeToolInput(toolName, input)
+    return askOrFallback({ askFallback: 'deny' }, toolName, summary, hasUiChannel, 'channel-ask')
   }
 
   if (!RISKY_TOOL_NAMES.has(toolName)) {

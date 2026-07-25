@@ -136,45 +136,48 @@ describe('SEC-T3 — 위험탐지 + allowlist 패턴 안전성 (cloud와 일치)
   })
 })
 
-describe('evaluatePolicy — 외향 발신 도구는 항상 결재', () => {
-  // 능동 발신(직원 정체성으로 외부에 메시지)은 오발송 방지를 위해 security/ask와 무관하게 결재.
-  const fullAccess = { security: 'full', ask: 'off', askFallback: 'deny', allowlist: [] }
-  const mcpName = 'mcp__daiops-mcp__slack_post_message'
+// P3 — 러너는 도구 이름으로 판정하지 않는다. 외향발신·비가역·루틴 목록은 삭제됐고, cloud가
+// toolOverrides(deny/ask/askSoft/askReasons)로 지시한 것만 강제한다. 아래는 "cloud가 v2로
+// 지시했을 때 종전과 동일한 결정이 나오는가"를 등급별로 확인한다(회귀 기준선 이전).
+describe('cloud 지시 강제 — 외향 발신 (종전 러너 판정과 동일 결정)', () => {
+  // cloud buildToolOverrides(_, channel)가 outward-send를 askSoft로 싣는다.
+  const send = (overrides) => ({ security: 'full', ask: 'off', askFallback: 'deny', allowlist: [], toolOverrides: overrides })
+  const OV = { v: 2, deny: [], ask: [], askSoft: ['slack_post_message', 'gmail_send'], askReasons: { slack_post_message: 'outward-send', gmail_send: 'outward-send' } }
 
-  for (const tool of [mcpName, 'mcp__daiops-mcp__slack_upload_file', 'mcp__daiops-mcp__gmail_send']) {
+  for (const tool of ['mcp__daiops-mcp__slack_post_message', 'mcp__daiops-mcp__gmail_send']) {
     it(`security:'full' 이어도 결재 강등: ${tool}`, () => {
-      const decision = evaluatePolicy(fullAccess, tool, { channel_id: 'C1', text: '안녕' }, true)
-      assert.equal(decision.kind, 'plan_request')
-      assert.equal(decision.reason, 'outward-send')
+      const d = evaluatePolicy(send(OV), tool, { channel_id: 'C1', text: '안녕' }, true)
+      assert.equal(d.kind, 'plan_request')
+      assert.equal(d.reason, 'outward-send')
     })
   }
 
   it('UI 채널 없으면(무인 실행) askFallback=deny로 차단', () => {
-    const decision = evaluatePolicy(fullAccess, mcpName, { user_id: 'U1', text: 'hi' }, false)
-    assert.equal(decision.kind, 'deny')
+    const d = evaluatePolicy(send(OV), 'mcp__daiops-mcp__slack_post_message', { user_id: 'U1', text: 'hi' }, false)
+    assert.equal(d.kind, 'deny')
   })
 
-  it('UI 없음 + askFallback=full 이면 통과 (설정 존중)', () => {
-    const policy = { security: 'allowlist', ask: 'on-miss', askFallback: 'full', allowlist: [] }
-    assert.equal(evaluatePolicy(policy, mcpName, { channel_id: 'C1', text: 'hi' }, false).kind, 'allow')
+  it('UI 없음 + askFallback=full 이면 통과 (설정 존중 — askSoft의 존재 이유)', () => {
+    const policy = { security: 'allowlist', ask: 'on-miss', askFallback: 'full', allowlist: [], toolOverrides: OV }
+    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__slack_post_message', { channel_id: 'C1', text: 'hi' }, false).kind, 'allow')
   })
 
-  it('읽기 계열 MCP 도구는 외향 발신 아님 → 영향 없음', () => {
-    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__slack_read_channel', { channel_id: 'C1' }, true).kind, 'allow')
-    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__slack_find_user', { query: '유민' }, true).kind, 'allow')
-    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__slack_list_channels', {}, true).kind, 'allow')
+  it('읽기 계열 MCP 도구는 목록 밖 → 통과', () => {
+    assert.equal(evaluatePolicy(send(OV), 'mcp__daiops-mcp__slack_read_channel', { channel_id: 'C1' }, true).kind, 'allow')
+    assert.equal(evaluatePolicy(send(OV), 'mcp__daiops-mcp__slack_list_channels', {}, true).kind, 'allow')
   })
 })
 
-describe('evaluatePolicy — 파괴적 도구(wiki_delete)는 항상 결재', () => {
-  // 비가역 rm -f. config.write 보유자(오너/멤버)라도 결재. 외부/API는 toolOverrides.deny로 별도 차단.
-  const fullAccess = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [] }
+describe('cloud 지시 강제 — 비가역 도구 (hard ask)', () => {
+  // cloud가 irreversible 플래그로 hard ask에 싣는다 → askFallback:'full'이어도 무인은 deny.
+  const OV = { v: 2, deny: [], ask: ['wiki_delete'], askSoft: [], askReasons: { wiki_delete: 'irreversible' } }
+  const fullAccess = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [], toolOverrides: OV }
 
   for (const tool of ['wiki_delete', 'mcp__daiops-mcp__wiki_delete']) {
-    it(`security:'full' + owner(overrides 없음)여도 결재 강등: ${tool}`, () => {
+    it(`security:'full' + 전권이어도 결재 강등: ${tool}`, () => {
       const d = evaluatePolicy(fullAccess, tool, { page_name: 'x.md' }, true)
       assert.equal(d.kind, 'plan_request')
-      assert.equal(d.reason, 'always')
+      assert.equal(d.reason, 'irreversible')
     })
   }
 
@@ -183,42 +186,43 @@ describe('evaluatePolicy — 파괴적 도구(wiki_delete)는 항상 결재', ()
     assert.equal(d.kind, 'deny')
   })
 
-  it('capability 미보유(외부/API)는 toolOverrides.deny로 먼저 차단 → channel-deny', () => {
-    const policy = { ...fullAccess, toolOverrides: { deny: ['wiki_delete'] } }
+  it('capability 미보유(외부/API)는 deny로 먼저 차단 → channel-deny', () => {
+    const policy = { ...fullAccess, toolOverrides: { ...OV, deny: ['wiki_delete'] } }
     assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_delete', {}, true).reason, 'channel-deny')
   })
 
-  it('삭제 아닌 상태변경 도구(wiki_save)는 파괴적 아님 → 영향 없음', () => {
+  it('목록 밖 상태변경 도구(wiki_save)는 영향 없음', () => {
     assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__wiki_save', {}, true).kind, 'allow')
   })
 })
 
-describe('evaluatePolicy — 루틴 쓰기(반복 업무 CRUD)는 대화형이면 항상 결재 (QA #64)', () => {
-  // 대화형(hasUiChannel=true)이면 그 자리 결재, 무인이면 통과(cloud mcp-bridge가 큐로).
-  // 이전엔 이 규칙이 러너 baked 평가에 없어 승인 없이 즉시 반영되던 결재 우회 버그.
-  const fullAccess = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [] }
+describe('cloud 지시 강제 — 루틴 쓰기 (QA #64 회귀 기준선)', () => {
+  // 웹: cloud가 ask에 싣는다 → 그 자리 결재. 무인: cloud가 아예 안 싣는다 → 통과해서
+  // mcp-bridge가 결재 큐에 적재(ADR37). 무인 통과가 "게이트 누락"이 아니라 설계임에 유의.
+  const WEB = { v: 2, deny: [], ask: ['routine_create', 'routine_update', 'routine_delete'], askSoft: [], askReasons: { routine_create: 'routine-write-ask', routine_update: 'routine-write-ask', routine_delete: 'routine-write-ask' } }
+  const HEADLESS = { v: 2, deny: [], ask: [], askSoft: [] }
+  const base = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [] }
 
   for (const tool of ['routine_create', 'routine_update', 'routine_delete', 'mcp__daiops-mcp__routine_update']) {
     it(`대화형: security:'full'여도 결재 강등: ${tool}`, () => {
-      const d = evaluatePolicy(fullAccess, tool, { command: '매일 9시 보고' }, true)
+      const d = evaluatePolicy({ ...base, toolOverrides: WEB }, tool, { command: '매일 9시 보고' }, true)
       assert.equal(d.kind, 'plan_request')
       assert.equal(d.reason, 'routine-write-ask')
     })
   }
 
   it('무인(헤드리스)이면 통과 — cloud mcp-bridge가 결재 큐에 적재', () => {
-    const d = evaluatePolicy(fullAccess, 'mcp__daiops-mcp__routine_update', { command: 'x' }, false)
+    const d = evaluatePolicy({ ...base, toolOverrides: HEADLESS }, 'mcp__daiops-mcp__routine_update', { command: 'x' }, false)
     assert.equal(d.kind, 'allow')
-    assert.equal(d.reason, 'routine-write-enqueue')
   })
 
-  it('capability 미보유(외부/API)는 toolOverrides.deny로 먼저 차단 → channel-deny', () => {
-    const policy = { ...fullAccess, toolOverrides: { deny: ['routine_update'] } }
+  it('capability 미보유(외부/API)는 deny로 먼저 차단 → channel-deny', () => {
+    const policy = { ...base, toolOverrides: { ...WEB, deny: ['routine_update'] } }
     assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__routine_update', {}, true).reason, 'channel-deny')
   })
 
-  it('조회 도구(routine_list)는 쓰기 아님 → 영향 없음', () => {
-    assert.equal(evaluatePolicy(fullAccess, 'mcp__daiops-mcp__routine_list', {}, true).kind, 'allow')
+  it('조회 도구(routine_list)는 목록 밖 → 영향 없음', () => {
+    assert.equal(evaluatePolicy({ ...base, toolOverrides: WEB }, 'mcp__daiops-mcp__routine_list', {}, true).kind, 'allow')
   })
 })
 
@@ -227,8 +231,13 @@ describe('evaluatePolicy — 루틴 쓰기(반복 업무 CRUD)는 대화형이�
 describe('채널-인식 도구 게이트 (toolOverrides, ADR 21)', () => {
   const full = { security: 'full', ask: 'off', askFallback: 'deny', allowlist: [] }
 
-  it('toolOverrides 없으면 상태변경 MCP 도구도 통과(기존 동작·graceful)', () => {
-    assert.equal(evaluatePolicy(full, 'mcp__daiops-mcp__wiki_save', { title: 'x' }, true).kind, 'allow')
+  it('toolOverrides 없으면 MCP 도구는 fail-safe로 결재 (P3 — 이름 목록 없이 안전한 쪽으로)', () => {
+    // P2까지는 러너가 자기 이름 목록으로 판정했고 목록 밖이면 통과였다. P3에서 목록을 지운 대신
+    // "게이트 지시가 없으면 상태변경 가능성이 있는 MCP 도구는 결재" 규칙으로 막는다.
+    const d = evaluatePolicy(full, 'mcp__daiops-mcp__wiki_save', { title: 'x' }, true)
+    assert.equal(d.kind, 'plan_request')
+    // 빌트인은 이 규칙 대상이 아님(기존 security/allowlist 체계가 담당).
+    assert.equal(evaluatePolicy(full, 'Read', { file_path: '/workspace/a' }, true).kind, 'allow')
   })
 
   it('deny에 bare 이름이 있으면 접두사 붙은 MCP 도구를 차단', () => {
@@ -239,7 +248,7 @@ describe('채널-인식 도구 게이트 (toolOverrides, ADR 21)', () => {
   })
 
   it('deny 미포함 MCP 도구는 통과(읽기 등)', () => {
-    const policy = { ...full, toolOverrides: { deny: ['wiki_save'] } }
+    const policy = { ...full, toolOverrides: { v: 2, deny: ['wiki_save'] } }
     assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_read', {}, true).kind, 'allow')
   })
 
@@ -255,7 +264,7 @@ describe('채널-인식 도구 게이트 (toolOverrides, ADR 21)', () => {
   })
 
   it('owner(빈 deny) → 상태변경 도구 통과', () => {
-    const policy = { ...full, toolOverrides: { deny: [] } }
+    const policy = { ...full, toolOverrides: { v: 2, deny: [] } }
     assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_save', {}, true).kind, 'allow')
   })
 })
@@ -306,11 +315,14 @@ describe('게이트 프로토콜 v2 (askSoft·askReasons·핸드셰이크)', () 
     assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__routine_create', {}, true).kind, 'allow')
   })
 
-  it('v 미선언(구버전 cloud)이면 러너 하드코딩 판정 유지 — 게이트가 사라지지 않는다', () => {
+  it('v 미선언(구버전 cloud)이면 MCP 도구를 fail-safe로 결재 — 게이트가 뚫리지 않는다', () => {
+    // P3: 러너에 이름 목록이 없으므로 "종전 판정 유지"가 불가능하다. 대신 이름을 모르는 규칙으로
+    // 과잉 결재한다 — 안전한 쪽으로 틀리고, 드리프트할 데이터가 없다.
     const policy = { ...conservative, toolOverrides: { deny: [] } }
-    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__slack_post_message', {}, true).reason, 'outward-send')
-    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__wiki_delete', {}, true).reason, 'always')
-    assert.equal(evaluatePolicy(policy, 'mcp__daiops-mcp__routine_create', {}, true).reason, 'routine-write-ask')
+    for (const t of ['slack_post_message', 'wiki_delete', 'routine_create']) {
+      assert.equal(evaluatePolicy(policy, `mcp__daiops-mcp__${t}`, {}, true).kind, 'plan_request')
+      assert.equal(evaluatePolicy(policy, `mcp__daiops-mcp__${t}`, {}, false).kind, 'deny')
+    }
   })
 
   it('deny가 askSoft보다 우선', () => {
@@ -464,17 +476,6 @@ describe('샌드박스 게이트 parity 스냅샷 (드리프트 감지)', () => 
       SANDBOX_GATE_REGEXES.dangerousCommands.map((re) => re.source),
       snap.dangerousCommands,
     )
-  })
-
-  // v2 추가 — 도구 이름 게이트도 같은 방식으로 묶는다. 정규식만 스냅샷하던 동안 이 두 집합은
-  // 주석("cloud policy.ts와 동기화 유지")으로만 묶여 있었다(QA #64가 그 상태에서 핀 상향으로 봉합됨).
-  it('handler.js의 도구 게이트 집합이 스냅샷과 일치한다', async () => {
-    const { readFileSync } = await import('node:fs')
-    const { SANDBOX_GATE_TOOL_SETS } = await import('./handler.js')
-    const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
-
-    assert.deepEqual([...SANDBOX_GATE_TOOL_SETS.alwaysApprove].sort(), [...snap.toolGates.alwaysApprove].sort())
-    assert.deepEqual([...SANDBOX_GATE_TOOL_SETS.routineWrite].sort(), [...snap.toolGates.routineWrite].sort())
   })
 
   it('cloud가 보내는 결재 사유 키에 전부 한국어 문구가 있다 (P1에서 공란으로 샜던 자리)', async () => {
