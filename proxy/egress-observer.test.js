@@ -106,6 +106,30 @@ describe('EgressObserver.flush — 보고', () => {
     assert.equal(o.stats.size, 0)
   })
 
+  it('보고 상한 초과분은 폐기되지 않고 다음 주기에 보고된다(조용한 절단 금지)', async () => {
+    const { fn, calls } = makeFetch()
+    const o = makeObserver(fn)
+    // 상한보다 3개 많은 호스트. 요청 수를 차등해 상위/꼬리가 결정적으로 갈리게 한다.
+    const total = MAX_HOSTS_PER_REPORT + 3
+    for (let i = 0; i < total; i++) {
+      for (let n = 0; n <= i; n++) o.record(`h${i}.example.com`)
+    }
+
+    const first = await o.flush()
+    assert.equal(first.reported, MAX_HOSTS_PER_REPORT)
+    // 초과 3개는 남아 있어야 한다 — 비웠다면 영구 유실이다.
+    assert.equal(o.stats.size, 3)
+
+    const second = await o.flush()
+    assert.equal(second.reported, 3)
+    assert.equal(o.stats.size, 0)
+
+    // 두 보고를 합치면 전 호스트가 정확히 1회씩 보고된다(중복·누락 없음).
+    const reported = calls.flatMap((c) => c.body.observations.map((x) => x.host))
+    assert.equal(reported.length, total)
+    assert.equal(new Set(reported).size, total)
+  })
+
   it('집계가 없으면 아무것도 보내지 않는다', async () => {
     const { fn, calls } = makeFetch()
     const o = makeObserver(fn)

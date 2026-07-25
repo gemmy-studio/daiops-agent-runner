@@ -119,9 +119,18 @@ export class EgressObserver {
       return { reported: 0, ok: true }
     }
 
+    // 보고 대상(상위 MAX_HOSTS_PER_REPORT)만 집계에서 떼어낸다. 초과분은 stats에 **남겨** 다음 주기에
+    // 보고한다 — 전체를 비우면 201위 이하가 조용히 사라져 "관측했다고 믿는데 데이터가 없는" 상태가 된다.
+    // 보고된 호스트는 제거되므로 다음 주기엔 남은 꼬리가 상위로 올라온다(starvation 없음).
     const observations = this.buildPayload()
-    const taken = new Map(this.stats)
-    this.stats.clear()
+    /** @type {Map<string, HostStat>} */
+    const taken = new Map()
+    for (const o of observations) {
+      const s = this.stats.get(o.host)
+      if (!s) continue
+      taken.set(o.host, s)
+      this.stats.delete(o.host)
+    }
 
     try {
       const url = this.proxyOrigin.replace(/\/+$/, '') + OBSERVATIONS_PATH
