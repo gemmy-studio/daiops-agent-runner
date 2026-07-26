@@ -25,8 +25,18 @@ cloud가 `params.model`을 안 보낸 경우의 fallback. 모델 세대 교체 �
 ## 2. HTTP API contract
 
 agent-runner가 노출하는 endpoint. 메인 앱은 이 형식에만 의존한다.
-(`/health`, `/v1/chat`, `/v1/approval/{id}`, `/v1/secret/{id}`, `/v1/remember/{id}`, `/v1/cancel/{sessionId}`.
-secret/remember는 approval과 동일한 in-flight resolve 패턴이라 상세 생략.)
+(`/health`, `/v1/chat`, `/v1/approval/{id}`, `/v1/secret/{id}`, `/v1/remember/{id}`, `/v1/memory/{id}`, `/v1/cancel/{sessionId}`.
+secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 상세 생략.)
+
+**기억 도구 3종 (ADR 31)** — 저장·판정은 전부 cloud가 하고 러너는 SSE로 요청하고 결과를 기다린다.
+
+| 도구 | SSE 이벤트 | resolve | action 어휘 |
+|---|---|---|---|
+`remember` (추가) | `remember_request` | `POST /v1/remember/{id}` | `saved`·`duplicate`·`failed` |
+`forget` (삭제) | `memory_request` (`op:'forget'`) | `POST /v1/memory/{id}` | `removed`·`protected`·`not_found`·`failed` |
+`revise` (수정) | `memory_request` (`op:'revise'`) | `POST /v1/memory/{id}` | `revised`·`protected`·`duplicate`·`not_found`·`failed` |
+
+`forget`·`revise`는 **`/v1/chat`이 `memory_ops: ['forget','revise']`를 선언할 때만** LLM에 노출된다. 미선언이면 `remember`만 노출 — 구버전 cloud에서 도구를 노출하면 요청이 결재 타임아웃까지 매달리기 때문. action 어휘의 단일 소스는 cloud `harness/remember-instruction.ts`의 `MemoryEditAction`이다.
 
 ### 2-1. `GET /health` (인증 불필요)
 

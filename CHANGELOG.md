@@ -2,6 +2,24 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.11.0] — 2026-07-26
+
+### Added
+- **`forget`·`revise` 도구 — 직원이 자기 영구 기억을 정리할 수 있게** (daiops ADR 31 "대체 방향"). 종전엔 `remember`(추가)만 있어 규칙이 **들어오기만** 했다. 2026-07-26 daiops 실측에서 한 워크스페이스에 114줄이 쌓여 있었고 그중 58줄이 평탄화된 작업 메모(표 번호·파일 경로), 11줄이 문장만 다른 같은 규칙이었다 — 매 대화 시스템 프롬프트에 통째로 주입되므로 쌓일수록 지시가 희석된다.
+  - `tools/memory-edit.js` — `FORGET_TOOL`·`REVISE_TOOL` 정의 + `isValidRuleText`(remember와 같은 2000자 상한) + `resolveMemoryOps`.
+  - `handler.js` — `onForget`·`onRevise`. `remember`와 동형으로 **cloud가 판정·수행**하고 러너는 SSE(`memory_request`)로 요청하고 결과를 기다린다. 러너는 출처·보호 지식을 갖지 않는다(0.10.0 "순수 실행기" 원칙 유지).
+  - `server.js` — `POST /v1/memory/:id`(`/v1/remember/:id` 미러). action: `removed`·`revised`·`protected`·`duplicate`·`not_found`·`failed`. 실패류(`failed`·`not_found`)만 deny로 매핑하고 `protected`·`duplicate`는 "정상 처리됐고 결과가 이것"이라 allow_once다.
+  - **사용자 결재를 걸지 않는다.** 30줄을 치우려면 30번 승인이 되어 자동 정리가 사실상 일어나지 않는다. 권한 바닥은 cloud의 보호 비트가 담당하고(사용자 지정 규칙은 거부), cloud가 변경 전 전문을 `agent_memory_versions`에 스냅샷해 복구 경로를 남긴다. `ApprovalManager`는 결재가 아니라 **in-flight 대기 채널로만** 쓴다.
+  - `revise`를 별도 도구로 둔 이유: `forget`+`remember` 2회는 사이에 실패하면 규칙이 증발한다. 유사 규칙 여러 개를 하나로 합치는 실사용(위 11줄)이 이 연산이다.
+
+### Changed
+- **`memory_ops` 핸드셰이크 — 도구 노출권을 cloud가 소유한다.** `/v1/chat`이 `memory_ops: ['forget','revise']`를 선언할 때만 해당 도구를 LLM에 노출한다. 미선언(구버전 cloud)이면 `remember`만 노출 = **기존 동작 정확 보존**.
+  - 양방향 모두 "도구가 없는" 쪽으로 안전하게 틀린다 — 구버전 러너는 필드를 무시하고, 구버전 cloud는 필드를 안 보낸다. 이 게이트가 없으면 `forget_request`를 처리 못 하는 cloud에서 LLM 호출이 결재 타임아웃(기본 10분)까지 매달린다.
+  - cloud에서 배열 항목을 빼면 **러너 재배포 없이** 그 도구가 즉시 사라진다(롤백 손잡이).
+- 게이트 규칙 무변경 — `policy-sandbox-gate.json` v4·`minRunnerVersion` 0.10.0 그대로. schemaVersion 불변.
+
+> ⚠️ **cloud `AGENT_RUNNER_IMAGE` 핀은 이 이미지가 GHCR에 올라간 뒤에 올린다.** 순서: 러너 태그 push → 익명 pull 200 확인 → cloud `constants.ts` 핀을 `:0.11.0`으로(`v` 접두사 없이). 핀을 먼저 올리면 이미지 부재로 배포가 깨진다. 핀 상향 전에도 cloud는 `memory_ops`를 보내지만 0.10.1 러너가 무시하므로 안전하다(도구 미노출).
+
 ## [0.10.1] — 2026-07-26
 
 ### Fixed

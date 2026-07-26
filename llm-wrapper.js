@@ -227,6 +227,16 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
       if (typeof ctx.onRemember === 'function') return ctx.onRemember(input)
       return { content: 'remember: 이 환경에서는 기억 저장이 지원되지 않습니다.', is_error: true }
     }
+    // forget·revise(ADR 31): 기억 편집. 도구 노출 자체가 cloud의 memory_ops 선언으로 게이트되므로
+    // 콜백 부재는 정상 경로에서 도달하지 않는다(방어적 fallback만 남긴다).
+    if (name === 'forget') {
+      if (typeof ctx.onForget === 'function') return ctx.onForget(input)
+      return { content: 'forget: 이 환경에서는 기억 삭제가 지원되지 않습니다.', is_error: true }
+    }
+    if (name === 'revise') {
+      if (typeof ctx.onRevise === 'function') return ctx.onRevise(input)
+      return { content: 'revise: 이 환경에서는 기억 수정이 지원되지 않습니다.', is_error: true }
+    }
     if (isBuiltinTool(name)) {
       // Phase B 격리: 세션 secret을 자식 프로세스 env로만 주입(본체 process.env 미오염).
       // ctx.getToolEnv()가 {KEY:value} 맵을 반환하면 buildToolEnv(extra)로 Bash 등 자식에 머지된다.

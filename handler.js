@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises'
 import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './tools/request-secret.js'
 import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX } from './tools/remember.js'
+import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps } from './tools/memory-edit.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { postTerminalIngest } from './ingest-client.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
@@ -966,6 +967,12 @@ export async function handleChat(rawParams, res, req) {
         : undefined,
     /** PreToolUse 평가용 정책 (cloud-side에서 직렬화하여 전달) */
     policy: rawParams.policy && typeof rawParams.policy === 'object' ? rawParams.policy : DEFAULT_POLICY,
+    /**
+     * cloud가 처리할 수 있는 메모리 연산 선언(ADR 31). `['forget','revise']` 형태.
+     * **미지정이면 `remember`만 노출**한다 — 구버전 cloud는 forget_request SSE를 처리하지 못해
+     * LLM 호출이 결재 타임아웃까지 매달리기 때문(tools/memory-edit.js resolveMemoryOps 주석 참조).
+     */
+    memory_ops: rawParams.memory_ops,
     /** 사용자가 명시적으로 plan을 요구한 경우만 true. 메시지 텍스트 분류는 더 이상 사용하지 않음. */
     force_plan_mode: rawParams.force_plan_mode === true,
     session_id: rawParams.session_id ? String(rawParams.session_id) : undefined,
@@ -1065,6 +1072,8 @@ export async function handleChat(rawParams, res, req) {
   const abortController = new AbortController()
   const approvalManager = new ApprovalManager()
   const approvalTimeoutMs = params.approval_timeout_seconds * 1000
+  // 기억 편집 도구 노출 여부 — cloud 선언 없으면 remember만(하위호환). tools/memory-edit.js 참조.
+  const memoryOps = resolveMemoryOps(params.memory_ops)
   // Phase B — secret store는 모듈 레벨 workspaceSecrets(프로세스 수명)로 승격됨. 턴(handleChat)마다
   // 새로 만들지 않아 한 번 제공된 secret이 후속 턴에서도 유지된다(getToolEnv가 도구 자식 env로 주입).
   // res를 세션 맵에 저장 — emitSseEvent + T5 resume이 swap 가능.
@@ -1338,6 +1347,105 @@ export async function handleChat(rawParams, res, req) {
       return { content: `기억했어요 — 앞으로 작업에 항상 반영할게요: "${content}"` }
     }
 
+    /**
+     * 기억 편집(forget·revise) 공통 왕복 (ADR 31). onRemember와 동형이지만 SSE 이벤트와 resolve
+     * 엔드포인트가 다르다(`memory_request` → POST /v1/memory/:id).
+     *
+     * 결재를 걸지 않는다 — ApprovalManager는 **in-flight 대기 채널로만** 쓴다(cloud가 처리 결과를
+     * 실어 되돌리는 통로). 사용자에게 승인 UI가 뜨지 않는다. 권한 판정은 cloud가 출처·보호 비트로
+     * 하고, 러너는 그 결과를 LLM에 전달만 한다.
+     *
+     * @param {'forget'|'revise'} op
+     * @param {Record<string, unknown>} payload SSE data에 실을 연산별 인자
+     * @param {string} summary 로그·대기 레코드용 요약
+     * @param {(action: string) => { content: string, is_error?: boolean }} render 결과 문구 생성
+     */
+    const runMemoryEdit = async (op, payload, summary, render) => {
+      const record = approvalManager.create(
+        { toolName: op, commandSummary: summary.slice(0, 80), reason: '영구 기억 편집', sessionId },
+        approvalTimeoutMs,
+      )
+      approvalRouting.set(record.id, sessionId)
+
+      emitSseEvent(sessionId, 'memory_request', {
+        op,
+        ...payload,
+        session_id: sessionId,
+        approval_id: record.id,
+      })
+
+      const result = await approvalManager.waitForDecision(record, approvalTimeoutMs)
+      approvalRouting.delete(record.id)
+
+      if (!result) {
+        return {
+          content: `${op} 응답 대기 시간이 초과됐어요. 규칙 정리는 잠시 후 다시 시도하거나 사용자에게 설정 메뉴에서 직접 처리하도록 안내하세요.`,
+          is_error: true,
+        }
+      }
+      return render(String(result.memoryAction ?? 'failed'))
+    }
+
+    /** forget 도구 — 규칙 1건 삭제. 보호된 규칙(사용자 지정)은 cloud가 거부한다. */
+    const onForget = async (input) => {
+      const content = typeof input?.content === 'string' ? input.content.trim() : ''
+      if (!isValidRuleText(content)) {
+        return {
+          content: `forget: 지울 규칙이 비어있거나 너무 길어요 (1~${MEMORY_RULE_MAX}자). 시스템 프롬프트에 보이는 규칙 본문을 그대로 넘기세요.`,
+          is_error: true,
+        }
+      }
+
+      return runMemoryEdit('forget', { content }, content, (action) => {
+        if (action === 'removed') return { content: `규칙을 지웠어요: "${content}"` }
+        if (action === 'protected') {
+          return {
+            content: `그 규칙은 사용자가 지정한 것이라 지울 수 없어요: "${content}". 그대로 두고, 필요하면 사용자에게 설정 > 항상 지키는 규칙에서 직접 처리하도록 안내하세요.`,
+          }
+        }
+        if (action === 'not_found') {
+          return {
+            content: `그 규칙을 찾지 못했어요: "${content}". 본문이 정확히 일치해야 해요(날짜·태그는 제외). 시스템 프롬프트의 규칙 목록을 다시 확인하세요.`,
+            is_error: true,
+          }
+        }
+        return { content: '규칙 삭제에 실패했어요. 잠시 후 다시 시도하세요.', is_error: true }
+      })
+    }
+
+    /** revise 도구 — 규칙 1건의 본문 교체(원자적). 날짜·출처 태그는 cloud가 보존한다. */
+    const onRevise = async (input) => {
+      const content = typeof input?.content === 'string' ? input.content.trim() : ''
+      const newContent = typeof input?.new_content === 'string' ? input.new_content.trim() : ''
+      if (!isValidRuleText(content) || !isValidRuleText(newContent)) {
+        return {
+          content: `revise: 대상 규칙과 새 내용이 모두 필요해요 (각 1~${MEMORY_RULE_MAX}자).`,
+          is_error: true,
+        }
+      }
+
+      return runMemoryEdit('revise', { content, new_content: newContent }, content, (action) => {
+        if (action === 'revised') return { content: `규칙을 고쳤어요: "${newContent}"` }
+        if (action === 'protected') {
+          return {
+            content: `그 규칙은 사용자가 지정한 것이라 고칠 수 없어요: "${content}". 그대로 두세요.`,
+          }
+        }
+        if (action === 'duplicate') {
+          return {
+            content: `새 내용이 이미 있는 다른 규칙과 겹쳐서 바꾸지 않았어요: "${newContent}". 중복을 없내려면 한쪽을 forget하세요.`,
+          }
+        }
+        if (action === 'not_found') {
+          return {
+            content: `고칠 규칙을 찾지 못했어요: "${content}". 본문이 정확히 일치해야 해요(날짜·태그는 제외).`,
+            is_error: true,
+          }
+        }
+        return { content: '규칙 수정에 실패했어요. 잠시 후 다시 시도하세요.', is_error: true }
+      })
+    }
+
     // SDK maxTurns는 절대 상한(brake)만 담당. 실제 통제는 자체 turnCount + plan_request 결재.
     // 결재 거부 시 abortController.abort()로 중단. SDK가 먼저 끝나면 자체 카운터의
     // 결재 기회를 잃으므로 충분히 크게.
@@ -1373,8 +1481,14 @@ export async function handleChat(rawParams, res, req) {
       abortController,
       canUseTool,
       // request_secret(Phase B) 도구 노출 — LLM이 필요한 환경변수를 사용자에게 요청할 수 있게.
-      // llm-wrapper가 options.tools를 LLM 요청 tools[]에 머지하고, runTool은 onRequestSecret/onRemember로 라우팅.
-      tools: [REQUEST_SECRET_TOOL, REMEMBER_TOOL],
+      // llm-wrapper가 options.tools를 LLM 요청 tools[]에 머지하고, runTool은 onRequestSecret/onRemember/
+      // onForget/onRevise로 라우팅. forget·revise는 cloud가 memory_ops로 선언할 때만 노출(하위호환).
+      tools: [
+        REQUEST_SECRET_TOOL,
+        REMEMBER_TOOL,
+        ...(memoryOps.forget ? [FORGET_TOOL] : []),
+        ...(memoryOps.revise ? [REVISE_TOOL] : []),
+      ],
       // 구조화 출력(AGENT-API-2): 존재 시 llm-wrapper가 submit_structured_response 도구를 추가하고
       // turn-manager가 tool_choice로 강제 + 검증 통과 시 조기 종료한다.
       responseSchema: params.response_schema,
@@ -1422,6 +1536,9 @@ export async function handleChat(rawParams, res, req) {
           },
           onRequestSecret,
           onRemember,
+          // cloud가 memory_ops로 선언하지 않았으면 도구 자체가 노출되지 않으므로 호출되지 않는다.
+          onForget,
+          onRevise,
           // Phase B 격리 — 세션 secret을 도구 자식 프로세스 env로만 전달(본체 process.env 미오염).
           getToolEnv: () => Object.fromEntries(workspaceSecrets),
           // P3-a — 도구(Bash) 실행 중 stdout/stderr tail 라이브 전송. 휘발성(buffer 미누적).

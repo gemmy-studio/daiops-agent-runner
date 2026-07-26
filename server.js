@@ -348,6 +348,45 @@ const server = createServer(async (req, res) => {
     return
   }
 
+  // POST /v1/memory/:id — memory_request(forget·revise) 해소 (ADR 31). /v1/remember/:id 미러.
+  // body: { action: 'removed'|'revised'|'protected'|'duplicate'|'not_found'|'failed' }.
+  // cloud가 forgetInstruction/reviseInstruction 수행 후 결과를 통보한다. 별도 엔드포인트로 둔 이유:
+  // /v1/remember는 action 어휘가 3종으로 고정돼 있고 그 검증을 넓히면 remember 경로의 계약이 흐려진다.
+  if (req.method === 'POST' && url.pathname.startsWith('/v1/memory/')) {
+    const memoryId = url.pathname.slice('/v1/memory/'.length)
+    if (!memoryId) {
+      sendJson(res, 400, { error: 'memory id required' })
+      return
+    }
+    try {
+      const raw = await parseBody(req)
+      const body = raw ? JSON.parse(raw) : {}
+      const action = String(body.action ?? 'failed')
+      const VALID = ['removed', 'revised', 'protected', 'duplicate', 'not_found', 'failed']
+      if (!VALID.includes(action)) {
+        sendJson(res, 400, { error: `action must be ${VALID.join('|')}` })
+        return
+      }
+      // 실패류(failed·not_found)만 deny로 매핑 — 나머지(protected·duplicate 포함)는 "정상 처리됐고
+      // 결과가 이것"이라 allow_once다. 문구 분기는 memoryAction으로 onForget/onRevise가 담당한다.
+      const isFailure = action === 'failed' || action === 'not_found'
+      const decision = isFailure
+        ? { kind: 'deny', memoryAction: action }
+        : { kind: 'allow_once', memoryAction: action }
+      const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
+      const ok = resolveApproval(memoryId, decision, resolvedBy)
+      if (!ok) {
+        sendJson(res, 409, { error: 'memory request already resolved or not found', memory_id: memoryId })
+        return
+      }
+      sendJson(res, 200, { ok: true, memory_id: memoryId })
+    } catch (err) {
+      console.error('[agent-runner] /v1/memory error', err instanceof Error ? err.stack || err.message : err)
+      sendJson(res, 500, { error: 'Internal error' })
+    }
+    return
+  }
+
   // POST /v1/secrets/refresh — cloud가 시크릿 변경 시 호출 → 재-materialize + 프록시 맵/파일 갱신.
   // (syncSecretsToSandbox가 호출. 프록시가 다음 요청부터 새 값/allowed_hosts 반영.)
   if (req.method === 'POST' && url.pathname === '/v1/secrets/refresh') {
