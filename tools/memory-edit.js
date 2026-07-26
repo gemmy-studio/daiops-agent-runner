@@ -20,6 +20,35 @@
 /** 규칙 본문 최대 길이 — remember(2000)와 정합. */
 export const MEMORY_RULE_MAX = 2000
 
+/**
+ * cloud가 `POST /v1/memory/:id`로 보낼 수 있는 처리 결과 어휘.
+ *
+ * **cloud `harness/remember-instruction.ts`의 `MemoryEditAction`과 짝이다.** 값을 바꾸면 양쪽을 함께
+ * 고쳐야 한다 — 러너가 이 문자열로 LLM 문구를 분기하기 때문. 인라인 배열로 두면 server.js와
+ * onForget/onRevise에 사본이 흩어져 한쪽만 고치는 사고가 난다(QA #31·#64와 같은 실패 모드).
+ */
+export const MEMORY_EDIT_ACTIONS = Object.freeze([
+  'removed',
+  'revised',
+  'protected',
+  'duplicate',
+  'not_found',
+  'failed',
+])
+
+/** 실패류 — deny로 매핑되는 결과. protected·duplicate는 "정상 처리됐고 결과가 이것"이라 실패가 아니다. */
+export const MEMORY_EDIT_FAILURES = Object.freeze(['failed', 'not_found'])
+
+/** cloud가 보낸 action이 계약상 유효한가. */
+export function isMemoryEditAction(action) {
+  return MEMORY_EDIT_ACTIONS.includes(action)
+}
+
+/** 이 action을 deny(실패)로 다룰지. */
+export function isMemoryEditFailure(action) {
+  return MEMORY_EDIT_FAILURES.includes(action)
+}
+
 /** 한 줄 규칙 문자열 유효성 — 비어있지 않고 최대 길이 이내. */
 export function isValidRuleText(text) {
   if (typeof text !== 'string') return false

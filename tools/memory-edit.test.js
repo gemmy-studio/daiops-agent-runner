@@ -11,6 +11,9 @@ import {
   isValidRuleText,
   MEMORY_RULE_MAX,
   resolveMemoryOps,
+  MEMORY_EDIT_ACTIONS,
+  isMemoryEditAction,
+  isMemoryEditFailure,
 } from './memory-edit.js'
 
 describe('resolveMemoryOps — 하위호환 게이트', () => {
@@ -48,6 +51,38 @@ describe('isValidRuleText', () => {
     assert.equal(isValidRuleText('규칙'), true)
     assert.equal(isValidRuleText('가'.repeat(MEMORY_RULE_MAX)), true)
     assert.equal(isValidRuleText('가'.repeat(MEMORY_RULE_MAX + 1)), false)
+  })
+})
+
+describe('action 어휘 — cloud MemoryEditAction과의 계약', () => {
+  it('6종을 정확히 담는다 — cloud harness/remember-instruction.ts MemoryEditAction과 짝', () => {
+    assert.deepEqual([...MEMORY_EDIT_ACTIONS], [
+      'removed', 'revised', 'protected', 'duplicate', 'not_found', 'failed',
+    ])
+  })
+
+  it('계약 밖 값을 거부한다', () => {
+    assert.equal(isMemoryEditAction('removed'), true)
+    assert.equal(isMemoryEditAction('saved'), false) // remember의 어휘 — 섞이면 안 된다
+    assert.equal(isMemoryEditAction(''), false)
+    assert.equal(isMemoryEditAction('REMOVED'), false)
+  })
+
+  it('protected·duplicate는 실패가 아니다 — 정상 처리됐고 결과가 그것', () => {
+    // deny로 매핑하면 LLM이 오류로 받아 재시도한다. 보호는 "그대로 두라"는 정상 응답이다.
+    assert.equal(isMemoryEditFailure('protected'), false)
+    assert.equal(isMemoryEditFailure('duplicate'), false)
+    assert.equal(isMemoryEditFailure('removed'), false)
+    assert.equal(isMemoryEditFailure('revised'), false)
+  })
+
+  it('failed·not_found만 실패로 다룬다', () => {
+    assert.equal(isMemoryEditFailure('failed'), true)
+    assert.equal(isMemoryEditFailure('not_found'), true)
+  })
+
+  it('어휘 목록은 동결돼 있다', () => {
+    assert.equal(Object.isFrozen(MEMORY_EDIT_ACTIONS), true)
   })
 })
 

@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path'
 import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
 import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
 import { EgressObserver } from './proxy/egress-observer.js'
+import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure } from './tools/memory-edit.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -362,15 +363,13 @@ const server = createServer(async (req, res) => {
       const raw = await parseBody(req)
       const body = raw ? JSON.parse(raw) : {}
       const action = String(body.action ?? 'failed')
-      const VALID = ['removed', 'revised', 'protected', 'duplicate', 'not_found', 'failed']
-      if (!VALID.includes(action)) {
-        sendJson(res, 400, { error: `action must be ${VALID.join('|')}` })
+      if (!isMemoryEditAction(action)) {
+        sendJson(res, 400, { error: `action must be ${MEMORY_EDIT_ACTIONS.join('|')}` })
         return
       }
       // 실패류(failed·not_found)만 deny로 매핑 — 나머지(protected·duplicate 포함)는 "정상 처리됐고
       // 결과가 이것"이라 allow_once다. 문구 분기는 memoryAction으로 onForget/onRevise가 담당한다.
-      const isFailure = action === 'failed' || action === 'not_found'
-      const decision = isFailure
+      const decision = isMemoryEditFailure(action)
         ? { kind: 'deny', memoryAction: action }
         : { kind: 'allow_once', memoryAction: action }
       const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
