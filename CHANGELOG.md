@@ -2,6 +2,22 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.12.0] — 2026-07-28
+
+### Added
+- **거버넌스 경로 보호 — 샌드박스 자유 쓰기의 파일 레벨 구멍 차단** (daiops ADR 21 §2.4 보완).
+  - 배경: `SANDBOX_WRITE_FREE`(기본 on)가 `sandboxRoot=/workspace`를 주입해 **하위 전부**를 무결재로 열었다. 그래서 도구 레벨 결재 모델 아래에 파일 레벨 우회가 남아 있었다 — cloud가 `skill_manage`를 막아도 `Write`로 `.daiops/skills/active/…/SKILL.md`를 직접 쓰면 **사람 승인 없이 스킬이 active가 된다**(자기 승급). 사용자 지정 규칙은 더 직접적이다: daiops 프롬프트가 규칙 파일을 **DB보다 먼저** 읽으므로(`context-router/knowledge.ts`) 직원이 자기 규칙을 고치면 다음 턴에 그대로 반영되고, `[by:user]`·`[pin]` 보호가 무력화된다.
+  - `PROTECTED_HARNESS_PATHS` + `isProtectedHarnessPath` — 접두사 매칭. 보호 경로는 샌드박스 예외에서 빠져 일반 게이트(등급×채널)로 넘어간다.
+  - **cloud 지시 + 러너 폴백.** cloud가 `policy.protectedPaths`로 목록을 내려보내고, 미전송(구버전 cloud)이면 러너 내장 기본값을 쓴다 → 어떤 버전 조합에서도 닫힌다(fail-closed). 0.9.9 게이트 프로토콜 v2와 같은 패턴.
+  - 실측: daiops active 스킬 9개는 **전부 정상 승인 기록**이 있어 우회 사례는 0건이었다. 잠재 구멍을 승인 UX가 자리잡기 전에 닫는 것.
+
+### 의도적으로 보호하지 않는 것
+- `.daiops/MEMORY.md`·`work.md` — daiops 시스템 프롬프트가 **직접 쓰라고 지시한다**("End → append a 2–3 line summary"). 막으면 정상 동작이 깨진다.
+- `knowledge/`(위키) — baked CLI(=Bash)로 저장한다. `Write` 차단은 우회로를 못 막으면서 정상 업무만 깨뜨려 **보안 효과가 0**이다.
+
+### Changed
+- `policy-sandbox-gate.json` v5 — `protectedPaths` 추가, `minRunnerVersion` 0.12.0. 양쪽 parity 테스트가 코드↔스냅샷 일치를 단정한다(QA #31 재발 방지 사슬).
+
 ## [0.11.0] — 2026-07-26
 
 ### Added

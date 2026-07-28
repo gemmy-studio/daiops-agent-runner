@@ -489,6 +489,14 @@ describe('샌드박스 게이트 parity 스냅샷 (드리프트 감지)', () => 
     }
   })
 
+  // cloud 목록과 갈리면 cloud만 막고 러너는 뚫린다 — 강제 지점이 러너라 치명적.
+  it('내장 보호 경로 폴백이 스냅샷과 일치한다', async () => {
+    const { readFileSync } = await import('node:fs')
+    const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
+    const { PROTECTED_HARNESS_PATHS } = await import('./handler.js')
+    assert.deepEqual(PROTECTED_HARNESS_PATHS, snap.protectedPaths)
+  })
+
   it('스냅샷 minRunnerVersion이 이 패키지 버전을 넘지 않는다', async () => {
     const { readFileSync } = await import('node:fs')
     const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
@@ -498,5 +506,51 @@ describe('샌드박스 게이트 parity 스냅샷 (드리프트 감지)', () => 
       num(pkg.version) >= num(snap.minRunnerVersion),
       `package.json version(${pkg.version})이 스냅샷 minRunnerVersion(${snap.minRunnerVersion})보다 낮다 — 버전을 올려라`,
     )
+  })
+})
+
+// ── 거버넌스 경로 보호 (2026-07-28) ─────────────────────────────────────────
+// 샌드박스 격리 예외가 /workspace 하위 전부를 무결재로 열어, 도구 레벨 결재 모델 아래에
+// 파일 레벨 구멍이 있었다. skill_manage를 막아도 Write로 스킬 파일을 덮으면 그만이었고,
+// 그건 승인 없이 active로 올리는 자기 승급이 된다.
+describe('거버넌스 경로 보호', () => {
+  const base = { security: 'allowlist', ask: 'on-miss', askFallback: 'deny', sandboxRoot: '/workspace' }
+
+  it('보호 경로는 샌드박스 자유 쓰기에서 빠진다', () => {
+    for (const fp of [
+      '/workspace/.daiops/skills/active/x/SKILL.md',
+      '/workspace/.daiops/instructions/core.md',
+      '/workspace/schema/persona.yaml',
+      '/workspace/.integrations.env',
+    ]) {
+      const d = evaluatePolicy(base, 'Write', { file_path: fp }, true)
+      assert.notEqual(d.kind, 'allow', `${fp} 가 무결재로 통과하면 안 된다`)
+    }
+  })
+
+  it('일반 작업 파일·MEMORY.md·위키는 그대로 자유롭게 쓴다', () => {
+    // MEMORY.md는 시스템 프롬프트가 직접 쓰라고 지시하는 파일 — 막으면 정상 동작이 깨진다.
+    // 위키는 baked CLI(Bash)로 저장하므로 Write 차단이 무의미하다.
+    for (const fp of [
+      '/workspace/.daiops/MEMORY.md',
+      '/workspace/work/report.md',
+      '/workspace/knowledge/wiki/a.md',
+    ]) {
+      const d = evaluatePolicy(base, 'Write', { file_path: fp }, true)
+      assert.equal(d.kind, 'allow', `${fp} 는 자유롭게 써야 한다`)
+    }
+  })
+
+  it('cloud 지시가 우선하고, 미전송이면 내장 기본값으로 닫는다', () => {
+    const narrowed = evaluatePolicy(
+      { ...base, protectedPaths: ['/workspace/.integrations.env'] },
+      'Write',
+      { file_path: '/workspace/.daiops/skills/active/x/SKILL.md' },
+      true,
+    )
+    assert.equal(narrowed.kind, 'allow', 'cloud가 좁히면 러너는 그 지시를 따른다')
+
+    const fallback = evaluatePolicy(base, 'Write', { file_path: '/workspace/.integrations.env' }, true)
+    assert.notEqual(fallback.kind, 'allow', '구버전 cloud여도 내장 기본값으로 막힌다')
   })
 })

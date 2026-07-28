@@ -458,6 +458,30 @@ export function isSandboxSafeCommand(command) {
   return true
 }
 
+/**
+ * 샌드박스 자유 쓰기에서 제외할 거버넌스 경로 — cloud 미전송 시 폴백.
+ *
+ * ⚠️ cloud `daytona/policy.ts` `PROTECTED_HARNESS_PATHS`와 **같은 값**이어야 한다.
+ * 두 벌인 이유: 강제 지점이 러너인데 구버전 cloud는 이 목록을 안 보내므로, 러너가 자기
+ * 기본값을 갖고 있어야 어떤 버전 조합에서도 닫힌다. parity 테스트가 동치를 단정한다.
+ *
+ * 여기 없는 것도 의도적이다 — `.daiops/MEMORY.md`는 시스템 프롬프트가 직접 쓰라고 지시하고,
+ * `knowledge/`(위키)는 baked CLI(Bash)로 저장돼 Write 차단이 무의미하다.
+ */
+export const PROTECTED_HARNESS_PATHS = [
+  '/workspace/.daiops/skills/',
+  '/workspace/.daiops/instructions/',
+  '/workspace/.daiops/persona_overrides.yaml',
+  '/workspace/schema/persona.yaml',
+  '/workspace/.integrations.env',
+]
+
+/** 경로가 보호 대상인지. 접두사 매칭 — 디렉토리 항목은 `/`로 끝나 하위 전체를 덮는다. */
+export function isProtectedHarnessPath(filePath, protectedPaths) {
+  if (!filePath) return false
+  return protectedPaths.some((p) => (p.endsWith('/') ? filePath.startsWith(p) : filePath === p))
+}
+
 /** file_path가 샌드박스 루트 하위인지 (경로 탈출 `..` 거부, 상대경로는 cwd=sandboxRoot 기준 내부). */
 export function isUnderSandbox(filePath, sandboxRoot) {
   const fp = String(filePath ?? '')
@@ -726,8 +750,16 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
   if (policy?.sandboxRoot) {
     if (toolName === 'Bash') {
       if (isSandboxSafeCommand(String(input.command ?? ''))) return { kind: 'allow', reason: 'sandbox' }
-    } else if (isUnderSandbox(String(input.file_path ?? ''), policy.sandboxRoot)) {
-      return { kind: 'allow', reason: 'sandbox' }
+    } else {
+      const filePath = String(input.file_path ?? '')
+      // 거버넌스 경로는 자유 쓰기에서 뺀다 — 정식 창구(skill_manage·/remember 등)가 따로 있다.
+      // cloud가 목록을 지시하지만, 미전송(구버전 cloud)이면 내장 기본값을 쓴다(fail-closed).
+      const protectedPaths = Array.isArray(policy.protectedPaths)
+        ? policy.protectedPaths
+        : PROTECTED_HARNESS_PATHS
+      if (isUnderSandbox(filePath, policy.sandboxRoot) && !isProtectedHarnessPath(filePath, protectedPaths)) {
+        return { kind: 'allow', reason: 'sandbox' }
+      }
     }
   }
 

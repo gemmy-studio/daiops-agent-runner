@@ -1,8 +1,8 @@
 {
   "_comment": "ADR 21 §2.4 샌드박스 격리 예외 게이트의 스냅샷(정규식 + 도구 이름 집합). daiops(src/lib/daytona/policy.ts)와 agent-runner(handler.js)가 동일 사본을 보유하며 양쪽 parity 테스트가 코드와의 일치를 단정한다. 규칙 변경 시 ①양쪽 코드 ②양쪽 스냅샷 ③minRunnerVersion ④러너 package.json version ⑤cloud AGENT_RUNNER_IMAGE 핀을 함께 갱신해야 테스트가 통과한다.",
   "_comment_askReasons": "P2에서 추가. cloud가 toolOverrides.askReasons로 도구별 결재 사유 키를 보내고 러너 REASON_LABEL_KO가 한국어 문구를 소유한다. 키가 어긋나면 카드 사유가 조용히 공란이 되므로(P1에서 실제로 발생) 양쪽 parity 테스트가 이 목록과의 일치를 단정한다.",
-  "version": 4,
-  "minRunnerVersion": "0.10.0",
+  "version": 5,
+  "minRunnerVersion": "0.12.0",
   "askReasonKeys": [
     "channel-ask",
     "external-write",
@@ -22,5 +22,13 @@
     "\\bchmod\\s+\\+x\\b[^\\n]*[;&|]+\\s*\\.\\/",
     "\\beval\\b"
   ],
-  "_comment_v4": "P3에서 toolGates 제거. 러너가 도구 이름 목록을 더 이상 보유하지 않아(판정은 cloud toolOverrides 단일 소스) 동기화할 대상 자체가 사라졌다. 남은 스냅샷 대상은 입력 패턴 게이트(정규식)와 결재 사유 키."
+  "_comment_v4": "P3에서 toolGates 제거. 러너가 도구 이름 목록을 더 이상 보유하지 않아(판정은 cloud toolOverrides 단일 소스) 동기화할 대상 자체가 사라졌다. 남은 스냅샷 대상은 입력 패턴 게이트(정규식)와 결재 사유 키.",
+  "protectedPaths": [
+    "/workspace/.daiops/skills/",
+    "/workspace/.daiops/instructions/",
+    "/workspace/.daiops/persona_overrides.yaml",
+    "/workspace/schema/persona.yaml",
+    "/workspace/.integrations.env"
+  ],
+  "_comment_v5": "v5: 거버넌스 경로 보호(protectedPaths) 추가. 샌드박스 격리 예외가 /workspace 하위 전부를 무결재로 열어, 도구 레벨 결재 아래에 파일 레벨 구멍이 있었다(skill_manage를 막아도 Write로 스킬 파일을 덮으면 자기 승급이 된다). cloud가 정책으로 지시하고 러너가 강제하되, 러너에 내장 폴백을 둬 구버전 cloud 조합에서도 닫힌다. MEMORY.md는 프롬프트가 쓰라고 지시하는 파일이라 제외하고, 위키는 baked CLI(Bash)로 저장돼 Write 차단이 무의미하므로 제외한다."
 }
