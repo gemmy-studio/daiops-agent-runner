@@ -1,66 +1,57 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-// 세마포어 상한을 결정적으로 고정한 뒤 import (모듈 로드 시 MAX_HEAVY_TOOLS 캡처).
-process.env.AGENT_RUNNER_MAX_HEAVY_TOOLS = '2'
 process.env.AGENT_RUNNER_HEAVY_NICE = '10'
+// admission 대기를 짧게 — fail-open 경로를 테스트에서 초 단위로 확인할 수 있게.
+process.env.AGENT_RUNNER_ADMIT_MAX_WAIT_MS = '1200'
 
+const mod = await import('./tool-cpu-lane.js')
 const {
-  isHeavyCommand,
   buildSpawnArgs,
-  acquireHeavyLane,
-  heavyLaneStats,
   nicePath,
   _resetNicePathCacheForTest,
-  MAX_HEAVY_TOOLS,
+  _resetAdmissionCountersForTest,
+  admitTool,
+  admissionStats,
+  memoryHeadroom,
+  currentMemoryBytes,
+  VCPU,
   HEAVY_NICE,
-} = await import('./tool-cpu-lane.js')
+  MIN_FREE_BYTES,
+  MEMORY_LIMIT_BYTES,
+} = mod
 
-const tick = () => new Promise((r) => setImmediate(r))
-
-describe('isHeavyCommand', () => {
-  it('무거운 명령을 분류한다', () => {
-    const heavy = [
-      'node /opt/document-core/cli.js readPdf x.pdf > .cache/x.md',
-      'node /opt/document-hwp/cli.js read a.hwp',
-      'node /opt/document-image/cli.js ocr img.png',
-      'python3 /home/daytona/analyze.py',
-      'python script.py --flag',
-      'pip install pandas',
-      'npm install',
-      'pnpm add foo',
-      'ffmpeg -i a.mp4 b.mp4',
-      'convert a.png b.jpg',
-    ]
-    for (const cmd of heavy) assert.equal(isHeavyCommand(cmd), true, `heavy: ${cmd}`)
+describe('VCPU 파생', () => {
+  it('1 이상의 정수다', () => {
+    assert.ok(Number.isInteger(VCPU))
+    assert.ok(VCPU >= 1)
   })
 
-  it('경량 명령은 heavy로 잡지 않는다', () => {
-    const light = [
-      'ls -la',
-      'cat foo.txt',
-      'git status',
-      'echo hello',
-      'grep -r foo src',
-      'node --version',
-      'python3 --version',
-      'python3 -c "print(1)"', // REPL 단발은 제외
-      'cd /workspace && pwd',
-      'mkdir -p .cache',
-    ]
-    for (const cmd of light) assert.equal(isHeavyCommand(cmd), false, `light: ${cmd}`)
+  it('AGENT_RUNNER_VCPU가 os.cpus()보다 우선한다 (cloud 티어 배선 신뢰)', async () => {
+    // 모듈이 부팅 1회 계산하므로 별 프로세스에서 확인한다.
+    const { execFileSync } = await import('node:child_process')
+    const out = execFileSync(
+      process.execPath,
+      ['-e', "import('./tool-cpu-lane.js').then(m => console.log(m.VCPU))"],
+      { env: { ...process.env, AGENT_RUNNER_VCPU: '3' }, encoding: 'utf-8' },
+    )
+    assert.equal(out.trim(), '3')
   })
 
-  it('비문자열/빈 입력은 false', () => {
-    assert.equal(isHeavyCommand(undefined), false)
-    assert.equal(isHeavyCommand(''), false)
-    assert.equal(isHeavyCommand(null), false)
+  it('무효한 AGENT_RUNNER_VCPU는 무시하고 폴백한다', async () => {
+    const { execFileSync } = await import('node:child_process')
+    const out = execFileSync(
+      process.execPath,
+      ['-e', "import('./tool-cpu-lane.js').then(m => console.log(m.VCPU))"],
+      { env: { ...process.env, AGENT_RUNNER_VCPU: 'abc' }, encoding: 'utf-8' },
+    )
+    assert.ok(Number(out.trim()) >= 1)
   })
 })
 
 describe('buildSpawnArgs', () => {
-  // Wave 1 — 이름 분기 제거. 경량/무거움 구분 없이 모든 명령이 nice로 감싸진다.
-  it('경량 명령도 nice로 래핑된다 (이름 분기 없음)', () => {
+  // 이름 분기 없음 — 모든 명령이 동일하게 nice로 감싸진다.
+  it('경량 명령도 nice로 래핑된다', () => {
     const np = nicePath()
     const { file, args } = buildSpawnArgs(['-c', 'ls'])
     if (np) {
@@ -72,17 +63,24 @@ describe('buildSpawnArgs', () => {
     }
   })
 
-  it('분류 목록에 없는 CPU 집약 명령도 nice로 래핑된다 (누락 내성)', () => {
+  it('종전 분류 목록의 누락·오탐 사례가 모두 동일하게 처리된다', () => {
     const np = nicePath()
-    // isHeavyCommand가 놓치는 실측 사례들 — 종전에는 nice 0으로 실행됐다.
-    for (const cmd of ['make -j4', './build.sh', 'tesseract scan.png out', 'pdftoppm -jpeg a.pdf out']) {
-      assert.equal(isHeavyCommand(cmd), false, `${cmd}는 여전히 분류에서 누락(의도된 전제)`)
+    const cmds = [
+      'make -j4', // 종전 누락
+      './build.sh', // 종전 누락
+      'tesseract scan.png out', // 종전 누락
+      'pdftoppm -jpeg a.pdf out', // 종전 누락
+      'git commit -m "convert to md"', // 종전 오탐(\bconvert\b)
+      'node /opt/document-core/cli.js readPdf a.pdf', // 종전 정탐
+      'ls -la', // 경량
+    ]
+    for (const cmd of cmds) {
       const { file, args } = buildSpawnArgs(['-c', cmd])
       if (np) {
-        assert.equal(file, np)
-        assert.deepEqual(args, ['-n', String(HEAVY_NICE), '/bin/bash', '-c', cmd])
+        assert.equal(file, np, cmd)
+        assert.deepEqual(args, ['-n', String(HEAVY_NICE), '/bin/bash', '-c', cmd], cmd)
       } else {
-        assert.equal(file, '/bin/bash')
+        assert.equal(file, '/bin/bash', cmd)
       }
     }
   })
@@ -95,45 +93,91 @@ describe('buildSpawnArgs', () => {
   })
 })
 
-describe('heavy lane semaphore', () => {
-  it('MAX_HEAVY_TOOLS는 env override를 따른다', () => {
-    assert.equal(MAX_HEAVY_TOOLS, 2)
+describe('메모리 측정', () => {
+  it('currentMemoryBytes는 음이 아닌 수 또는 null', () => {
+    const v = currentMemoryBytes()
+    assert.ok(v === null || (Number.isFinite(v) && v >= 0))
   })
 
-  it('상한 초과 acquire는 release 전까지 대기하고, 슬롯을 넘겨받는다', async () => {
-    assert.deepEqual(heavyLaneStats(), { active: 0, waiting: 0, max: 2 })
-
-    const r1 = await acquireHeavyLane()
-    const r2 = await acquireHeavyLane()
-    assert.equal(heavyLaneStats().active, 2)
-
-    let r3resolved = false
-    const p3 = acquireHeavyLane().then((r) => {
-      r3resolved = true
-      return r
-    })
-    await tick()
-    // 상한(2) 도달 → 3번째는 대기.
-    assert.equal(r3resolved, false)
-    assert.deepEqual(heavyLaneStats(), { active: 2, waiting: 1, max: 2 })
-
-    // 하나 반납 → 대기자에게 슬롯 핸드오버(active는 2 유지, 초과하지 않음).
-    r1()
-    const r3 = await p3
-    assert.equal(r3resolved, true)
-    assert.equal(heavyLaneStats().active, 2)
-    assert.equal(heavyLaneStats().waiting, 0)
-
-    r2()
-    r3()
-    assert.deepEqual(heavyLaneStats(), { active: 0, waiting: 0, max: 2 })
+  it('MIN_FREE_BYTES는 최소 256MB이고 상한의 10% 이상', () => {
+    assert.ok(MIN_FREE_BYTES >= 256 * 1024 * 1024)
+    if (MEMORY_LIMIT_BYTES !== null) {
+      assert.ok(MIN_FREE_BYTES >= Math.floor(MEMORY_LIMIT_BYTES * 0.1))
+    }
   })
 
-  it('release는 멱등 — 두 번 호출해도 active가 음수로 가지 않는다', async () => {
-    const r = await acquireHeavyLane()
-    assert.equal(heavyLaneStats().active, 1)
-    r()
-    r()
-    assert.equal(heavyLaneStats().active, 0)
+  it('memoryHeadroom은 ok/freeBytes 형태를 반환한다', () => {
+    const h = memoryHeadroom()
+    assert.equal(typeof h.ok, 'boolean')
+    assert.ok(h.freeBytes === null || Number.isFinite(h.freeBytes))
+  })
+})
+
+describe('admitTool', () => {
+  beforeEach(() => _resetAdmissionCountersForTest())
+
+  const free = () => ({ ok: true, freeBytes: 2 * 1024 * 1024 * 1024 })
+  const tight = () => ({ ok: false, freeBytes: 10 * 1024 * 1024 })
+  const unavailable = () => ({ ok: true, freeBytes: null })
+
+  it('여유가 있으면 즉시 통과하고 대기가 0이다', async () => {
+    const r = await admitTool({ readHeadroom: free })
+    assert.deepEqual(
+      { admitted: r.admitted, waitedMs: r.waitedMs, forced: r.forced },
+      { admitted: true, waitedMs: 0, forced: false },
+    )
+    assert.equal(admissionStats().admitted, 1)
+    assert.equal(admissionStats().waited, 0)
+  })
+
+  it('측정 불가(freeBytes=null)는 no-op으로 즉시 통과 — fail-open', async () => {
+    const r = await admitTool({ readHeadroom: unavailable })
+    assert.equal(r.admitted, true)
+    assert.equal(r.waitedMs, 0)
+    assert.equal(admissionStats().unavailable, 1)
+  })
+
+  it('여유가 없으면 대기하고, 회복되면 통과한다 (pacing)', async () => {
+    let calls = 0
+    const recovering = () => (++calls >= 3 ? free() : tight())
+    const r = await admitTool({ readHeadroom: recovering })
+    assert.equal(r.admitted, true)
+    assert.equal(r.forced, false)
+    assert.ok(r.waitedMs > 0, '대기가 있어야 한다')
+    assert.equal(admissionStats().waited, 1)
+    assert.equal(admissionStats().forced, 0)
+  })
+
+  it('회복되지 않으면 상한 대기 후 통과한다 (forced, fail-open)', async () => {
+    const r = await admitTool({ readHeadroom: tight })
+    assert.equal(r.admitted, true, '거절하지 않는다 — 명령의 실제 메모리 요구를 알 수 없다')
+    assert.equal(r.forced, true)
+    assert.ok(r.waitedMs >= 1200, `대기 상한(1200ms) 이상: ${r.waitedMs}`)
+    assert.equal(admissionStats().forced, 1)
+  })
+
+  it('대기 중 abort되면 admitted=false로 끝난다', async () => {
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 100)
+    const r = await admitTool({ readHeadroom: tight, signal: ac.signal })
+    assert.equal(r.admitted, false)
+    assert.ok(r.waitedMs < 1200, '상한을 기다리지 않고 즉시 중단')
+  })
+
+  it('여유가 있으면 abort 신호가 이미 서 있어도 통과한다 (대기 진입 전)', async () => {
+    const ac = new AbortController()
+    ac.abort()
+    const r = await admitTool({ readHeadroom: free, signal: ac.signal })
+    assert.equal(r.admitted, true)
+  })
+
+  it('admissionStats가 파생 상수를 함께 보고한다', () => {
+    const s = admissionStats()
+    assert.equal(s.vcpu, VCPU)
+    assert.equal(s.minFreeBytes, MIN_FREE_BYTES)
+    assert.equal(s.memoryLimitBytes, MEMORY_LIMIT_BYTES)
+    for (const k of ['admitted', 'waited', 'forced', 'unavailable']) {
+      assert.equal(typeof s[k], 'number', k)
+    }
   })
 })

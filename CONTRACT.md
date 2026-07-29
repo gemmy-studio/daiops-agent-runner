@@ -59,6 +59,15 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
     "cgroupWritable": false,
     "totalMemMb": 6144
   },
+  "admission": {
+    "admitted": 128,
+    "waited": 3,
+    "forced": 0,
+    "unavailable": 0,
+    "vcpu": 2,
+    "memoryLimitBytes": 6442450944,
+    "minFreeBytes": 644245094
+  },
   "timestamp": 1717000000000
 }
 ```
@@ -74,6 +83,10 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
   - `cpuWeight` / `memoryMax` / `memoryCurrent`: cgroup v2 인터페이스 파일 원문(문자열 — 64비트 값이 `Number` 정밀도를 넘을 수 있어 파싱하지 않는다).
   - `cgroupWritable`: 서브그룹 `mkdir` + `cpu.weight` 쓰기를 **실제로 시도**해 판정(시험 후 즉시 정리). `access(W_OK)`로는 런타임 정책 차단을 알 수 없어 실측한다. 커널 집행형 자원 제한(cpu.max/memory.max) 도입 가능 여부의 판정 기준.
   - `totalMemMb`: `os.totalmem()`. `osCpus`와 같은 오보고 위험이 있어 `memoryMax`와 교차 확인용.
+- `admission`: **도구 실행 admission 누적 카운터**(`tool-cpu-lane.js`). `runtime`과 달리 매 요청 최신값이다. 도구 실행 개수를 명령 이름으로 제한하던 방식을 폐지하고, spawn 직전 실제 메모리 여유로 pacing하는 구조로 바뀌었다(측정 실패 시 no-op = fail-open).
+  - `admitted`: 통과한 총 횟수. `waited`: 여유 부족으로 대기한 횟수. `forced`: 대기 상한을 넘겨 여유 없이 통과시킨 횟수(**이 값이 오르면 커널 집행 계층 점검 신호**). `unavailable`: 측정 불가로 no-op 통과한 횟수.
+  - `vcpu`: 실제 파생된 vCPU(`AGENT_RUNNER_VCPU` → cgroup `cpu.max` → `os.cpus()` 순).
+  - `memoryLimitBytes` / `minFreeBytes`: 판정에 쓰인 상한과 확보 임계값. 상한을 못 읽으면 `null`.
 - `timestamp`: `Date.now()`. 디버깅용.
 
 ### 2-2. `POST /v1/chat` (Bearer auth)

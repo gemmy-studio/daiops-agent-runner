@@ -17,6 +17,7 @@ import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile
 import { EgressObserver } from './proxy/egress-observer.js'
 import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure } from './tools/memory-edit.js'
 import { collectRuntimeProbe } from './runtime-probe.js'
+import { admissionStats } from './tool-cpu-lane.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -198,6 +199,14 @@ const server = createServer(async (req, res) => {
       schemaVersion: SCHEMA_VERSION,
       llmProxyOrigin: LLM_PROXY_ORIGIN,
       runtime: RUNTIME_PROBE,
+      // admission은 누적 카운터라 매 요청 최신값을 낸다(부팅 스냅샷이 아님).
+      admission: (() => {
+        try {
+          return admissionStats()
+        } catch {
+          return null
+        }
+      })(),
       timestamp: Date.now(),
     })
     return

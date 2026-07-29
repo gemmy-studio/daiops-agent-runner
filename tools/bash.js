@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { resolvePath, resolveCwd, buildToolEnv } from './_common.js'
 import { ensureJobKeepalive } from '../job-keepalive.js'
-import { isHeavyCommand, acquireHeavyLane, heavyLaneStats, buildSpawnArgs } from '../tool-cpu-lane.js'
+import { admitTool, buildSpawnArgs, MIN_FREE_BYTES } from '../tool-cpu-lane.js'
 import { logWarn } from '../logger.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -83,32 +83,20 @@ export async function runBash(input, ctx = {}) {
   )
 
   // nice 저우선은 아래 buildSpawnArgs가 **모든** 명령에 적용한다(이름 분기 없음).
-  // 여기 세마포어는 *개수* 제한만 담당하며, 그 트리거는 아직 이름 기반이다(Wave 2에서 측정 기반 교체).
-  const heavy = isHeavyCommand(input.command)
-  let releaseLane = null
-  if (heavy) {
-    // 레인 포화 관측 — 대기가 실제로 발생하는지·얼마나 기다리는지는 지금까지 데이터가 0건이었다
-    // (heavyLaneStats 소비처 부재). Wave 2의 레인 크기·교체 판단 근거가 되므로 대기 시에만 기록한다.
-    const before = heavyLaneStats()
-    const saturated = before.active >= before.max
-    const waitStartedAt = Date.now()
-    releaseLane = await acquireHeavyLane()
-    if (saturated) {
-      logWarn('[tool-cpu-lane] 레인 대기', {
-        waitedMs: Date.now() - waitStartedAt,
-        active: before.active,
-        waiting: before.waiting,
-        max: before.max,
-        command: input.command.slice(0, 60),
-      })
-    }
-  }
-  if (releaseLane && ctx.signal?.aborted) {
-    releaseLane()
-    return { content: 'Bash: aborted', is_error: true }
+  // admission은 명령 이름이 아니라 **실제 메모리 여유**를 보고 pacing한다 — 부족하면 상한 있는 대기,
+  // 회복되지 않아도 결국 통과(fail-open). 하드 상한은 커널(tool-cgroup)이 집행한다.
+  const admit = await admitTool({ signal: ctx.signal })
+  if (!admit.admitted) return { content: 'Bash: aborted', is_error: true }
+  if (admit.waitedMs > 0) {
+    logWarn('[tool-resources] 메모리 여유 대기', {
+      waitedMs: admit.waitedMs,
+      forced: admit.forced,
+      freeMb: admit.freeBytes === null ? null : Math.round(admit.freeBytes / (1024 * 1024)),
+      minFreeMb: Math.round(MIN_FREE_BYTES / (1024 * 1024)),
+      command: input.command.slice(0, 60),
+    })
   }
 
-  try {
   return await new Promise((resolve) => {
     const { file, args } = buildSpawnArgs(['-c', input.command])
     const child = spawn(file, args, {
@@ -207,9 +195,6 @@ export async function runBash(input, ctx = {}) {
       settle({ content: body, ...(code !== 0 ? { is_error: true } : {}) })
     })
   })
-  } finally {
-    if (releaseLane) releaseLane()
-  }
 }
 
 /**
