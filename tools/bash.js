@@ -15,7 +15,8 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { resolvePath, resolveCwd, buildToolEnv } from './_common.js'
 import { ensureJobKeepalive } from '../job-keepalive.js'
-import { isHeavyCommand, acquireHeavyLane, buildSpawnArgs } from '../tool-cpu-lane.js'
+import { isHeavyCommand, acquireHeavyLane, heavyLaneStats, buildSpawnArgs } from '../tool-cpu-lane.js'
+import { logWarn } from '../logger.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const MAX_TIMEOUT_MS = 5 * 60 * 1000
@@ -81,9 +82,27 @@ export async function runBash(input, ctx = {}) {
     typeof input.timeout === 'number' && input.timeout > 0 ? input.timeout : DEFAULT_TIMEOUT_MS,
   )
 
-  // CPU 무거운 명령이면 레인 슬롯 획득(다른 세션 turn 스톨 방지) + nice 저우선 실행. 경량은 무제한.
+  // nice 저우선은 아래 buildSpawnArgs가 **모든** 명령에 적용한다(이름 분기 없음).
+  // 여기 세마포어는 *개수* 제한만 담당하며, 그 트리거는 아직 이름 기반이다(Wave 2에서 측정 기반 교체).
   const heavy = isHeavyCommand(input.command)
-  const releaseLane = heavy ? await acquireHeavyLane() : null
+  let releaseLane = null
+  if (heavy) {
+    // 레인 포화 관측 — 대기가 실제로 발생하는지·얼마나 기다리는지는 지금까지 데이터가 0건이었다
+    // (heavyLaneStats 소비처 부재). Wave 2의 레인 크기·교체 판단 근거가 되므로 대기 시에만 기록한다.
+    const before = heavyLaneStats()
+    const saturated = before.active >= before.max
+    const waitStartedAt = Date.now()
+    releaseLane = await acquireHeavyLane()
+    if (saturated) {
+      logWarn('[tool-cpu-lane] 레인 대기', {
+        waitedMs: Date.now() - waitStartedAt,
+        active: before.active,
+        waiting: before.waiting,
+        max: before.max,
+        command: input.command.slice(0, 60),
+      })
+    }
+  }
   if (releaseLane && ctx.signal?.aborted) {
     releaseLane()
     return { content: 'Bash: aborted', is_error: true }
@@ -91,7 +110,7 @@ export async function runBash(input, ctx = {}) {
 
   try {
   return await new Promise((resolve) => {
-    const { file, args } = buildSpawnArgs(heavy, ['-c', input.command])
+    const { file, args } = buildSpawnArgs(['-c', input.command])
     const child = spawn(file, args, {
       cwd,
       env: buildToolEnv(ctx.env),
@@ -231,8 +250,9 @@ function runBackground(input, ctx, cwd) {
 
   // 백그라운드 잡은 fire-and-forget이라 세마포어 슬롯을 보유/반납할 수 없다 → nice 저우선만 적용해
   // 장기 백그라운드 파싱이 인터랙티브 turn의 CPU를 굶기지 않게 한다.
-  const heavy = isHeavyCommand(input.command)
-  const { file, args } = buildSpawnArgs(heavy, ['-c', wrapped])
+  // Wave 1부터는 이름 분기 없이 모든 백그라운드 잡이 저우선이다 — 종전에는 분류를 벗어난 장기 잡이
+  // nice 0으로 무제한 누적될 수 있었고, 백그라운드는 세마포어도 없어 방어가 0이었다.
+  const { file, args } = buildSpawnArgs(['-c', wrapped])
 
   let child
   try {

@@ -11,6 +11,7 @@ const {
   acquireHeavyLane,
   heavyLaneStats,
   nicePath,
+  _resetNicePathCacheForTest,
   MAX_HEAVY_TOOLS,
   HEAVY_NICE,
 } = await import('./tool-cpu-lane.js')
@@ -58,22 +59,39 @@ describe('isHeavyCommand', () => {
 })
 
 describe('buildSpawnArgs', () => {
-  it('경량은 /bin/bash 직접 실행', () => {
-    const { file, args } = buildSpawnArgs(false, ['-c', 'ls'])
-    assert.equal(file, '/bin/bash')
-    assert.deepEqual(args, ['-c', 'ls'])
-  })
-
-  it('무거움은 nice 존재 시 nice로 래핑, 없으면 /bin/bash 폴백', () => {
+  // Wave 1 — 이름 분기 제거. 경량/무거움 구분 없이 모든 명령이 nice로 감싸진다.
+  it('경량 명령도 nice로 래핑된다 (이름 분기 없음)', () => {
     const np = nicePath()
-    const { file, args } = buildSpawnArgs(true, ['-c', 'python3 x.py'])
+    const { file, args } = buildSpawnArgs(['-c', 'ls'])
     if (np) {
       assert.equal(file, np)
-      assert.deepEqual(args, ['-n', String(HEAVY_NICE), '/bin/bash', '-c', 'python3 x.py'])
+      assert.deepEqual(args, ['-n', String(HEAVY_NICE), '/bin/bash', '-c', 'ls'])
     } else {
       assert.equal(file, '/bin/bash')
-      assert.deepEqual(args, ['-c', 'python3 x.py'])
+      assert.deepEqual(args, ['-c', 'ls'])
     }
+  })
+
+  it('분류 목록에 없는 CPU 집약 명령도 nice로 래핑된다 (누락 내성)', () => {
+    const np = nicePath()
+    // isHeavyCommand가 놓치는 실측 사례들 — 종전에는 nice 0으로 실행됐다.
+    for (const cmd of ['make -j4', './build.sh', 'tesseract scan.png out', 'pdftoppm -jpeg a.pdf out']) {
+      assert.equal(isHeavyCommand(cmd), false, `${cmd}는 여전히 분류에서 누락(의도된 전제)`)
+      const { file, args } = buildSpawnArgs(['-c', cmd])
+      if (np) {
+        assert.equal(file, np)
+        assert.deepEqual(args, ['-n', String(HEAVY_NICE), '/bin/bash', '-c', cmd])
+      } else {
+        assert.equal(file, '/bin/bash')
+      }
+    }
+  })
+
+  it('nice 부재 시 /bin/bash 폴백 (silent failure 방지)', () => {
+    _resetNicePathCacheForTest()
+    const np = nicePath()
+    const { file } = buildSpawnArgs(['-c', 'python3 x.py'])
+    assert.equal(file, np ?? '/bin/bash')
   })
 })
 

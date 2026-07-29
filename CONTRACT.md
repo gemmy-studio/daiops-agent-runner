@@ -46,12 +46,34 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
   "status": "ok",
   "version": "0.2.0",
   "schemaVersion": 2,
+  "llmProxyOrigin": "https://app.example.com",
+  "runtime": {
+    "osCpus": 8,
+    "envVcpu": 2,
+    "cgroupVersion": "v2",
+    "cpuMax": "200000 100000",
+    "cpuMaxVcpu": 2,
+    "cpuWeight": "100",
+    "memoryMax": "6442450944",
+    "memoryCurrent": "812345678",
+    "cgroupWritable": false,
+    "totalMemMb": 6144
+  },
   "timestamp": 1717000000000
 }
 ```
 
 - `version`: `package.json#version`. semver. agent-runner 자체 버전.
 - `schemaVersion`: 본 contract(특히 §2) HTTP API의 버전. **integer, 본 contract가 깨지는 변경 시에만 증가**. agent-runner version과 별개.
+- `llmProxyOrigin`: 기동 시 박힌 `LLM_PROXY_URL`의 origin. drift 감지용(§2-1 상단 참조). 미설정 시 `null`.
+- `runtime`: **자원 실측 스냅샷**(부팅 1회, `runtime-probe.js`). 관측 전용이며 **필드가 늘어도 schemaVersion은 오르지 않는다** — 메인 앱은 미지의 필드를 무시해야 한다. 측정 실패 시 개별 필드는 `null`, 모듈 전체 실패 시 `runtime` 자체가 `null`.
+  - `osCpus`: `os.cpus().length`. ⚠️ 컨테이너에서 **호스트 코어 수를 반환할 수 있다** — 메인 앱은 이 값을 워크스페이스 티어의 `cpu`와 비교해 불일치를 경고한다(레인 크기 파생의 정합성 검증).
+  - `envVcpu`: 주입된 `AGENT_RUNNER_VCPU`(메인 앱이 티어에서 배선). 없으면 `null`.
+  - `cgroupVersion`: `'v2'` / `'v1'` / `null`(미마운트).
+  - `cpuMax` / `cpuMaxVcpu`: cgroup v2 `cpu.max` 원문과 그것에서 환산한 vCPU. quota가 `max`(무제한)면 `cpuMaxVcpu`는 `null`.
+  - `cpuWeight` / `memoryMax` / `memoryCurrent`: cgroup v2 인터페이스 파일 원문(문자열 — 64비트 값이 `Number` 정밀도를 넘을 수 있어 파싱하지 않는다).
+  - `cgroupWritable`: 서브그룹 `mkdir` + `cpu.weight` 쓰기를 **실제로 시도**해 판정(시험 후 즉시 정리). `access(W_OK)`로는 런타임 정책 차단을 알 수 없어 실측한다. 커널 집행형 자원 제한(cpu.max/memory.max) 도입 가능 여부의 판정 기준.
+  - `totalMemMb`: `os.totalmem()`. `osCpus`와 같은 오보고 위험이 있어 `memoryMax`와 교차 확인용.
 - `timestamp`: `Date.now()`. 디버깅용.
 
 ### 2-2. `POST /v1/chat` (Bearer auth)

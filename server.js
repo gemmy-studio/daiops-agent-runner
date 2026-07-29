@@ -16,6 +16,7 @@ import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAll
 import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
 import { EgressObserver } from './proxy/egress-observer.js'
 import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure } from './tools/memory-edit.js'
+import { collectRuntimeProbe } from './runtime-probe.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -43,6 +44,20 @@ const PACKAGE_VERSION = (() => {
  * 불일치면 재시작한다 (CONTRACT.md §2-1). path/토큰은 노출하지 않고 origin만 — /health는
  * 샌드박스 내부(localhost) 전용이라 origin 노출 위험이 낮다. 미설정/파싱 실패 시 null.
  */
+/**
+ * 부팅 1회 실측한 런타임 자원 스냅샷 (`/health.runtime`).
+ * cloud가 티어값과 비교해 `os.cpus()` 오보고를 감지하고, cgroup 쓰기 위임 여부를 판정한다.
+ * 부팅 시점 고정값이라 매 요청 재측정하지 않는다 — `memoryCurrent`만 변동하지만 이 필드의 목적은
+ * "읽히는가"의 확인이라 스냅샷으로 충분하다(실시간 사용량은 cloud metrics-collector가 담당).
+ */
+const RUNTIME_PROBE = (() => {
+  try {
+    return collectRuntimeProbe()
+  } catch {
+    return null
+  }
+})()
+
 const LLM_PROXY_ORIGIN = (() => {
   const raw = process.env.LLM_PROXY_URL
   if (!raw) return null
@@ -174,12 +189,15 @@ const server = createServer(async (req, res) => {
 
   // GET /health — 헬스체크 (인증 불필요).
   // version·schemaVersion 노출 — 메인 앱이 deploy 직후 핸드셰이크로 호환성 검증 (CONTRACT.md §2-1).
+  // runtime: 자원 실측 스냅샷(부팅 1회). 필드 추가는 호환 변경이라 schemaVersion 불변 —
+  // cloud verifyHealthHandshake는 미지의 필드를 무시한다.
   if (req.method === 'GET' && url.pathname === '/health') {
     sendJson(res, 200, {
       status: 'ok',
       version: PACKAGE_VERSION,
       schemaVersion: SCHEMA_VERSION,
       llmProxyOrigin: LLM_PROXY_ORIGIN,
+      runtime: RUNTIME_PROBE,
       timestamp: Date.now(),
     })
     return
