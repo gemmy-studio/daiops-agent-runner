@@ -18,6 +18,7 @@ import { EgressObserver } from './proxy/egress-observer.js'
 import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure } from './tools/memory-edit.js'
 import { collectRuntimeProbe } from './runtime-probe.js'
 import { admissionStats } from './tool-cpu-lane.js'
+import { initToolCgroup, toolCgroupState } from './tool-cgroup.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -58,6 +59,12 @@ const RUNTIME_PROBE = (() => {
     return null
   }
 })()
+
+/**
+ * 도구 전용 cgroup 서브그룹 초기화(부팅 1회). 쓰기 위임이 없는 환경에서는 조용히 비활성되고,
+ * nice + 메모리 pacing이 그대로 방어를 담당한다. 판정 사유는 `/health.toolCgroup.reason`에 실린다.
+ */
+initToolCgroup()
 
 const LLM_PROXY_ORIGIN = (() => {
   const raw = process.env.LLM_PROXY_URL
@@ -203,6 +210,13 @@ const server = createServer(async (req, res) => {
       admission: (() => {
         try {
           return admissionStats()
+        } catch {
+          return null
+        }
+      })(),
+      toolCgroup: (() => {
+        try {
+          return toolCgroupState()
         } catch {
           return null
         }

@@ -16,6 +16,7 @@ import path from 'node:path'
 import { resolvePath, resolveCwd, buildToolEnv } from './_common.js'
 import { ensureJobKeepalive } from '../job-keepalive.js'
 import { admitTool, buildSpawnArgs, MIN_FREE_BYTES } from '../tool-cpu-lane.js'
+import { attachToToolCgroup } from '../tool-cgroup.js'
 import { logWarn } from '../logger.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -104,6 +105,8 @@ export async function runBash(input, ctx = {}) {
       env: buildToolEnv(ctx.env),
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+    // 커널 집행 계층 편입(활성 시에만). 실패해도 nice·pacing이 그대로 동작한다.
+    attachToToolCgroup(child.pid)
 
     let stdoutBuf = ''
     let stderrBuf = ''
@@ -253,6 +256,9 @@ function runBackground(input, ctx, cwd) {
   }
   // 부모는 자체 fd를 닫는다 — 자식이 dup된 fd를 보유.
   try { closeSync(logFd) } catch { /* already closed */ }
+  // 백그라운드 잡은 fire-and-forget이라 러너가 사후 개입할 수 없다 → 커널 집행 편입이 특히 중요하다
+  // (unref 전에 붙인다. 이후에는 이 pid를 다시 만질 기회가 없다).
+  attachToToolCgroup(child.pid)
   child.unref()
 
   const meta = {

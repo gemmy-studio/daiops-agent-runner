@@ -68,6 +68,17 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
     "memoryLimitBytes": 6442450944,
     "minFreeBytes": 644245094
   },
+  "toolCgroup": {
+    "enabled": false,
+    "reason": "서브그룹 생성 실패: EACCES",
+    "cpuWeight": null,
+    "memoryHigh": null,
+    "memoryMax": null,
+    "attached": 0,
+    "attachFailed": 0,
+    "vcpu": 2,
+    "group": "/sys/fs/cgroup/daiops-tools"
+  },
   "timestamp": 1717000000000
 }
 ```
@@ -87,6 +98,11 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
   - `admitted`: 통과한 총 횟수. `waited`: 여유 부족으로 대기한 횟수. `forced`: 대기 상한을 넘겨 여유 없이 통과시킨 횟수(**이 값이 오르면 커널 집행 계층 점검 신호**). `unavailable`: 측정 불가로 no-op 통과한 횟수.
   - `vcpu`: 실제 파생된 vCPU(`AGENT_RUNNER_VCPU` → cgroup `cpu.max` → `os.cpus()` 순).
   - `memoryLimitBytes` / `minFreeBytes`: 판정에 쓰인 상한과 확보 임계값. 상한을 못 읽으면 `null`.
+- `toolCgroup`: **커널 집행 계층 상태**(`tool-cgroup.js`). 도구 자식 프로세스를 별도 cgroup v2 서브그룹에 넣어 `cpu.weight`·`memory.high`·`memory.max`를 커널이 집행하게 한다. 쓰기 위임이 없는 환경에서는 비활성되고 nice + admission이 방어를 담당한다(기능 저하 없음, 보장만 약해짐).
+  - `enabled`: 활성 여부. `reason`: **비활성 사유(비활성이면 항상 문자열)** — 조용한 실패를 막기 위해 반드시 실린다. 활성이면 `null`.
+  - `cpuWeight`: 도구 그룹의 `cpu.weight`(기본 20 — 루트 기본 100 대비 약 1/5 몫). 이 값 쓰기가 실패하면 부분 적용 상태로 두지 않고 전체를 비활성한다.
+  - `memoryHigh` / `memoryMax`: 상한의 60% / 80%. `high`는 **소프트**(초과 시 회수 압력으로 감속, 죽이지 않음), `max`는 **하드**(초과 시 이 그룹 내에서 OOM kill → 희생자가 도구 자식으로 한정되고 러너 본체는 보호된다). 컨테이너 상한을 모르면 둘 다 `null`이고 CPU 가중치만 적용된다.
+  - `attached` / `attachFailed`: 편입 성공·실패 누적. 짧은 명령이 편입 전에 종료(ESRCH)하는 것은 정상이므로 `attachFailed`가 오르는 것 자체는 이상이 아니다.
 - `timestamp`: `Date.now()`. 디버깅용.
 
 ### 2-2. `POST /v1/chat` (Bearer auth)
