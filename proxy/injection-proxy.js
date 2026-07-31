@@ -14,7 +14,13 @@
 
 import http from 'node:http'
 import https from 'node:https'
-import { substituteInText, substituteHeaders, detectBlockedSecrets, PLACEHOLDER_PREFIX } from './injection-core.js'
+import {
+  substituteInText,
+  substituteHeaders,
+  detectBlockedSecrets,
+  PLACEHOLDER_PREFIX,
+  SECRET_HOST_NOT_ALLOWED,
+} from './injection-core.js'
 
 /** hop-by-hop 헤더 — 프록시가 업스트림/클라이언트로 전달하지 않는다(RFC 7230 §6.1 + proxy-*). */
 const HOP_BY_HOP = Object.freeze([
@@ -38,7 +44,10 @@ export class InjectionProxy {
    *   certManager: import('./cert-manager.js').CertManager,
    *   upstreamCa?: string | string[],   // 업스트림 검증용 추가 CA (테스트/사설 CA)
    *   logger?: { info: Function, warn: Function, error: Function },
-   *   observer?: { record: (host: string, opts?: { blocked?: boolean }) => void },
+   *   observer?: {
+   *     record: (host: string, opts?: { blocked?: boolean }) => void,
+   *     recordSecretUse?: (key: string, host: string) => void,
+   *   },
    * }} opts
    */
   constructor({ injectionMap, certManager, upstreamCa, logger, observer }) {
@@ -176,7 +185,7 @@ export class InjectionProxy {
       const keys = blocked.map((b) => b.key)
       this.log.warn('[injection-proxy] 시크릿 차단(호스트 미허용)', { host: dest, keys })
       const payload = JSON.stringify({
-        error: 'secret_host_not_allowed',
+        error: SECRET_HOST_NOT_ALLOWED,
         secret: keys[0],
         secrets: keys,
         host: dest,
@@ -190,17 +199,29 @@ export class InjectionProxy {
       return
     }
 
-    const { headers: subHeaders } = substituteHeaders(cleaned, dest, this.injectionMap)
+    // 치환된 키를 모아 관측기로 넘긴다. 종전에는 세 호출 모두 `substituted`를 버려서
+    // "어떤 시크릿이 실제로 쓰였는지"가 어디에도 남지 않았다(설정 화면은 영구 "아직 사용 안 함").
+    // 값이 아니라 **키 이름과 목적지**만 흐른다.
+    const usedKeys = new Set()
+
+    const { headers: subHeaders, substituted: headerKeys } = substituteHeaders(cleaned, dest, this.injectionMap)
+    for (const k of headerKeys) usedKeys.add(k)
 
     // URL 치환 (쿼리파라미터에 placeholder가 있을 수 있음)
-    const subPath = substituteInText(path, dest, this.injectionMap).text
+    const subPathResult = substituteInText(path, dest, this.injectionMap)
+    const subPath = subPathResult.text
+    for (const k of subPathResult.substituted) usedKeys.add(k)
 
     // 바디 치환 (placeholder가 있을 때만 — 일반/바이너리 바디는 건드리지 않음)
     let outBody = bodyBuf
     if (bodyBuf && bodyBuf.length && bodyBuf.includes(PLACEHOLDER_PREFIX)) {
       const r = substituteInText(bodyBuf.toString('utf-8'), dest, this.injectionMap)
       outBody = Buffer.from(r.text, 'utf-8')
+      for (const k of r.substituted) usedKeys.add(k)
     }
+
+    // `?.()` — 관측기를 주입하지 않는 테스트·로컬 dev에서도 프록시는 그대로 동작해야 한다.
+    for (const key of usedKeys) this.observer?.recordSecretUse?.(key, dest)
     if (outBody && outBody.length) {
       subHeaders['content-length'] = String(outBody.length)
     } else {

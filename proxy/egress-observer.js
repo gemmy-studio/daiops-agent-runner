@@ -32,6 +32,12 @@ export const MAX_HOSTS_PER_REPORT = 200
 /** 메모리 상한 — 서로 다른 호스트가 이보다 많아지면 새 호스트는 버린다(무한 증가 방지). */
 export const MAX_TRACKED_HOSTS = 2_000
 
+/**
+ * 한 번의 보고에 담는 최대 시크릿 사용 기록 수. 워크스페이스 시크릿은 현실적으로 수십 개 수준이라
+ * 넉넉하다. 키당 **마지막 1건만** 유지하므로 이 수는 곧 서로 다른 키의 수다.
+ */
+export const MAX_SECRET_USES_PER_REPORT = 100
+
 const OBSERVATIONS_PATH = '/api/internal/egress-observations'
 
 /**
@@ -59,6 +65,13 @@ export class EgressObserver {
     this.now = nowFn ?? (() => Date.now())
     /** @type {Map<string, HostStat>} */
     this.stats = new Map()
+    /**
+     * 시크릿 사용 원장 — `키 → { host, atMs }`. **키당 마지막 1건만** 유지한다.
+     * cloud가 채우는 건 `workspace_secrets.last_used_at`/`last_used_by_tool`(= 마지막 사용 시각과
+     * 목적지)뿐이라 이력을 쌓을 이유가 없고, 요청마다 행이 늘면 보고가 관측 대상보다 시끄러워진다.
+     * @type {Map<string, { host: string, atMs: number }>}
+     */
+    this.secretUses = new Map()
     this.timer = null
     this.droppedHosts = 0
   }
@@ -91,6 +104,30 @@ export class EgressObserver {
     this.stats.set(key, { requests: 1, blocked: opts.blocked ? 1 : 0, firstAtMs: at, lastAtMs: at })
   }
 
+  /**
+   * 시크릿 1건이 실제로 주입됐음을 기록한다 (프록시가 placeholder → 실값 치환에 성공한 순간).
+   *
+   * ## 왜 이게 필요한가
+   *
+   * 치환 엔진은 처음부터 "치환된 키 목록"을 **감사 목적으로** 반환하고 있었는데(injection-core
+   * `substituteInText`), 프록시가 그걸 구조분해에서 버려 아무 데도 도달하지 않았다. 반대편 끝에는
+   * `workspace_secrets.last_used_at`/`last_used_by_tool` 컬럼과 그걸 그리는 설정 화면이 이미 있었다.
+   * 결과: 모든 시크릿이 영구히 "아직 사용 안 함"으로 보이고, "쓰던 게 고장남"과 "설정 미완료"를
+   * 구분하는 UI 분기가 도달 불가였다. 이 메서드가 그 끊긴 배관이다.
+   *
+   * **값은 다루지 않는다** — 키 이름과 목적지 호스트만. 호스트만 보내는 이 보고 채널의 원칙과 같다.
+   *
+   * @param {string} key 환경변수 키 (예: STRIPE_API_KEY)
+   * @param {string} host 실제로 값이 주입돼 나간 목적지
+   */
+  recordSecretUse(key, host) {
+    if (!key || !host) return
+    // 상한 초과 시 **새 키만** 버린다(기존 키 갱신은 계속) — 이미 보이던 시크릿의 시각이 굳는 것보다
+    // 새 키가 한 주기 늦게 보이는 편이 덜 혼란스럽다.
+    if (!this.secretUses.has(key) && this.secretUses.size >= MAX_SECRET_USES_PER_REPORT) return
+    this.secretUses.set(key, { host: String(host).toLowerCase(), atMs: this.now() })
+  }
+
   /** 현재 집계를 cloud 보고 payload로 변환(요청 수 많은 순으로 상한까지). */
   buildPayload() {
     const entries = [...this.stats.entries()]
@@ -110,11 +147,12 @@ export class EgressObserver {
    * @returns {Promise<{ reported: number, ok: boolean }>}
    */
   async flush() {
-    if (this.stats.size === 0) return { reported: 0, ok: true }
+    if (this.stats.size === 0 && this.secretUses.size === 0) return { reported: 0, ok: true }
     if (!this.canReport) {
       // 로컬 dev 등 — 집계가 무한히 쌓이지 않도록 비우고 로그만 남긴다.
       const hosts = this.stats.size
       this.stats.clear()
+      this.secretUses.clear()
       this.log.info('[egress-observer] 보고 설정 없음 — 집계 폐기', { hosts })
       return { reported: 0, ok: true }
     }
@@ -132,6 +170,15 @@ export class EgressObserver {
       this.stats.delete(o.host)
     }
 
+    // 시크릿 사용은 키당 1건뿐이라 전량을 떼어낸다(호스트처럼 꼬리가 남을 일이 없다).
+    const takenSecretUses = new Map(this.secretUses)
+    this.secretUses.clear()
+    const secrets = [...takenSecretUses.entries()].map(([key, u]) => ({
+      key,
+      host: u.host,
+      last_used_at: new Date(u.atMs).toISOString(),
+    }))
+
     try {
       const url = this.proxyOrigin.replace(/\/+$/, '') + OBSERVATIONS_PATH
       const res = await this.fetchFn(url, {
@@ -141,7 +188,7 @@ export class EgressObserver {
           authorization: `Bearer ${this.token}`,
           'x-workspace-id': this.workspaceId,
         },
-        body: JSON.stringify({ observations }),
+        body: JSON.stringify(secrets.length > 0 ? { observations, secrets } : { observations }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       if (this.droppedHosts > 0) {
@@ -161,6 +208,11 @@ export class EgressObserver {
         cur.blocked += s.blocked
         cur.firstAtMs = Math.min(cur.firstAtMs, s.firstAtMs)
         cur.lastAtMs = Math.max(cur.lastAtMs, s.lastAtMs)
+      }
+      // 시크릿 사용도 되돌린다 — 단, 그 사이 더 최근 사용이 들어왔으면 그쪽을 남긴다(뒤로 감기 방지).
+      for (const [key, u] of takenSecretUses) {
+        const cur = this.secretUses.get(key)
+        if (!cur || cur.atMs < u.atMs) this.secretUses.set(key, u)
       }
       this.log.warn('[egress-observer] 보고 실패 — 다음 주기에 재시도', {
         error: err instanceof Error ? err.message : String(err),

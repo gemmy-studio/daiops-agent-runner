@@ -61,6 +61,16 @@ function requestThroughProxy({ proxyPort, upstreamPort, caPem, authHeader }) {
 describe('InjectionProxy — CONNECT MITM + 치환 (실제 TLS)', () => {
   let dir, cm, upstream, upstreamPort, proxy, proxyPort, upCa
 
+  /**
+   * 관측기 스텁 — 치환된 키가 실제로 원장으로 흘러가는지 확인한다. 종전에는 치환 엔진이 반환하던
+   * 키 목록을 프록시가 버려서 "어떤 시크릿을 썼는지"가 어디에도 남지 않았다.
+   */
+  const observed = { hosts: [], secretUses: [] }
+  const observer = {
+    record: (host, opts) => observed.hosts.push({ host, ...opts }),
+    recordSecretUse: (key, host) => observed.secretUses.push({ key, host }),
+  }
+
   before(async () => {
     dir = await mkdtemp(path.join(os.tmpdir(), 'proxy-test-'))
     cm = new CertManager({ baseDir: dir })
@@ -87,7 +97,7 @@ describe('InjectionProxy — CONNECT MITM + 치환 (실제 TLS)', () => {
     const { placeholderByKey, injectionMap } = buildInjectionMap([
       { key: 'MY_TOKEN', realValue: 'REAL_SECRET_VALUE', allowedHosts: ['localhost'] },
     ])
-    proxy = new InjectionProxy({ injectionMap, certManager: cm, upstreamCa: upCa })
+    proxy = new InjectionProxy({ injectionMap, certManager: cm, upstreamCa: upCa, observer })
     proxyPort = (await proxy.start(0)).port
 
     const ph = placeholderByKey.get('MY_TOKEN')
@@ -97,6 +107,8 @@ describe('InjectionProxy — CONNECT MITM + 치환 (실제 TLS)', () => {
     })
     assert.equal(res.status, 200)
     assert.equal(res.json.auth, 'Bearer REAL_SECRET_VALUE')
+    // 사용 원장 — 키 이름과 목적지만(값 없음)
+    assert.deepEqual(observed.secretUses, [{ key: 'MY_TOKEN', host: 'localhost' }])
   })
 
   it('비허용 호스트 → 403 차단(업스트림 미도달·진짜 값 유출 없음)', async () => {
@@ -117,6 +129,8 @@ describe('InjectionProxy — CONNECT MITM + 치환 (실제 TLS)', () => {
     assert.equal(res.json.host, 'localhost')
     assert.equal(res.json.auth, undefined) // 업스트림 echo 없음
     assert.ok(!JSON.stringify(res.json).includes('REAL_SECRET_VALUE'))
+    // 차단된 요청은 "사용"이 아니다 — 실값이 나가지 않았으므로 원장에 남기지 않는다.
+    assert.deepEqual(observed.secretUses, [{ key: 'MY_TOKEN', host: 'localhost' }])
   })
 
   it('placeholder 없는 일반 요청 → 그대로 통과(차단 아님)', async () => {

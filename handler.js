@@ -9,7 +9,7 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { ApprovalManager } from './approval-manager.js'
-import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './tools/request-secret.js'
+import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './tools/request-secret.js'
 import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX } from './tools/remember.js'
 import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps } from './tools/memory-edit.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
@@ -17,6 +17,7 @@ import { postTerminalIngest } from './ingest-client.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
 import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail } from './retry-utils.js'
 import { maskTokensInText, maskSecretValues } from './mcp-client.js'
+import { maskPlaceholders } from './proxy/injection-core.js'
 import { RepeatFailureGuard } from './repeat-failure-guard.js'
 import { logError } from './logger.js'
 
@@ -1272,6 +1273,10 @@ export async function handleChat(rawParams, res, req) {
     const onRequestSecret = async (input) => {
       const keyName = typeof input?.key_name === 'string' ? input.key_name.trim() : ''
       const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
+      // 에이전트가 제안하는 목적지. 이게 없으면 vault에 allowed_hosts 없이 저장돼 **재시작 후
+      // 모든 요청이 fail-closed로 막히는** 키가 태어난다(그 세션에는 실값이 메모리에 있어 정상
+      // 동작하므로 증상이 시간차를 두고 나타난다). 사용자가 카드에서 수정할 수 있다.
+      const allowedHosts = normalizeAllowedHosts(input?.allowed_hosts)
       if (!isValidSecretKey(keyName)) {
         return {
           content: `request_secret: key_name '${keyName}'이(가) 유효하지 않아요. 대문자로 시작하는 영대문자/숫자/밑줄만 허용해요 (예: STRIPE_API_KEY).`,
@@ -1305,6 +1310,7 @@ export async function handleChat(rawParams, res, req) {
         reason: reason || `'${keyName}' 환경변수가 필요해요`,
         session_id: sessionId,
         approval_id: record.id,
+        allowed_hosts: allowedHosts,
       })
 
       const result = await approvalManager.waitForDecision(record, approvalTimeoutMs)
@@ -1575,6 +1581,12 @@ export async function handleChat(rawParams, res, req) {
           getToolEnv: () => Object.fromEntries(workspaceSecrets),
           // P3-a — 도구(Bash) 실행 중 stdout/stderr tail 라이브 전송. 휘발성(buffer 미누적).
           onToolProgress: (p) => emitEphemeralSse(sessionId, 'tool_progress', p),
+          // 크레덴셜 주입 프록시가 "허용 호스트 아님"으로 막은 사건. 자식 프로세스의 403 본문에만
+          // 있던 것을 llm-wrapper가 건져 올린다 — cloud가 diagnostic으로 바꿔 화면에 고칠 위치까지
+          // 안내한다. 값은 흐르지 않는다(키 이름·호스트만).
+          onSecretBlocked: ({ secrets, host }) => {
+            emitSseEvent(sessionId, 'secret_blocked', { secrets, host })
+          },
           // A3 — 컨텍스트 관리(대용량 tool_result 오프로드 / 오래된 결과 프루닝) 발동 시 사용자 고지.
           //   기존엔 무성(silent)이라 "자료 일부가 왜 요약됐지"를 알 수 없었다. cloud가 diagnostic으로 노출.
           onOffload: ({ offloaded, freedChars }) => {
@@ -1738,7 +1750,9 @@ export async function handleChat(rawParams, res, req) {
           // 흘러나온 평문을 2겹으로 가린다 — (1) 값 기반: 활성 secret 정확 일치,
           // (2) 토큰 모양: env가 덤프하는 ANTHROPIC_API_KEY(sk-ant) 등. emitSseEvent가
           // EventBuffer에도 누적하므로 SSE·디스크 영속(resume 로그) 양쪽이 한 번에 덮인다.
-          const safeOutput = maskTokensInText(maskSecretValues(output, workspaceSecrets.values()))
+          // 자리표시자 라벨링은 llm-wrapper runTool에서 이미 적용된다(모델이 원문을 못 갖게 하려면
+          // 거기가 원천). 여기서 한 번 더 도는 이유는 그 경로를 지나지 않는 MCP 결과 때문.
+          const safeOutput = maskPlaceholders(maskTokensInText(maskSecretValues(output, workspaceSecrets.values())))
           emitSseEvent(sessionId, 'tool_result', {
             output: safeOutput,
             is_error: block.is_error === true,

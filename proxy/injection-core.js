@@ -15,15 +15,39 @@
 
 import crypto from 'node:crypto'
 
-/** placeholder 접두사 — 로그/디버깅에서 식별 가능하고, 실제 값과 절대 겹치지 않도록. */
+/**
+ * placeholder 접두사 — 로그/디버깅에서 식별 가능하고, 실제 값과 절대 겹치지 않도록.
+ * ⚠️ cloud도 이 리터럴을 복제해 갖고 있다(`src/lib/integrations/secret-placeholder.ts`) —
+ * 상시 프롬프트가 에이전트에게 접두사를 문자 그대로 인용해야 하기 때문. 바꾸면 양쪽을 같이 바꾼다.
+ */
 export const PLACEHOLDER_PREFIX = 'dai_phantom_'
+
+/** placeholder 꼬리의 무작위 바이트 수 — 8바이트=16 hex(64비트). 고유성 확보용이지 비밀이 아니다. */
+const PLACEHOLDER_RANDOM_BYTES = 8
+
+/** 키 이름을 placeholder에 넣을 수 있는 형태로 정규화 (헤더·URL·셸에서 안전한 문자만, 길이 상한). */
+function sanitizeKeyForPlaceholder(key) {
+  return String(key ?? '').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 40)
+}
 
 /**
  * 새 placeholder 1개 생성 (부팅 시 secret당 1개).
- * @returns {string} `dai_phantom_` + 64 hex
+ *
+ * **키 이름을 담는다** — `dai_phantom_STRIPE_API_KEY_9f3ac1...`.
+ * 종전에는 무작위 64 hex뿐이라, 이 값을 마주친 사람(과 에이전트)이 ① 가짜인지 ② 어떤 키의
+ * 자리인지 둘 다 알 수 없었다. placeholder는 *비밀이 아니라 라벨*이므로 숨겨서 얻는 게 없고,
+ * 키 이름은 어차피 환경변수 이름으로 드러나 있다. (Agent Vault의 `__github_token__` 모델)
+ *
+ * 무작위 꼬리는 고유성 전용이다 — 같은 키가 재기동될 때마다 다른 placeholder가 되어,
+ * 과거 세션에서 새어 나간 문자열이 재사용되지 않는다.
+ *
+ * @param {string} key 환경변수 키 (예: STRIPE_API_KEY)
+ * @returns {string} `dai_phantom_<KEY>_<16hex>`
  */
-export function generatePlaceholder() {
-  return PLACEHOLDER_PREFIX + crypto.randomBytes(32).toString('hex')
+export function generatePlaceholder(key) {
+  const label = sanitizeKeyForPlaceholder(key)
+  const rand = crypto.randomBytes(PLACEHOLDER_RANDOM_BYTES).toString('hex')
+  return label ? `${PLACEHOLDER_PREFIX}${label}_${rand}` : PLACEHOLDER_PREFIX + rand
 }
 
 /**
@@ -45,27 +69,33 @@ export function generatePlaceholder() {
  * placeholder는 여기서 생성되므로, 반환된 placeholderByKey로 `.integrations.env`를 쓰고
  * injectionMap으로 치환한다 — 둘이 항상 같은 placeholder를 공유한다.
  *
+ * **injectionMap은 placeholder가 긴 것부터 담긴다(불변식).** placeholder가 키 이름을 담게 되면서
+ * (예: `..._A_<hex>` vs `..._A_B_<hex>`) 이론상 한쪽이 다른 쪽의 부분문자열이 될 수 있는데,
+ * 짧은 것을 먼저 치환하면 긴 placeholder를 조각내 망가뜨린다. 삽입 순서로 한 번만 정해 두면
+ * 요청마다 정렬할 필요가 없다(치환은 헤더마다 도는 hot path).
+ *
  * @param {MaterializedSecret[]} secrets
  * @returns {{ placeholderByKey: Map<string,string>, injectionMap: Map<string,InjectionEntry> }}
  */
 export function buildInjectionMap(secrets) {
   /** @type {Map<string,string>} */
   const placeholderByKey = new Map()
-  /** @type {Map<string,InjectionEntry>} */
-  const injectionMap = new Map()
+  /** @type {Array<[string, InjectionEntry]>} */
+  const entries = []
 
   for (const s of Array.isArray(secrets) ? secrets : []) {
     if (!s || typeof s.key !== 'string' || typeof s.realValue !== 'string') continue
     if (!s.key || !s.realValue) continue
-    const placeholder = generatePlaceholder()
+    const placeholder = generatePlaceholder(s.key)
     const allowedHosts = Array.isArray(s.allowedHosts)
       ? s.allowedHosts.filter((h) => typeof h === 'string' && h.length > 0)
       : []
     placeholderByKey.set(s.key, placeholder)
-    injectionMap.set(placeholder, { key: s.key, realValue: s.realValue, allowedHosts })
+    entries.push([placeholder, { key: s.key, realValue: s.realValue, allowedHosts }])
   }
 
-  return { placeholderByKey, injectionMap }
+  entries.sort((a, b) => b[0].length - a[0].length)
+  return { placeholderByKey, injectionMap: new Map(entries) }
 }
 
 /**
@@ -155,6 +185,82 @@ export function substituteHeaders(headers, host, injectionMap) {
     for (const key of r.substituted) substituted.add(key)
   }
   return { headers: out, substituted: [...substituted] }
+}
+
+/**
+ * placeholder 토큰 1개를 통째로 잡는 정규식. label은 `[A-Za-z0-9_]`, 꼬리는 소문자 hex 16자.
+ * 전역 플래그 정규식은 `lastIndex`가 남으므로 호출마다 새로 만든다.
+ */
+function placeholderTokenRegex() {
+  return new RegExp(`${PLACEHOLDER_PREFIX}[A-Za-z0-9_]+`, 'g')
+}
+
+/**
+ * 텍스트에 섞인 placeholder를 `<placeholder:KEY>` 라벨로 바꾼다. **표시 전용.**
+ *
+ * ## 왜 필요한가
+ *
+ * placeholder는 비밀이 아니라서 값 기반 마스킹(`maskSecretValues`)의 대상이 아니다. 그래서
+ * `echo $STRIPE_API_KEY`의 결과가 아무 표식 없이 도구 출력 → 채팅 버블로 그대로 흘렀고,
+ * 사용자는 그게 자기 키인지 시스템이 만든 가짜인지 구분할 수 없었다. 모델도 마찬가지라
+ * "키 알려줘"에 이 문자열을 진짜 키처럼 답했다.
+ *
+ * 도구 출력 단계에서 라벨로 바꾸면 **모델이 애초에 원문 placeholder를 손에 넣지 못한다** —
+ * 그래서 답변에 옮겨 적는 것도 자동으로 막힌다. (1Password `op run`의 `<concealed by 1Password>`)
+ *
+ * ## 하지 말아야 할 것
+ *
+ * **아웃바운드 요청 경로에는 절대 적용하지 않는다.** 프록시는 원문 placeholder를 문자 그대로
+ * 찾아 치환하므로, 요청 헤더·바디를 라벨로 바꿔 버리면 실값 주입이 통째로 실패한다.
+ * 이 함수는 "사람·모델에게 보여줄 텍스트"에만 쓴다.
+ *
+ * @param {unknown} text
+ * @returns {string}
+ */
+export function maskPlaceholders(text) {
+  const s = typeof text === 'string' ? text : String(text ?? '')
+  if (!s || !s.includes(PLACEHOLDER_PREFIX)) return s
+  return s.replace(placeholderTokenRegex(), (token) => {
+    const rest = token.slice(PLACEHOLDER_PREFIX.length)
+    const m = rest.match(/^(.*)_([0-9a-f]{16})$/)
+    const label = m ? m[1] : ''
+    return label ? `<placeholder:${label}>` : '<placeholder>'
+  })
+}
+
+/** 프록시가 "허용 호스트가 아니라 막았다"를 알릴 때 쓰는 오류 코드. 러너·cloud·프롬프트가 공유한다. */
+export const SECRET_HOST_NOT_ALLOWED = 'secret_host_not_allowed'
+
+/**
+ * 도구 출력에 섞여 들어온 프록시 차단 응답을 찾아낸다.
+ *
+ * 차단은 프록시가 자식 프로세스(curl·python 등)에 403 JSON으로 돌려주므로, 러너 본체는 그 사건을
+ * 직접 볼 수 없다. 유일한 흔적이 **도구 출력 문자열**이다. 여기서 건져 올려야 사용자에게
+ * "어떤 시크릿이 어느 호스트에서 막혔다"를 구조화해 보여줄 수 있다 — 그러지 않으면 에이전트가
+ * 임의로 요약한 "인증에 실패했습니다"만 남는다.
+ *
+ * @param {unknown} text 도구 출력
+ * @returns {{ secrets: string[], host: string } | null}
+ */
+export function detectSecretBlockNotice(text) {
+  const s = typeof text === 'string' ? text : ''
+  if (!s.includes(SECRET_HOST_NOT_ALLOWED)) return null
+  // 프록시가 만드는 평평한 JSON 오브젝트 하나를 집는다(중첩 없음 — 우리가 만든 형식이라 확정적).
+  const m = s.match(/\{[^{}]*"error"\s*:\s*"secret_host_not_allowed"[^{}]*\}/)
+  if (!m) return null
+  try {
+    const parsed = JSON.parse(m[0])
+    const secrets = Array.isArray(parsed.secrets)
+      ? parsed.secrets.filter((k) => typeof k === 'string' && k)
+      : typeof parsed.secret === 'string' && parsed.secret
+        ? [parsed.secret]
+        : []
+    const host = typeof parsed.host === 'string' ? parsed.host : ''
+    if (secrets.length === 0 || !host) return null
+    return { secrets, host }
+  } catch {
+    return null
+  }
 }
 
 /**

@@ -23,6 +23,7 @@ import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, runBuiltinTool, isBuiltinTool } from
 import { isMcpToolName } from './mcp-client.js'
 import { buildStructuredTool, STRUCTURED_TOOL_NAME } from './tools/submit-structured.js'
 import { validateAgainstSchema } from './tools/validate-schema.js'
+import { maskPlaceholders, detectSecretBlockNotice } from './proxy/injection-core.js'
 
 /**
  * @typedef {Object} TextDeltaEvent
@@ -193,7 +194,7 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
   }
 
   // runTool: 빌트인은 자체 실행, MCP는 turn-manager가 routing(자기 registry에서 처리).
-  const runTool = async (name, input, runCtx) => {
+  const runToolInner = async (name, input, runCtx) => {
     // 구조화 출력(AGENT-API-2): submit_structured_response는 스키마 검증 후 결과를 JSON 문자열로 반환.
     // 통과 시 turn-manager가 이 tool_result를 최종 응답으로 삼아 조기 종료하고, 실패 시 is_error로
     // 돌려주면 멀티턴 루프가 자기수정 재시도한다(forced tool_choice 유지).
@@ -256,6 +257,38 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
       return { content: `Unrouted MCP tool: ${name}`, is_error: true }
     }
     return { content: `Unknown tool: ${name}`, is_error: true }
+  }
+
+  /**
+   * 도구 결과에서 크레덴셜 자리표시자를 `<placeholder:KEY>` 라벨로 바꾼다.
+   *
+   * 여기서 감싸는 이유: 이 반환값이 **모델에게 가는 tool_result 그 자체**다. handler의 SSE emit
+   * 단계에서만 가리면 화면은 깨끗해도 모델은 원문을 손에 쥔 채라, "키 알려줘"에 그대로 옮겨 적는다.
+   * 원천에서 라벨로 바꾸면 모델이 애초에 원문을 갖지 못한다.
+   *
+   * 적용 범위: 빌트인 도구(bash/read/grep 등 — placeholder가 실제로 새는 경로). MCP 결과는
+   * turn-manager가 자체 routing하므로 여기를 지나지 않는다(handler의 emit 단계에서 한 번 더 가린다).
+   *
+   * 트레이드오프: 에이전트가 파일에서 읽은 placeholder를 그대로 되쓰면 라벨이 기록된다.
+   * 상시 프롬프트가 "값을 파일에 저장하지 말고 `$KEY`로 참조만 하라"고 지시해 이를 막는다.
+   */
+  const runTool = async (name, input, runCtx) => {
+    const result = await runToolInner(name, input, runCtx)
+    if (result && typeof result.content === 'string') {
+      // 프록시 차단(허용 호스트 미지정)은 자식 프로세스의 403 응답 본문으로만 존재한다. 여기서
+      // 건져 올려 구조화 신호로 올리면 사용자가 "어떤 키가 어느 호스트에서 막혔는지"와 고칠 위치를
+      // 곧바로 보게 된다 — 없으면 에이전트가 요약한 "인증 실패"만 남는다.
+      const blocked = detectSecretBlockNotice(result.content)
+      if (blocked && typeof ctx.onSecretBlocked === 'function') {
+        try {
+          ctx.onSecretBlocked(blocked)
+        } catch {
+          // 관측 신호가 도구 실행을 깨서는 안 된다.
+        }
+      }
+      return { ...result, content: maskPlaceholders(result.content) }
+    }
+    return result
   }
 
   const turnManagerInput = {

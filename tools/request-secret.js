@@ -33,10 +33,44 @@ export const REQUEST_SECRET_TOOL = Object.freeze({
         type: 'string',
         description: '이 키가 왜 필요한지 한 줄 설명. 사용자에게 그대로 표시됩니다 (예: "결제 내역 조회에 사용").',
       },
+      allowed_hosts: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          '이 키를 보낼 목적지 호스트 (예: ["api.stripe.com"], 서브도메인은 "*.example.com"). '
+          + '값은 여기 지정한 호스트로 나갈 때만 주입되고 그 외에는 차단됩니다. '
+          + '**비워 두면 그 키는 어디에도 쓰이지 않아 등록해도 작동하지 않습니다** — '
+          + '지금 하려는 작업의 API 도메인을 반드시 함께 지정하세요. 사용자가 화면에서 수정할 수 있습니다.',
+      },
     },
     required: ['key_name'],
   },
 })
+
+/** 허용 호스트 형식 — cloud HOST_PATTERN과 정합(정확 호스트 또는 '*.도메인'). */
+const HOST_PATTERN = /^\*?\.?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
+
+/**
+ * 에이전트가 제안한 allowed_hosts를 정규화한다(소문자·중복 제거·형식 위반 제외·상한).
+ *
+ * 왜 여기서 거르나: 형식이 틀린 호스트는 프록시 매칭에서 조용히 실패해 "등록은 됐는데 안 되는 키"를
+ * 만든다 — F가 고치려는 결함과 같은 종류다. 값이 아니라 목적지 목록이므로 마스킹 대상이 아니다.
+ *
+ * @param {unknown} hosts
+ * @returns {string[]}
+ */
+export function normalizeAllowedHosts(hosts) {
+  if (!Array.isArray(hosts)) return []
+  const out = []
+  for (const raw of hosts) {
+    if (typeof raw !== 'string') continue
+    const h = raw.trim().toLowerCase()
+    if (!h || h.length > 253 || !HOST_PATTERN.test(h)) continue
+    if (!out.includes(h)) out.push(h)
+    if (out.length >= 50) break
+  }
+  return out
+}
 
 /**
  * 환경변수 키 이름 유효성 검사.

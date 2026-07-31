@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey } from './request-secret.js'
+import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './request-secret.js'
 
 test('isValidSecretKey: 유효한 키 (대문자 시작, 영대문자/숫자/밑줄)', () => {
   assert.equal(isValidSecretKey('STRIPE_API_KEY'), true)
@@ -50,4 +50,43 @@ test('REQUEST_SECRET_TOOL: Anthropic tool 스키마', () => {
   assert.ok(REQUEST_SECRET_TOOL.input_schema.properties.reason)
   // 설명에 "값은 모델에 노출되지 않" 원칙이 명시돼 있어야 LLM이 채팅 직접 입력 요구를 피한다.
   assert.match(REQUEST_SECRET_TOOL.description, /노출되지 않/)
+})
+
+/**
+ * allowed_hosts를 값과 **같이** 받는 이유: 없으면 vault에 빈 허용 목록으로 저장돼, 다음 러너
+ * 재시작부터 주입 프록시가 fail-closed로 전부 막는다. 그 세션에는 실값이 메모리에 있어 정상
+ * 동작하므로 증상이 시간차를 두고 나타나 원인 추적이 어렵다.
+ */
+test('REQUEST_SECRET_TOOL: allowed_hosts를 선언하고 비우면 작동하지 않음을 경고한다', () => {
+  const prop = REQUEST_SECRET_TOOL.input_schema.properties.allowed_hosts
+  assert.ok(prop)
+  assert.equal(prop.type, 'array')
+  assert.match(prop.description, /작동하지 않습니다/)
+  // 필수는 아니다 — 목적지를 아직 모르는 경우가 있고, 사용자가 카드에서 채울 수 있다.
+  assert.deepEqual(REQUEST_SECRET_TOOL.input_schema.required, ['key_name'])
+})
+
+test('normalizeAllowedHosts: 소문자·중복 제거·순서 보존', () => {
+  assert.deepEqual(
+    normalizeAllowedHosts([' API.Stripe.com ', 'api.stripe.com', '*.example.com']),
+    ['api.stripe.com', '*.example.com'],
+  )
+})
+
+test('normalizeAllowedHosts: 형식 위반은 버린다(조용한 실패 방지)', () => {
+  assert.deepEqual(
+    normalizeAllowedHosts(['https://a.com/p', 'a b.com', '', 'ok.com', 'x'.repeat(300)]),
+    ['ok.com'],
+  )
+})
+
+test('normalizeAllowedHosts: 비배열·비문자열은 빈 배열', () => {
+  assert.deepEqual(normalizeAllowedHosts(undefined), [])
+  assert.deepEqual(normalizeAllowedHosts('api.stripe.com'), [])
+  assert.deepEqual(normalizeAllowedHosts([1, null, {}]), [])
+})
+
+test('normalizeAllowedHosts: 상한 50', () => {
+  const many = Array.from({ length: 80 }, (_, i) => `h${i}.example.com`)
+  assert.equal(normalizeAllowedHosts(many).length, 50)
 })

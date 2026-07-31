@@ -1,6 +1,11 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { EgressObserver, MAX_TRACKED_HOSTS, MAX_HOSTS_PER_REPORT } from './egress-observer.js'
+import {
+  EgressObserver,
+  MAX_TRACKED_HOSTS,
+  MAX_HOSTS_PER_REPORT,
+  MAX_SECRET_USES_PER_REPORT,
+} from './egress-observer.js'
 
 /**
  * A-3 1단계 — egress 관측기. **차단하지 않고** 목적지 호스트만 집계해 cloud에 주기 보고한다.
@@ -168,6 +173,82 @@ describe('EgressObserver.flush — 보고', () => {
     const r = await o.flush()
     assert.equal(r.ok, true)
     assert.equal(o.stats.size, 0)
+  })
+})
+
+/**
+ * 시크릿 사용 원장 — 프록시가 placeholder를 실값으로 바꾼 순간을 키 이름·목적지만으로 기록해
+ * cloud의 `workspace_secrets.last_used_at`/`last_used_by_tool`을 채운다. 종전에는 치환 엔진이
+ * 반환하던 키 목록을 프록시가 버려서 설정 화면이 영구히 "아직 사용 안 함"이었다.
+ */
+describe('EgressObserver.recordSecretUse — 시크릿 사용 원장', () => {
+  it('키당 마지막 사용(호스트·시각)만 남긴다', () => {
+    let t = 1000
+    const o = makeObserver(makeFetch().fn, { nowFn: () => (t += 1000) })
+    o.recordSecretUse('STRIPE_API_KEY', 'api.stripe.com')
+    o.recordSecretUse('STRIPE_API_KEY', 'files.stripe.com')
+    assert.equal(o.secretUses.size, 1)
+    assert.equal(o.secretUses.get('STRIPE_API_KEY').host, 'files.stripe.com')
+  })
+
+  it('호스트를 소문자로 정규화하고, 키/호스트가 비면 무시한다', () => {
+    const o = makeObserver(makeFetch().fn)
+    o.recordSecretUse('GH_TOKEN', 'API.GitHub.com')
+    o.recordSecretUse('', 'x.com')
+    o.recordSecretUse('K', '')
+    assert.equal(o.secretUses.size, 1)
+    assert.equal(o.secretUses.get('GH_TOKEN').host, 'api.github.com')
+  })
+
+  it('상한을 넘으면 새 키만 버리고 기존 키 갱신은 계속한다', () => {
+    const o = makeObserver(makeFetch().fn)
+    for (let i = 0; i < MAX_SECRET_USES_PER_REPORT; i++) o.recordSecretUse(`K${i}`, 'h.com')
+    o.recordSecretUse('OVERFLOW', 'h.com')
+    assert.equal(o.secretUses.size, MAX_SECRET_USES_PER_REPORT)
+    assert.ok(!o.secretUses.has('OVERFLOW'))
+    o.recordSecretUse('K0', 'updated.com')
+    assert.equal(o.secretUses.get('K0').host, 'updated.com')
+  })
+
+  it('보고 payload에 값은 없고 키·호스트·시각만 담긴다', async () => {
+    const { fn, calls } = makeFetch()
+    const o = makeObserver(fn)
+    o.record('api.stripe.com')
+    o.recordSecretUse('STRIPE_API_KEY', 'api.stripe.com')
+    await o.flush()
+    assert.deepEqual(Object.keys(calls[0].body.secrets[0]).sort(), ['host', 'key', 'last_used_at'])
+    assert.equal(calls[0].body.secrets[0].key, 'STRIPE_API_KEY')
+    assert.equal(o.secretUses.size, 0)
+  })
+
+  it('사용 기록이 없으면 secrets 필드를 아예 보내지 않는다', async () => {
+    const { fn, calls } = makeFetch()
+    const o = makeObserver(fn)
+    o.record('example.com')
+    await o.flush()
+    assert.equal(calls[0].body.secrets, undefined)
+  })
+
+  it('호스트 집계가 비어도 시크릿 사용만으로 보고한다(플러시 경계에서 유실 금지)', async () => {
+    const { fn, calls } = makeFetch()
+    const o = makeObserver(fn)
+    o.recordSecretUse('GH_TOKEN', 'api.github.com')
+    const r = await o.flush()
+    assert.equal(r.ok, true)
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0].body.observations, [])
+    assert.equal(calls[0].body.secrets.length, 1)
+  })
+
+  it('보고 실패 시 되돌리되, 그 사이 들어온 더 최근 사용은 덮어쓰지 않는다', async () => {
+    let t = 0
+    const { fn } = makeFetch([{ ok: false, status: 500 }])
+    const o = makeObserver(fn, { nowFn: () => (t += 1000) })
+    o.recordSecretUse('K', 'old.com')
+    const p = o.flush()
+    o.recordSecretUse('K', 'new.com') // flush 중 새 사용
+    await p
+    assert.equal(o.secretUses.get('K').host, 'new.com')
   })
 })
 

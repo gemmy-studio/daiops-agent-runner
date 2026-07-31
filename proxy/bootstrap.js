@@ -65,7 +65,10 @@ export async function fetchMaterializedSecrets({ proxyOrigin, workspaceId, token
  *   proxyPort?: number, host?: string,
  *   certManager?: import('./cert-manager.js').CertManager,
  *   logger?: object,
- *   observer?: { record: (host: string, opts?: { blocked?: boolean }) => void },
+ *   observer?: {
+ *     record: (host: string, opts?: { blocked?: boolean }) => void,
+ *     recordSecretUse?: (key: string, host: string) => void,
+ *   },
  * }} opts
  * @returns {Promise<{ proxy: InjectionProxy, injectionMap: Map, placeholderByKey: Map, proxyUrl: string, caCertPath: string }>}
  */
