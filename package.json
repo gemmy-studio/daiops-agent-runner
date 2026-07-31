@@ -1,6 +1,6 @@
 {
   "name": "@daiops/agent-runner",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -8,6 +8,5 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test"
-  },
-  "dependencies": {}
+  }
 }
