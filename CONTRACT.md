@@ -111,6 +111,11 @@ Request body 핵심 필드:
 - `prompt`: string (필수)
 - `model`: string (옵션 — 미전달 시 `DEFAULT_FALLBACK_MODEL`)
 - `systemPrompt`, `history`, `context_dir`: 옵션
+- `thinking`: `{ effort: 'low'|'medium'|'high'|'xhigh'|'max' }` (옵션 — 미전달 시 `medium`).
+  adaptive thinking 깊이. **cloud가 켜고 끄는 손잡이**라 러너는 문자열만 통과시키고 유효성 판정은
+  `buildThinkingOptions`의 `ADAPTIVE_EFFORT_MAP` 한 곳에서만 한다(미지의 값 → `medium`). 목록을
+  양쪽에 두면 cloud가 새 칸을 쓸 때마다 러너 재배포가 필요해진다. `xhigh`는 4.7+ 세대만 수용하고
+  그 외에서는 `max`로 다운그레이드된다.
 - `resume_session_id`, `from_seq`: resume 모드
 
 Response: SSE stream. event 종류는 `event-buffer.js` / cloud `sdk-event-mapper.ts` 참조.

@@ -2,6 +2,30 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.17.0] — 2026-08-02
+
+> ⚠️ 0.13.0~0.16.0 항목이 이 파일에 없다 — 그 릴리스들이 CHANGELOG를 건너뛴 기존 부채이고,
+> 이번 항목이 그 구멍을 메우지는 않는다. 해당 구간은 git 태그와 커밋 이력을 봐야 한다.
+
+### Added
+- **`/v1/chat`의 `thinking.effort` 수용 — cloud가 adaptive thinking 깊이를 지정할 수 있게**
+  (daiops ADR 45 §3.18).
+  - 배경: `buildThinkingOptions`는 이미 effort를 받는데 **cloud에서 그 값을 실어 보낼 경로가 없어서**
+    전량 기본값 `medium`으로만 돌았다. daiops 실측에서 잡 실행 130초 중 도구 실행은 2초뿐이고
+    128초(98.5%)가 LLM 왕복이며, 출력 토큰을 한 겹 더 쪼개면 분류성 스킬은 4,760토큰 중 가시 텍스트
+    770자 + 도구 인자 668자뿐이라 **나머지 70%가 thinking**이다. effort가 그 위에 그대로 얹힌다.
+  - `parseThinkingParam(raw)` — `{ effort: string }`만 통과시킨다. **미지정이면 `undefined`를
+    돌려주는 것이 계약이다**: `buildThinkingOptions`가 `undefined`를 `medium`으로 해석하므로 이 필드를
+    보내지 않는 구버전 cloud와 동작이 완전히 같아진다(하위호환).
+  - **허용 목록을 복제하지 않는다.** 유효성 판정은 `ADAPTIVE_EFFORT_MAP` 한 곳에서만 하고 미지의 값은
+    `medium`으로 떨어진다. 러너가 목록을 따로 들면 cloud가 새 칸을 쓸 때마다 러너 재배포가 필요해진다.
+  - 테스트: 강제 `tool_choice`가 있으면 effort를 줘도 thinking을 싣지 않는지 단정한다 — Anthropic이
+    둘의 공존을 400으로 거부하므로 이 분기가 깨지면 구조화 출력 경로가 전부 죽는다.
+
+### Changed
+- `CONTRACT.md` §2-2에 `thinking` 필드 기재. **`schemaVersion`은 2 유지** — §4가 "호환 변경(필드
+  추가 등)은 schemaVersion 유지"로 규정한다(request 필드 추가이고 의미 변경이 없다).
+
 ## [0.12.0] — 2026-07-28
 
 ### Added
