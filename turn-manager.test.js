@@ -299,6 +299,42 @@ describe('buildAnthropicRequest (3.1 기본 직렬화)', () => {
     assert.equal(body.thinking, undefined)
   })
 
+  // E-1 — cloud가 보낸 `thinking: { effort }`가 실제 요청 body의 output_config까지 도달하는지.
+  // 이 배선이 없으면 A/B가 조용히 아무 것도 바꾸지 않는다(러너 기본 medium으로 전량 실행).
+  it('thinking.effort=low → output_config.effort=low', () => {
+    const body = buildAnthropicRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'hi' }],
+      thinking: { effort: 'low' },
+      cacheControl: false,
+    })
+    assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized' })
+    assert.deepEqual(body.output_config, { effort: 'low' })
+  })
+
+  it('thinking 미지정 → output_config.effort=medium (현행 기본값 유지)', () => {
+    const body = buildAnthropicRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'hi' }],
+      cacheControl: false,
+    })
+    assert.deepEqual(body.output_config, { effort: 'medium' })
+  })
+
+  // 구조화 출력은 tool_choice를 강제하고 Anthropic은 thinking과 공존을 거부한다(400).
+  // effort를 실어 보내도 이 분기가 이기는지 확인한다 — 아니면 구조화 경로가 전부 깨진다.
+  it('강제 tool_choice가 있으면 effort를 줘도 thinking을 싣지 않는다', () => {
+    const body = buildAnthropicRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'hi' }],
+      thinking: { effort: 'low' },
+      toolChoice: { type: 'tool', name: 'submit_structured_response' },
+      cacheControl: false,
+    })
+    assert.equal(body.thinking, undefined)
+    assert.equal(body.output_config, undefined)
+  })
+
   it('systemPrompt + tools + maxTokens 옵션 반영 — cacheControl:false', () => {
     const body = buildAnthropicRequest({
       model: 'claude-sonnet-4-6',
@@ -1160,6 +1196,21 @@ describe('buildThinkingOptions', () => {
   it('legacy minimal → low로 매핑', () => {
     const t = buildThinkingOptions('claude-opus-4-7', { effort: 'minimal' })
     assert.equal(t.output_config.effort, 'low')
+  })
+
+  // E-1 A/B — 잡 실행시간의 병목이 출력 토큰 생성(130초 중 128초)이라 medium→low 한 칸을 실험한다.
+  // 실제 트래픽 95.6%가 Sonnet 4.6이므로 그 모델에서 low가 다운그레이드 없이 통과해야 한다.
+  it('low on 4.6 → low 유지 (다운그레이드 대상 아님)', () => {
+    const t = buildThinkingOptions('claude-sonnet-4-6', { effort: 'low' })
+    assert.deepEqual(t, {
+      thinking: { type: 'adaptive', display: 'summarized' },
+      output_config: { effort: 'low' },
+    })
+  })
+
+  it('미지의 effort 문자열은 medium으로 떨어진다 (fail-safe)', () => {
+    assert.equal(buildThinkingOptions('claude-sonnet-4-6', { effort: 'turbo' }).output_config.effort, 'medium')
+    assert.equal(buildThinkingOptions('claude-sonnet-4-6', {}).output_config.effort, 'medium')
   })
 })
 

@@ -958,6 +958,25 @@ async function handleResume(sessionId, fromSeq, res, req) {
 }
 
 /**
+ * cloud가 보낸 `thinking` 파라미터를 정규화한다 (E-1 — adaptive thinking effort 오버라이드).
+ *
+ * **미지정이면 반드시 undefined를 돌려준다** — `buildThinkingOptions`가 undefined를 기본 `medium`으로
+ * 해석하므로, 이 필드를 보내지 않는 구버전 cloud와 동작이 완전히 같아진다(하위호환).
+ *
+ * 문자열 effort만 통과시키고 그 값이 유효한지는 판정하지 않는다. `buildThinkingOptions`의
+ * `ADAPTIVE_EFFORT_MAP`이 이미 미지의 값을 `medium`으로 떨어뜨리므로 여기서 목록을 한 번 더
+ * 복제하면 두 곳이 갈릴 뿐이다(cloud가 새 칸을 쓰기 시작할 때 러너를 다시 배포해야 한다).
+ *
+ * @param {unknown} raw
+ * @returns {{ effort: string } | undefined}
+ */
+export function parseThinkingParam(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const effort = /** @type {{ effort?: unknown }} */ (raw).effort
+  return typeof effort === 'string' && effort.length > 0 ? { effort } : undefined
+}
+
+/**
  * POST /v1/chat 핸들러.
  * Anthropic API 스트림(raw HTTP, turn-manager 경유)을 호출하고 결과를 SSE로 스트리밍합니다.
  * resume_session_id + from_seq 옵션 시 resume 모드(T5).
@@ -1006,6 +1025,8 @@ export async function handleChat(rawParams, res, req) {
      * LLM 호출이 결재 타임아웃까지 매달리기 때문(tools/memory-edit.js resolveMemoryOps 주석 참조).
      */
     memory_ops: rawParams.memory_ops,
+    /** adaptive thinking effort 오버라이드 (E-1). 미지정이면 undefined = 러너 기본 medium. */
+    thinking: parseThinkingParam(rawParams.thinking),
     /** 사용자가 명시적으로 plan을 요구한 경우만 true. 메시지 텍스트 분류는 더 이상 사용하지 않음. */
     force_plan_mode: rawParams.force_plan_mode === true,
     session_id: rawParams.session_id ? String(rawParams.session_id) : undefined,
@@ -1530,6 +1551,9 @@ export async function handleChat(rawParams, res, req) {
       // 구조화 출력(AGENT-API-2): 존재 시 llm-wrapper가 submit_structured_response 도구를 추가하고
       // turn-manager가 tool_choice로 강제 + 검증 통과 시 조기 종료한다.
       responseSchema: params.response_schema,
+      // E-1 — llm-wrapper가 opts.thinking을 turn-manager로 forward하고, buildThinkingOptions가
+      // output_config.effort로 변환한다. undefined면 기본 'medium'(현행 동작).
+      thinking: params.thinking,
     }
 
     // 자체 turn 카운터: assistant 메시지 수신마다 +1. budget 도달 시 silent 자동 연장
