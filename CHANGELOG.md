@@ -2,6 +2,23 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.19.0] — 2026-08-02
+
+### Fixed
+- **부팅 시 고아 buffer 파일 정리** — 0.18.0의 보존 축소가 못 닫은 축.
+  - 0.18.0은 보존을 24h→1h로 줄였지만 그것은 **살아 있는 buffer**에만 적용된다. cleanup은 인프로세스
+    `setTimeout`이라 **러너가 재시작하면 `/workspace`의 `.jsonl`은 남고 그것을 지울 타이머도 함께
+    사라진다.** `forceCleanup`은 `handleResume`의 done-only salvage 경로에서만 불리므로, 재시작 후 cloud가
+    그 세션을 우연히 resume하지 않으면 그 파일은 **영구 고아**가 된다 — 재시작마다 누적된다.
+  - 실측 단서(2026-08-02 블루 정렬): 재시작으로 메모리는 **455MB → 77MB**로 떨어졌는데 디스크는
+    **1,056MB → 1,104MB로 안 떨어졌다.**
+  - `sweepOrphanedBuffers()` — 부팅 1회, `BUFFER_DIR`에서 mtime이 보존시간보다 오래된
+    `agent-runner-events-*.jsonl`을 삭제. `server.js`가 `listen` 콜백에서 호출한다(정리는 요청 처리와
+    무관하므로 health 응답을 지연시키지 않는다).
+  - **mtime 기준이라 진행 중 세션은 건드리지 않는다** — append마다 mtime이 갱신되므로 활성 파일은 항상
+    최신이다. 접두사·확장자가 다른 파일은 스캔 대상이 아니다.
+  - 실패는 fail-soft(`ensureBufferDir`과 같은 정책). 디렉토리 부재(첫 부팅)는 정상 경로.
+
 ## [0.18.0] — 2026-08-02
 
 ### Changed

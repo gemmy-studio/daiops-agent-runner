@@ -22,6 +22,7 @@ const {
   forceCleanup,
   RETENTION_AFTER_DONE_MS,
   CLOUD_STALE_THINKING_THRESHOLD_MS,
+  sweepOrphanedBuffers,
 } = await import('./event-buffer.js')
 
 before(async () => {
@@ -130,4 +131,45 @@ test('보존시간은 4시간을 넘지 않는다 — 24h 회귀 방지', () => 
     RETENTION_AFTER_DONE_MS <= 4 * 60 * 60 * 1000,
     `보존 ${RETENTION_AFTER_DONE_MS}ms — 근거 없이 다시 늘었는지 확인할 것`,
   )
+})
+
+// ── 부팅 sweep — 고아 buffer 파일 (ADR 45 §3.19 후속) ────────────────────
+//
+// cleanup 타이머는 인프로세스라 재시작하면 사라진다. 그때 남은 .jsonl을 지울 주체가 없어
+// 재시작마다 영구 누적됐다(실측: 재시작으로 메모리는 455→77MB인데 디스크는 안 떨어짐).
+
+test('sweep — 보존시간 넘긴 파일만 지우고 최신 파일은 남긴다', async () => {
+  const oldPath = path.join(TMP, 'agent-runner-events-sess-orphan.jsonl')
+  const newPath = path.join(TMP, 'agent-runner-events-sess-active.jsonl')
+  await fs.writeFile(oldPath, '{"seq":1}\n', 'utf-8')
+  await fs.writeFile(newPath, '{"seq":1}\n', 'utf-8')
+
+  // 보존시간 + 1분 이전으로 mtime을 되돌린다(진행 중 세션은 append마다 mtime이 갱신된다).
+  const stale = new Date(Date.now() - RETENTION_AFTER_DONE_MS - 60_000)
+  await fs.utimes(oldPath, stale, stale)
+
+  const result = await sweepOrphanedBuffers()
+  assert.equal(result.deleted, 1)
+  await assert.rejects(() => fs.access(oldPath), '보존 넘긴 고아는 삭제돼야 한다')
+  await fs.access(newPath) // 최신 파일은 남아야 한다 — 진행 중 세션의 replay를 깨지 않는다
+
+  await fs.rm(newPath, { force: true })
+})
+
+test('sweep — buffer 파일이 아닌 것은 건드리지 않는다', async () => {
+  const other = path.join(TMP, 'unrelated.txt')
+  await fs.writeFile(other, 'keep me', 'utf-8')
+  const stale = new Date(Date.now() - RETENTION_AFTER_DONE_MS - 60_000)
+  await fs.utimes(other, stale, stale)
+
+  await sweepOrphanedBuffers()
+  await fs.access(other) // 접두사·확장자가 다르면 스캔 대상이 아니다
+
+  await fs.rm(other, { force: true })
+})
+
+test('sweep — 디렉토리가 없어도 throw하지 않는다 (첫 부팅)', async () => {
+  // 정리 실패가 부팅을 막아서는 안 된다(fail-soft).
+  const result = await sweepOrphanedBuffers()
+  assert.equal(typeof result.deleted, 'number')
 })

@@ -117,6 +117,58 @@ async function deleteFile(sessionId) {
 }
 
 /**
+ * 부팅 1회 — 보존시간을 넘긴 고아 buffer 파일을 지운다.
+ *
+ * ★**왜 필요한가**: cleanup은 인프로세스 `setTimeout`(`scheduleCleanup`)이다. 러너가 재시작하면
+ * 인메모리 buffer는 사라지지만 **`/workspace`의 `.jsonl`은 남고 그것을 지울 타이머도 함께 사라진다.**
+ * `forceCleanup`은 `handleResume`의 done-only salvage 경로에서만 불리므로, 재시작 후 cloud가 그 세션을
+ * 우연히 resume하지 않으면 그 파일은 **영구 고아**가 된다. 재시작마다 누적된다.
+ *
+ * 실측 단서(2026-08-02 블루): 러너 재시작으로 메모리는 455MB → 77MB로 떨어졌는데 **디스크는
+ * 1,056MB → 1,104MB로 안 떨어졌다.** 보존시간 축소(ADR 45 §3.19)는 *살아 있는* buffer만 줄이므로
+ * 이 축은 따로 닫아야 한다.
+ *
+ * mtime 기준이라 **진행 중 세션은 건드리지 않는다** — 이벤트가 append될 때마다 mtime이 갱신되므로
+ * 활성 파일은 항상 최신이다. 살아 있는 replay를 깨지 않는다.
+ *
+ * 실패는 fail-soft(`ensureBufferDir`과 같은 정책) — 정리 실패가 부팅을 막지 않는다.
+ *
+ * @returns {Promise<{ deleted: number, scanned: number }>}
+ */
+export async function sweepOrphanedBuffers() {
+  let scanned = 0
+  let deleted = 0
+  try {
+    const entries = await fs.readdir(BUFFER_DIR)
+    const cutoff = Date.now() - RETENTION_AFTER_DONE_MS
+    for (const name of entries) {
+      if (!name.startsWith(FILENAME_PREFIX) || !name.endsWith(FILENAME_SUFFIX)) continue
+      scanned++
+      const full = path.join(BUFFER_DIR, name)
+      try {
+        const st = await fs.stat(full)
+        if (st.mtimeMs < cutoff) {
+          await fs.unlink(full)
+          deleted++
+        }
+      } catch {
+        /* 개별 파일 실패는 건너뛴다 — 다음 부팅에 다시 시도된다. */
+      }
+    }
+  } catch (err) {
+    // 디렉토리 부재(첫 부팅)는 정상. 그 외 실패도 부팅을 막지 않는다.
+    if (/** @type {NodeJS.ErrnoException} */ (err)?.code !== 'ENOENT') {
+      console.warn(`[event-buffer] sweep 실패: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return { deleted, scanned }
+  }
+  if (deleted > 0) {
+    console.log(`[event-buffer] 고아 buffer 파일 ${deleted}개 정리 (스캔 ${scanned}개)`)
+  }
+  return { deleted, scanned }
+}
+
+/**
  * 세션 buffer를 보장(없으면 생성). 기존 파일이 있으면 복원.
  *
  * @param {string} sessionId

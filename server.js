@@ -17,6 +17,7 @@ import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile
 import { EgressObserver } from './proxy/egress-observer.js'
 import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure } from './tools/memory-edit.js'
 import { collectRuntimeProbe } from './runtime-probe.js'
+import { sweepOrphanedBuffers } from './event-buffer.js'
 import { admissionStats } from './tool-cpu-lane.js'
 import { initToolCgroup, toolCgroupState } from './tool-cgroup.js'
 
@@ -493,4 +494,9 @@ server.listen(PORT, HOST, () => {
   // 크레덴셜 주입 프록시 상시 부팅. 실패해도 러너는 계속 동작(fail-open).
   initInjectionProxy().catch((err) =>
     console.error('[injection-proxy] 부팅 오류:', err instanceof Error ? err.message : err))
+  // 고아 buffer 파일 정리. cleanup 타이머는 인프로세스라 재시작하면 사라지므로, 그때 남은 파일을
+  // 지울 주체가 없다 — 부팅 때 한 번 훑는다(근거는 event-buffer.js sweepOrphanedBuffers 주석).
+  // listen 뒤에 두는 이유: 정리는 요청 처리와 무관하므로 health 응답을 지연시키지 않는다.
+  sweepOrphanedBuffers().catch((err) =>
+    console.warn('[event-buffer] sweep 오류:', err instanceof Error ? err.message : err))
 })
