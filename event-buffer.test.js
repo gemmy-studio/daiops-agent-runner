@@ -20,6 +20,8 @@ const {
   getEventsSince,
   getBufferState,
   forceCleanup,
+  RETENTION_AFTER_DONE_MS,
+  CLOUD_STALE_THINKING_THRESHOLD_MS,
 } = await import('./event-buffer.js')
 
 before(async () => {
@@ -105,4 +107,27 @@ test('getOrCreateBuffer 동기 — 신규 세션은 lastSeq 0으로 생성', () 
   assert.equal(state.lastSeq, 0)
   assert.equal(state.events.length, 0)
   assert.equal(state.done, false)
+})
+
+// ── 보존시간 (daiops ADR 45 §3.19) ────────────────────────────────────
+//
+// 이 값은 메모리·디스크 누적을 처리량에 비례해 결정한다(실측 잡당 메모리 0.56MB · 디스크 ~1MB).
+// 양쪽 방향 모두 조용히 깨질 수 있어 경계를 못 박는다 — 너무 길면 박스가 차고, 너무 짧으면
+// 살아 있는 세션의 replay가 끊긴다.
+
+test('보존시간은 resume 창(cloud stale reaper 15분)보다 길다 — 살아 있는 세션 replay 보장', () => {
+  assert.ok(
+    RETENTION_AFTER_DONE_MS > CLOUD_STALE_THINKING_THRESHOLD_MS,
+    `보존 ${RETENTION_AFTER_DONE_MS}ms가 stale 임계 ${CLOUD_STALE_THINKING_THRESHOLD_MS}ms 이하면 ` +
+      '아직 살아 있는 세션의 resume이 끊긴다',
+  )
+})
+
+test('보존시간은 4시간을 넘지 않는다 — 24h 회귀 방지', () => {
+  // 종전 24h는 쓸모 있는 창(15분)의 96배였고 캡 20에서 디스크 ~13GB/10GB를 만들었다.
+  // 다시 올리려면 stale 임계·FETCH_TIMEOUT·결재 상한 중 하나가 먼저 늘어나야 한다.
+  assert.ok(
+    RETENTION_AFTER_DONE_MS <= 4 * 60 * 60 * 1000,
+    `보존 ${RETENTION_AFTER_DONE_MS}ms — 근거 없이 다시 늘었는지 확인할 것`,
+  )
 })

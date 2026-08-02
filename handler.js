@@ -884,7 +884,8 @@ export function cancelSession(sessionId, reason = 'user_abort') {
 async function handleResume(sessionId, fromSeq, res, req) {
   let bufState = getBufferState(sessionId)
   if (!bufState) {
-    // 인메모리 buffer 부재 = 프로세스/샌드박스 재시작 (라이브 buffer는 done 24h 후·forceCleanup으로만 삭제됨).
+    // 인메모리 buffer 부재 = 프로세스/샌드박스 재시작 (라이브 buffer는 done 후 RETENTION_AFTER_DONE_MS
+    // 경과·forceCleanup으로만 삭제됨 — 값과 근거는 event-buffer.js 상수 주석이 정본).
     // → in-flight SDK 실행은 이미 죽었으므로 live tail로 재부착할 수 없다. 영속 파일에서 복원해 *완료된*
     //   턴만 salvage한다(#5). done이 없는(진행 중이던) buffer를 복원해 tail하면 오지 않을 done을 기다리며
     //   매달리므로, done인 경우에만 serve하고 그 외엔 410(정직한 "세션 유실, 재시도" 신호).

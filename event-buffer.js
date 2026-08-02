@@ -36,8 +36,40 @@ async function ensureBufferDir() {
   }
 }
 
-/** done 이후 buffer를 메모리에 유지할 시간 (24h). cloud가 늦게 reconnect해도 replay 가능. */
-const RETENTION_AFTER_DONE_MS = 24 * 60 * 60 * 1000
+/**
+ * done 이후 buffer를 메모리·디스크에 유지할 시간 (1h).
+ *
+ * ★**cloud가 15분 넘게 자리를 비운 세션은 resume 대상이 아니다.** 종전 값 24h는
+ * "늦게 reconnect해도 replay 가능"을 노린 것이었는데, 그런 reconnect가 도달할 수 있는 경로가 없다:
+ *
+ * | cloud 상수 | 값 | 의미 |
+ * |---|---|---|
+ * | `STALE_THINKING_THRESHOLD_MS` | **15분** | 이보다 조용한 세션은 stale reaper가 이미 `failed`로 마킹 |
+ * | `FETCH_TIMEOUT_MS` | 12.5분 | cloud가 자리를 비울 수 있는 최대 |
+ * | `APPROVAL_TIMEOUT_MS` | 10분 | 결재 대기 상한 |
+ *
+ * 15분이 천장이므로 그 뒤의 replay는 **이미 죽은 세션**에 대한 것이라 쓸모가 없었다. 24h는 쓸모
+ * 있는 창의 96배였고, 그 대가는 처리량에 비례해 쌓이는 메모리·디스크였다.
+ *
+ * ★그 대가가 실측됐다(daiops ADR 45 §3.19, 2026-07-31 블루 701잡):
+ * **메모리 잡당 0.56MB · 디스크 잡당 ~1MB**. 캡 20으로 24시간 지속 포화되면 메모리 7.3GB/8GB ·
+ * 디스크 ~13GB/10GB로 **디스크가 먼저 터진다.** 부하가 끝나도 baseline(185MB)으로 돌아오지
+ * 않고 456MB에 머무는 것이 이 보존 때문이다.
+ *
+ * 1h = 15분 천장의 4배 마진. 정상상태 누적이 24배 줄어든다.
+ *
+ * ⚠️ 이 값을 다시 올리려면 위 세 상수 중 하나가 15분을 넘겨야 한다. 그 전에는 올릴 근거가 없다.
+ */
+export const RETENTION_AFTER_DONE_MS = 60 * 60 * 1000
+
+/**
+ * cloud `STALE_THINKING_THRESHOLD_MS`의 사본 — resume 창의 천장.
+ *
+ * 여기 두는 이유: 보존시간이 이 값보다 **짧아지면** 살아 있는 세션의 replay가 끊긴다. 그 관계를
+ * 테스트로 못 박아 두지 않으면 다음 사람이 보존을 더 줄이다 조용히 넘어선다. cloud가 이 값을
+ * 올리면 여기도 올려야 하지만, 그건 15분을 넘기는 설계 변경이라 어차피 이 주석을 읽게 된다.
+ */
+export const CLOUD_STALE_THINKING_THRESHOLD_MS = 15 * 60 * 1000
 
 /**
  * @typedef {object} BufferedEvent

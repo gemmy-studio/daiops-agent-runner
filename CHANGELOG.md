@@ -2,6 +2,23 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.18.0] — 2026-08-02
+
+### Changed
+- **EventBuffer 보존 24h → 1h** (daiops ADR 45 §3.19). **동작 변경이지만 유실은 없다.**
+  - 종전 24h의 근거는 "cloud가 늦게 reconnect해도 replay 가능"이었는데, **그런 reconnect가 도달할 수
+    있는 경로가 없다.** cloud `STALE_THINKING_THRESHOLD_MS`가 **15분**이라 그보다 조용한 세션은 stale
+    reaper가 이미 `failed`로 마킹한다(`FETCH_TIMEOUT_MS` 12.5분 · 결재 상한 10분도 그 아래). 즉 15분이
+    천장이고 그 뒤의 replay는 **이미 죽은 세션**에 대한 것이었다. 24h는 쓸모 있는 창의 **96배**.
+  - 그 대가가 실측됐다(2026-07-31 블루 701잡): **메모리 잡당 0.56MB · 디스크 잡당 ~1MB**. 부하가
+    끝나도 메모리가 baseline 185MB로 돌아오지 않고 456MB에 머무는 것이 이 보존 때문이다. 캡 20으로
+    24시간 지속 포화되면 메모리 7.3GB/8GB · **디스크 ~13GB/10GB로 디스크가 먼저 터진다.**
+  - 1h = 15분 천장의 4배 마진. 정상상태 누적이 **24배** 감소.
+  - `RETENTION_AFTER_DONE_MS`와 `CLOUD_STALE_THINKING_THRESHOLD_MS`를 export하고 **양방향 경계를
+    테스트로 못 박았다** — 너무 길면 박스가 차고(24h 회귀), 너무 짧으면 살아 있는 세션의 replay가
+    끊긴다. 어느 쪽도 런타임에 조용히 깨질 수 있어 상수 비교로 고정한다.
+  - `handler.js` resume 주석의 "done 24h 후"를 상수 참조로 교체(값을 두 곳에 적지 않는다).
+
 ## [0.17.0] — 2026-08-02
 
 > ⚠️ 0.13.0~0.16.0 항목이 이 파일에 없다 — 그 릴리스들이 CHANGELOG를 건너뛴 기존 부채이고,
