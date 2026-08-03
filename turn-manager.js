@@ -1501,7 +1501,28 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
         }
         structuredRetries++
         if (structuredRetries >= STRUCTURED_MAX_RETRIES) {
-          // 캡 초과 — 마지막 검증 오류를 텍스트로 surface 후 종료(무한 재시도 방지).
+          // 캡 초과 — 무한 재시도를 막고 종료한다. 다만 버릴 것과 살릴 것을 가른다.
+          //
+          // 위반이 **경계(길이·개수·범위)뿐**이면 그 제출물은 구조가 맞고 의미상 온전하다.
+          // 그것까지 버리면 "47자 길다"는 이유로 몇 분짜리 분석 결과 전체가 사라지고, 호출자는
+          // 파싱 불가한 오류 산문을 받는다 — 경계 키워드를 집행하기 시작하면서 새로 생기는
+          // 손실이다. 그래서 살려 보내고, 자르거나 되돌리는 판단은 소비자에게 남긴다.
+          // 구조 위반(타입·필수 키·enum·미허용 키)은 종전대로 오류를 surface 한다.
+          const acceptable =
+            input.options.structuredAcceptOnCap?.(structuredUse.input) === true
+          if (acceptable) {
+            let jsonText = ''
+            try { jsonText = JSON.stringify(structuredUse.input) } catch { jsonText = '' }
+            if (jsonText) {
+              yield {
+                type: 'assistant',
+                message: { content: [{ type: 'text', text: jsonText }] },
+                structuredResult: structuredUse.input,
+              }
+              yield { type: 'result', subtype: 'success' }
+              return
+            }
+          }
           yield {
             type: 'assistant',
             message: {

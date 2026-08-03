@@ -308,6 +308,11 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
       webTools,
       // 구조화 출력: 존재 시 turn-manager가 submit_structured_response로 강제 + 검증 통과 시 조기 종료.
       structuredToolName: responseSchema ? STRUCTURED_TOOL_NAME : undefined,
+      // 재시도 캡을 소진했을 때 그 제출물을 살려도 되는가 — 위반이 경계(길이·개수·범위)뿐이면 살린다.
+      // 스키마는 여기(llm-wrapper)에만 있으므로 판정을 함수로 넘긴다.
+      structuredAcceptOnCap: responseSchema
+        ? (submitted) => validateAgainstSchema(responseSchema, submitted).boundsOnly
+        : undefined,
       // 최종턴 전환 모드(AGENT-API-5): 미지정 시 turn-manager 기본값 'final_turn'(도구 선사용 후 구조화).
       // 'immediate'는 turn 0부터 강제(단발 변환 하위호환).
       structuredMode: opts.structuredMode,

@@ -187,6 +187,106 @@ describe('validateAgainstSchema', () => {
     assert.equal(validateAgainstSchema(bad, { y: '아무거나' }).ok, true)
   })
 
+  it('maxLength/minLength — 문자열 길이 (2026-08-04 신설)', () => {
+    const s = {
+      type: 'object',
+      properties: { summary: { type: ['string', 'null'], maxLength: 200 } },
+      required: ['summary'],
+    }
+    assert.equal(validateAgainstSchema(s, { summary: '가'.repeat(200) }).ok, true)
+    const over = validateAgainstSchema(s, { summary: '가'.repeat(201) })
+    assert.equal(over.ok, false)
+    // 오류 문구가 무엇을 얼마나 줄여야 하는지 말해야 한다 — 모델이 이걸 읽고 자기수정한다.
+    assert.ok(over.errors.some((e) => e.includes('201') && e.includes('200')))
+    // null 은 길이 검사 대상이 아니다(`type:["string","null"]`).
+    assert.equal(validateAgainstSchema(s, { summary: null }).ok, true)
+
+    const min = { type: 'object', properties: { code: { type: 'string', minLength: 2 } } }
+    assert.equal(validateAgainstSchema(min, { code: 'ab' }).ok, true)
+    assert.equal(validateAgainstSchema(min, { code: 'a' }).ok, false)
+  })
+
+  it('maxLength — 서로게이트 쌍은 코드 포인트로 센다(소비자보다 관대)', () => {
+    // '😀'.length 는 2(코드 단위)지만 코드 포인트는 1이다. JSON Schema 는 후자를 센다.
+    // 관대한 쪽이라야 소비자가 받아들일 값을 거부해 무한 재시도를 만들지 않는다.
+    const s = { type: 'object', properties: { t: { type: 'string', maxLength: 2 } } }
+    assert.equal(validateAgainstSchema(s, { t: '😀😀' }).ok, true)
+    assert.equal(validateAgainstSchema(s, { t: '😀😀😀' }).ok, false)
+  })
+
+  it('maxItems/minItems — 배열 길이 (Lattice fit-scoring 9항목 고정)', () => {
+    const s = {
+      type: 'object',
+      properties: { items: { type: 'array', minItems: 9, maxItems: 9, items: { type: 'string' } } },
+      required: ['items'],
+    }
+    assert.equal(validateAgainstSchema(s, { items: Array(9).fill('x') }).ok, true)
+    assert.equal(validateAgainstSchema(s, { items: Array(8).fill('x') }).ok, false)
+    const over = validateAgainstSchema(s, { items: Array(10).fill('x') })
+    assert.equal(over.ok, false)
+    assert.ok(over.errors.some((e) => e.includes('10') && e.includes('9')))
+  })
+
+  it('maximum/minimum — 숫자 범위 (Lattice 유사도 0~1)', () => {
+    const s = {
+      type: 'object',
+      properties: { similarity: { type: 'number', minimum: 0, maximum: 1 } },
+      required: ['similarity'],
+    }
+    assert.equal(validateAgainstSchema(s, { similarity: 0 }).ok, true)
+    assert.equal(validateAgainstSchema(s, { similarity: 1 }).ok, true)
+    assert.equal(validateAgainstSchema(s, { similarity: 1.4 }).ok, false)
+    assert.equal(validateAgainstSchema(s, { similarity: -0.1 }).ok, false)
+  })
+
+  it('길이·범위 키워드는 대상 타입이 아니면 무시한다', () => {
+    // 문자열 키워드를 배열에, 배열 키워드를 문자열에 걸어도 오류가 아니다(스펙 동작).
+    const s = {
+      type: 'object',
+      properties: {
+        a: { maxLength: 1 }, // type 선언 없음 + 값이 배열
+        b: { maxItems: 1 }, // 값이 문자열
+        c: { maximum: 1 }, // 값이 문자열
+      },
+    }
+    assert.equal(validateAgainstSchema(s, { a: [1, 2, 3], b: 'long', c: 'no' }).ok, true)
+  })
+
+  it('boundsOnly — 경계 위반만인가를 가른다', () => {
+    const s = {
+      type: 'object',
+      properties: {
+        name: { type: 'string', maxLength: 5 },
+        n: { type: 'number', maximum: 1 },
+      },
+      required: ['name'],
+    }
+    // 경계만 위반 → 구조는 맞다
+    assert.equal(validateAgainstSchema(s, { name: '가나다라마바' }).boundsOnly, true)
+    assert.equal(validateAgainstSchema(s, { name: 'ok', n: 5 }).boundsOnly, true)
+    // 구조 위반이 섞이면 false (필수 키 누락 · 타입 불일치)
+    assert.equal(validateAgainstSchema(s, { n: 5 }).boundsOnly, false)
+    assert.equal(validateAgainstSchema(s, { name: 123 }).boundsOnly, false)
+    // 통과한 경우
+    assert.equal(validateAgainstSchema(s, { name: 'ok' }).boundsOnly, false)
+  })
+
+  it('boundsOnly — properties 안의 "maxLength" 라는 이름은 키워드가 아니다', () => {
+    // 값의 이름이 우연히 경계 키워드와 같아도 스키마 절로 오인해 지우면 안 된다.
+    const s = {
+      type: 'object',
+      properties: { maxLength: { type: 'string' } },
+      required: ['maxLength'],
+    }
+    // 필수 키 누락은 구조 위반이다 — stripBounds 가 이 프로퍼티를 지웠다면 boundsOnly 로 오판한다.
+    assert.equal(validateAgainstSchema(s, {}).boundsOnly, false)
+  })
+
+  it('pattern 은 여전히 무시한다 — 의도된 제외(ReDoS)', () => {
+    const s = { type: 'object', properties: { d: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' } } }
+    assert.equal(validateAgainstSchema(s, { d: '날짜아님' }).ok, true)
+  })
+
   it('allOf — 모든 하위 스키마 만족해야 통과', () => {
     const s = {
       allOf: [
@@ -296,6 +396,42 @@ describe('runAnthropicSdkStream — 구조화 출력', () => {
     const text = await collectFinalText(stream)
     assert.deepEqual(JSON.parse(text), { answer: 'ok' })
     assert.equal(fetchFn.callCount(), 2)
+  })
+
+  it('캡 소진 — 경계 위반만이면 제출물을 살려 보낸다 (2026-08-04)', async () => {
+    // 길이만 넘긴 값을 계속 제출하는 모델. 구조는 매 턴 맞다.
+    // 이걸 버리면 호출자는 파싱 불가한 오류 산문을 받고 분석 결과 전체를 잃는다.
+    const bounded = {
+      type: 'object',
+      properties: { answer: { type: 'string', maxLength: 3 } },
+      required: ['answer'],
+      additionalProperties: false,
+    }
+    const fetchFn = mockFetch(
+      Array.from({ length: 10 }, (_, i) => structuredToolTurn({ answer: '너무나긴답변' }, `tb${i}`)),
+    )
+    const stream = runAnthropicSdkStream(
+      { prompt: 'q', options: { model: 'claude-sonnet-4-6', responseSchema: bounded, allowedTools: [] } },
+      { fetchFn },
+    )
+    const text = await collectFinalText(stream)
+    // 오류 산문이 아니라 제출한 JSON 이 와야 한다.
+    assert.deepEqual(JSON.parse(text), { answer: '너무나긴답변' })
+    // 그래도 재시도 압력은 그대로 — 캡까지 다시 시킨다.
+    assert.equal(fetchFn.callCount(), 3)
+  })
+
+  it('캡 소진 — 구조 위반이면 종전대로 오류를 surface 한다', async () => {
+    const fetchFn = mockFetch(
+      Array.from({ length: 10 }, (_, i) => structuredToolTurn({ wrong: 'x' }, `ts${i}`)),
+    )
+    const stream = runAnthropicSdkStream(
+      { prompt: 'q', options: { model: 'claude-sonnet-4-6', responseSchema: schema, allowedTools: [] } },
+      { fetchFn },
+    )
+    const text = await collectFinalText(stream)
+    assert.ok(text.includes('스키마 검증 실패'))
+    assert.equal(fetchFn.callCount(), 3)
   })
 
   it('반복 실패 → 재시도 캡(3)에서 종료(무한 루프 방지)', async () => {

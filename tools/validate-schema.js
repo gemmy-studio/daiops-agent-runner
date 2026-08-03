@@ -12,7 +12,29 @@
  *  - additionalProperties: false (properties 밖 키 거부)
  *  - anyOf (하나라도 통과) / allOf (모두 통과) / oneOf (정확히 하나 통과)
  *  - $ref (#/$defs/… · #/definitions/… JSON 포인터를 root에서 해석) — codegen(zod/pydantic) 스키마 대응
- * 미지원 키워드(minLength/maximum/pattern 등)는 무시 — 통과로 간주.
+ *  - maxLength · minLength (문자열) / maxItems · minItems (배열) / maximum · minimum (숫자)
+ * 미지원 키워드(pattern·uniqueItems·multipleOf·exclusiveMinimum/Maximum 등)는 무시 — 통과로 간주.
+ *
+ * ## 길이·개수·범위를 뒤늦게 넣은 이유 (2026-08-04)
+ *
+ * 이 검증기가 없는 키워드를 조용히 통과시키므로, 호출자가 스키마에 적어 둔 상한이
+ * **집행되지 않는 장식**이 된다. 실제로 그런 상태가 발견됐다 — Lattice 가 `maxItems: 9`
+ * (9항목 고정 평가)·`maximum: 1`(유사도 0~1)을 주석에 "고정한다"고 적어 두고 심었는데
+ * 아무것도 강제되지 않고 있었다. 형식 위반은 잡히고 길이 위반은 안 잡히는 비대칭이
+ * 호출자에게 보이지 않는 것이 문제의 핵심이다.
+ *
+ * 이 여섯 개는 **판정이 결정론적이고 비용이 상수**라 "총체적 위반만 걸러 재시도를
+ * 트리거한다"는 이 파일의 설계 철학에 맞는다.
+ *
+ * ## `pattern` 을 넣지 않은 이유 (의도된 제외)
+ *
+ * 정규식은 **패턴이 호출자에게서, 검사 대상 문자열이 LLM 에서** 온다. 그 조합은 파국적
+ * 백트래킹(ReDoS)에 노출되고, 동기 검증기에는 시간 상한을 걸 수단이 없어 이벤트 루프가
+ * 묶인다. 재시도 루프 안에서 실행되므로 한 번 걸리면 반복된다. 길이·개수와 달리 비용이
+ * 입력에 지수적일 수 있는 유일한 키워드다.
+ *
+ * 실제 필요가 생기면 그때 안전 장치(패턴 화이트리스트 또는 별도 워커의 시간 상한)와
+ * 함께 넣는다. 지금 넣으면 안전 장치 없이 들어간다.
  */
 
 /** $ref 사이클/과심층 방어 상한. 초과 시 검증 포기(통과) — 그로스 위반만 거른다는 설계 철학 유지. */
@@ -89,6 +111,42 @@ export function collectSchemaErrors(schema, value, path = '$', root = undefined,
     }
   }
 
+  // string: maxLength / minLength
+  //
+  // JSON Schema 는 길이를 **코드 포인트**로 센다(UTF-16 코드 단위가 아니다). 이모지 등
+  // 서로게이트 쌍이 있으면 코드 포인트가 더 적으므로, 코드 단위로 세는 소비자(JS
+  // `str.length`·zod `.max()`)보다 **관대한** 쪽이다. 그 방향이 맞다 — 소비자가 받아들일
+  // 값을 검증기가 거부해 재시도를 유발하는 일이 없다(반대 방향이면 무한 재시도를 만든다).
+  if (typeof value === 'string' && (s.maxLength !== undefined || s.minLength !== undefined)) {
+    const len = [...value].length
+    if (typeof s.maxLength === 'number' && len > s.maxLength) {
+      errors.push(`${path}: too long (${len} > maxLength ${s.maxLength})`)
+    }
+    if (typeof s.minLength === 'number' && len < s.minLength) {
+      errors.push(`${path}: too short (${len} < minLength ${s.minLength})`)
+    }
+  }
+
+  // number: maximum / minimum — 숫자에만 적용한다(`type:["number","null"]` 의 null 은 제외).
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (typeof s.maximum === 'number' && value > s.maximum) {
+      errors.push(`${path}: too large (${value} > maximum ${s.maximum})`)
+    }
+    if (typeof s.minimum === 'number' && value < s.minimum) {
+      errors.push(`${path}: too small (${value} < minimum ${s.minimum})`)
+    }
+  }
+
+  // array: maxItems / minItems
+  if (Array.isArray(value)) {
+    if (typeof s.maxItems === 'number' && value.length > s.maxItems) {
+      errors.push(`${path}: too many items (${value.length} > maxItems ${s.maxItems})`)
+    }
+    if (typeof s.minItems === 'number' && value.length < s.minItems) {
+      errors.push(`${path}: too few items (${value.length} < minItems ${s.minItems})`)
+    }
+  }
+
   // object: properties / required / additionalProperties
   if (isPlainObject(value)) {
     const props = isPlainObject(s.properties) ? s.properties : {}
@@ -140,10 +198,46 @@ function resolveRef(root, ref) {
   return node
 }
 
-/** @returns {{ ok: boolean, errors: string[] }} */
+/** 값의 쓸모를 좌우하지 않는 키워드 — 아래 `boundsOnly` 판정에서 걷어낸다. */
+const BOUNDS_KEYWORDS = ['maxLength', 'minLength', 'maxItems', 'minItems', 'maximum', 'minimum']
+
+/**
+ * 스키마에서 경계 키워드만 제거한 사본. 원본을 바꾸지 않는다.
+ *
+ * 문자열 키를 재귀로 훑는다 — `properties` 안에 `maxLength` 라는 **이름의 프로퍼티**가 있어도
+ * 그 자리는 스키마가 아니라 값의 이름이므로 지우면 안 된다. 그래서 `properties`·`$defs`·
+ * `definitions` 아래 한 겹은 '이름 → 스키마' 맵으로 취급해 키를 지우지 않고 값만 재귀한다.
+ */
+function stripBounds(node, inNameMap = false) {
+  if (Array.isArray(node)) return node.map((n) => stripBounds(n))
+  if (!node || typeof node !== 'object') return node
+  const out = {}
+  for (const [k, v] of Object.entries(node)) {
+    if (!inNameMap && BOUNDS_KEYWORDS.includes(k)) continue
+    const isNameMap = !inNameMap && (k === 'properties' || k === '$defs' || k === 'definitions')
+    out[k] = stripBounds(v, isNameMap)
+  }
+  return out
+}
+
+/**
+ * @returns {{ ok: boolean, errors: string[], boundsOnly: boolean }}
+ *
+ * `boundsOnly` — 위반이 **경계(길이·개수·범위)뿐**인가. 즉 구조는 맞고 값이 크거나 작을 뿐인가.
+ *
+ * 이 구분이 필요한 이유: 구조 위반(타입·필수 키·enum·미허용 키)은 데이터를 **쓸 수 없게**
+ * 만들지만, 경계 위반은 데이터가 의미상 온전하고 소비자가 자르거나 되돌릴 수 있다. 재시도
+ * 캡을 소진했을 때 둘을 같이 버리면 "47자 길다"는 이유로 몇 분짜리 분석 결과 전체가 사라진다.
+ * → `turn-manager` 의 캡 소진 분기가 이 값을 보고 데이터를 살린다.
+ *
+ * 판정은 **경계 키워드를 걷어낸 스키마로 다시 검증**해 얻는다. 오류 문구를 파싱하는 방식은
+ * 문구를 고치는 순간 조용히 깨지므로 쓰지 않는다.
+ */
 export function validateAgainstSchema(schema, value) {
   const errors = collectSchemaErrors(schema, value)
-  return { ok: errors.length === 0, errors }
+  if (errors.length === 0) return { ok: true, errors, boundsOnly: false }
+  const structural = collectSchemaErrors(stripBounds(schema), value)
+  return { ok: false, errors, boundsOnly: structural.length === 0 }
 }
 
 /**
