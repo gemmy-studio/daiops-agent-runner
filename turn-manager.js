@@ -969,13 +969,20 @@ export function buildAnthropicRequest(args) {
  *    + `x-workspace-id: ${WORKSPACE_ID}`. sandbox env에 ANTHROPIC_API_KEY 부재 — 키는 cloud만 보유.
  *  - 둘 다 없으면: 기존 direct Anthropic (`x-api-key`). **로컬·테스트 전용 fallback.**
  *
+ * `ctx.messageId`가 있으면 proxy 경로에 한해 `x-daiops-message-id`를 함께 보낸다 — cloud가
+ * LLM 호출 1건을 어느 turn의 것인지 기록하기 위한 좌표다(llm_usage_logs.message_id).
+ * 그게 없으면 cloud는 (workspace_id, created_at) 시간창으로 추측할 수밖에 없는데, 한 워크스페이스에
+ * turn이 동시에 최대 19개까지 뜨는 실측(2026-08-03) 때문에 호출의 85%가 미귀속으로 남았다.
+ * env가 아니라 ctx로 받는 이유: 같은 sandbox가 여러 turn을 동시에 돌리므로 프로세스 전역 값이 될 수 없다.
+ * direct Anthropic 경로에는 붙이지 않는다(업스트림이 모르는 헤더 — 400 위험).
+ *
  * 프로덕션 가드(P0): 배포된 sandbox는 deployer가 `LLM_PROXY_URL`+`WORKSPACE_ID`를 주입하고
  * `ANTHROPIC_API_KEY`는 제거한다(Phase B 격리 목표). 따라서 프로덕션 신호
  * (`NODE_ENV==='production'` 또는 `WORKSPACE_ID` 존재)가 있는데 `LLM_PROXY_URL`이 비어 있으면
  * env 구성 오류다. 이때 direct fallback으로 흘러가면 (1) cloud proxy의 quota·감사·키 회전을 우회하고
  * (2) sandbox에 남은 키로 워크스페이스 격리를 무력화한다. 조용히 우회하지 않고 즉시 throw.
  *
- * @param {{ apiUrl?: string, apiKey?: string }} [ctx]
+ * @param {{ apiUrl?: string, apiKey?: string, messageId?: string }} [ctx]
  * @returns {{ url: string, headers: Record<string,string> }}
  */
 export function resolveUpstream(ctx = {}) {
@@ -993,6 +1000,7 @@ export function resolveUpstream(ctx = {}) {
         ...base,
         'authorization': `Bearer ${process.env.AGENT_RUNNER_TOKEN ?? ''}`,
         'x-workspace-id': process.env.WORKSPACE_ID ?? '',
+        ...(ctx.messageId ? { 'x-daiops-message-id': String(ctx.messageId) } : {}),
       },
     }
   }

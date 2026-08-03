@@ -2,6 +2,26 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.20.0] — 2026-08-03
+
+### Added
+- **LLM 호출에 turn 좌표를 실어 보낸다** — `x-daiops-message-id` (cloud proxy 경로 한정).
+  - cloud의 `llm_usage_logs`는 proxy 1회 호출 = 1행인데 좌표가 `(workspace_id, created_at)`뿐이었다.
+    그래서 "이 호출이 어느 turn의 것인가"를 **시간창으로 추측**해야 했고, 그 근사는 워크스페이스에
+    turn이 하나만 떠 있을 때만 성립한다.
+  - 실측(2026-08-03, 워크스페이스 1곳 / 7일 / 호출 12,325건): 호출 시점의 동시 in-flight turn이
+    **1개인 구간은 14.8%뿐**이고 2개 이상이 80.0%(최대 **19개** 동시)였다. 즉 호출의 **85%가 미귀속**.
+    응답 지연 개선의 효과 검증(스킬 프리로드·산문 억제·thinking effort A/B)이 전부 이 갭에 막혀 있었다.
+  - `/v1/chat` 요청 본문의 `message_id`를 `handler → llm-wrapper → turn-manager` ctx로 흘려
+    `resolveUpstream`이 헤더로 붙인다. **env가 아니라 요청별 ctx인 이유**: 같은 sandbox가 여러 turn을
+    동시에 돌리므로 프로세스 전역 값으로는 구분할 수 없다.
+  - `message_id`가 없는 요청(비대화형 경로)은 **헤더 자체를 붙이지 않는다** — cloud가 빈 문자열을
+    uuid로 파싱하려 들지 않도록. direct Anthropic 경로(로컬·테스트)에도 붙지 않는다(업스트림이
+    모르는 헤더 → 400 위험).
+  - **하위호환.** 헤더 추가뿐이라 요청/응답 스키마 불변 — `schemaVersion`은 2 그대로다.
+    구버전 cloud는 이 헤더를 무시하고, 구버전 러너와 붙은 신버전 cloud는 그 행을 NULL로 남긴다.
+  - contract: `CONTRACT.md` §3-1.
+
 ## [0.19.0] — 2026-08-02
 
 ### Fixed

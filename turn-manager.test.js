@@ -433,6 +433,34 @@ describe('resolveUpstream', () => {
     }
   })
 
+  it('proxy 경로: ctx.messageId가 있으면 x-daiops-message-id, 없으면 헤더 자체가 없음', () => {
+    setEnv('LLM_PROXY_URL', 'https://cloud.example/api/internal/llm/messages')
+    setEnv('AGENT_RUNNER_TOKEN', 'ws-token-123')
+    setEnv('WORKSPACE_ID', 'ws-abc')
+    try {
+      const withId = resolveUpstream({ messageId: 'a1b2c3d4-0000-4000-8000-000000000000' })
+      assert.equal(withId.headers['x-daiops-message-id'], 'a1b2c3d4-0000-4000-8000-000000000000')
+      // 미지정이면 빈 문자열이 아니라 키 자체가 없어야 한다 — cloud가 '' 를 uuid로 파싱하려 들지 않도록.
+      const without = resolveUpstream({})
+      assert.ok(!('x-daiops-message-id' in without.headers))
+    } finally {
+      restore()
+    }
+  })
+
+  it('direct Anthropic 경로에는 x-daiops-message-id를 붙이지 않는다', () => {
+    setEnv('LLM_PROXY_URL', undefined)
+    setEnv('NODE_ENV', 'test')
+    setEnv('WORKSPACE_ID', undefined)
+    setEnv('ANTHROPIC_API_KEY', 'sk-direct')
+    try {
+      const r = resolveUpstream({ messageId: 'a1b2c3d4-0000-4000-8000-000000000000' })
+      assert.equal(r.headers['x-daiops-message-id'], undefined)
+    } finally {
+      restore()
+    }
+  })
+
   it('LLM_PROXY_URL 미설정 + 비프로덕션 시 direct Anthropic (x-api-key)', () => {
     setEnv('LLM_PROXY_URL', undefined)
     setEnv('NODE_ENV', 'test')

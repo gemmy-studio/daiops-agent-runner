@@ -156,6 +156,22 @@ agent-runner 시작 시 메인 앱(deployer)이 주입해야 하는 env:
 | `AGENT_RUNNER_HOST` | no | bind host (기본 0.0.0.0) |
 | `DAIOPS_SANDBOX_WRITE_FREE` | no | 샌드박스 격리 신뢰 (ADR 21 §2.4). 기본 on — 자기 cwd 하위 Write/Edit·비-네트워크 Bash를 결재 없이 허용. 로컬 호스트 등 격리가 아닌 배포에서 파일작업까지 게이트하려면 `false`. |
 
+### 3-1. cloud LLM proxy로 나가는 헤더
+
+`LLM_PROXY_URL`이 설정된 경우 turn-manager(`resolveUpstream`)가 매 LLM 호출에 붙이는 헤더:
+
+| 헤더 | 출처 | 용도 |
+|---|---|---|
+| `authorization: Bearer …` | `AGENT_RUNNER_TOKEN` (env) | per-workspace 인증 |
+| `x-workspace-id` | `WORKSPACE_ID` (env) | 워크스페이스 식별 |
+| `x-daiops-message-id` | `/v1/chat` 요청 본문의 `message_id` | **turn 귀속 좌표** (0.20.0+) |
+
+`x-daiops-message-id`는 cloud가 LLM 호출 1건을 어느 turn의 것인지 기록하는 데 쓴다
+(`llm_usage_logs.message_id`). env가 아니라 요청별로 흐르는 이유는 같은 sandbox가 여러 turn을
+동시에 돌리기 때문이다 — 프로세스 전역 값으로는 구분할 수 없다. `message_id` 미지정 요청
+(비대화형 경로)에서는 헤더 자체가 붙지 않고, cloud는 해당 행을 NULL로 남긴다.
+direct Anthropic 경로(로컬·테스트)에는 붙지 않는다.
+
 ## 4. schemaVersion 증가 규칙
 
 `schemaVersion`은 §2 HTTP API contract의 호환성 버전이다. 아래에 해당하면 +1:

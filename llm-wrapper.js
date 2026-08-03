@@ -148,6 +148,7 @@ export const SDK_BUILTIN_TOOLS = BUILTIN_TOOL_NAMES
  *   fetchFn?: typeof globalThis.fetch,
  *   onPartialText?: (delta: string, index: number) => void,
  *   onToolProgress?: (p: { toolUseId?: string, elapsed_s: number, tail: string }) => void,
+ *   messageId?: string,
  * }} [ctx]
  * @yields {SDKMessage}
  */
@@ -319,6 +320,9 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
     runTool,
     fetchFn: ctx.fetchFn,
     onPartialText: ctx.onPartialText,
+    // LLM 호출 ↔ turn 귀속 좌표. cloud proxy 경로에서만 x-daiops-message-id 헤더가 된다
+    // (resolveUpstream 참조). 미제공이면 헤더가 붙지 않고 cloud는 NULL로 기록한다.
+    messageId: ctx.messageId,
     // 컨텍스트 관리 관찰성(우선순위1·4) — 제공 시 프루닝/오프로드 발생을 상위로 전달. 미제공이면 noop.
     onPrune: ctx.onPrune,
     onOffload: ctx.onOffload,

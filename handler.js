@@ -1593,6 +1593,9 @@ export async function handleChat(rawParams, res, req) {
         { messages: sdkMessages, options: queryOptions },
         {
           signal: abortController.signal,
+          // LLM 호출 ↔ turn 귀속 좌표(llm_usage_logs.message_id). cloud proxy 경로에서만
+          // x-daiops-message-id 헤더로 나간다. 미지정(비대화형·구 호출자)이면 헤더 없음.
+          messageId: params.message_id,
           onPartialText: (delta) => {
             partialEmittedThisTurn = true
             emitSseEvent(sessionId, 'text_delta', { delta })
