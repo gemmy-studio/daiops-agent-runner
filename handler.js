@@ -1555,6 +1555,9 @@ export async function handleChat(rawParams, res, req) {
       // E-1 — llm-wrapper가 opts.thinking을 turn-manager로 forward하고, buildThinkingOptions가
       // output_config.effort로 변환한다. undefined면 기본 'medium'(현행 동작).
       thinking: params.thinking,
+      // 개인정보 가명화 범위(content-guard). cloud가 워크스페이스 설정을 policy 봉투에 실어 보낸다.
+      // 미지정(구버전 cloud)이면 러너 기본값 4종 — 그래서 배포 순서에 의존하지 않는다.
+      piiTypes: params.policy?.piiTypes,
     }
 
     // 자체 turn 카운터: assistant 메시지 수신마다 +1. budget 도달 시 silent 자동 연장
