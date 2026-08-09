@@ -23,6 +23,8 @@ import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, runBuiltinTool, isBuiltinTool } from
 import { isMcpToolName } from './mcp-client.js'
 import { buildStructuredTool, STRUCTURED_TOOL_NAME } from './tools/submit-structured.js'
 import { validateAgainstSchema } from './tools/validate-schema.js'
+import { guardToolResult } from './content-guard.js'
+import { createPseudonymRegistry } from './pii-pseudonymize.js'
 import { maskPlaceholders, detectSecretBlockNotice } from './proxy/injection-core.js'
 
 /**
@@ -273,8 +275,30 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
    * 트레이드오프: 에이전트가 파일에서 읽은 placeholder를 그대로 되쓰면 라벨이 기록된다.
    * 상시 프롬프트가 "값을 파일에 저장하지 말고 `$KEY`로 참조만 하라"고 지시해 이를 막는다.
    */
+  /**
+   * 가명 대장 — 이 스트림(=잡) 안에서만 산다.
+   *
+   * 🔒 원본 번호 → 토큰 매핑을 들고 있으므로 로그·응답 어디에도 내보내지 않는다.
+   * 잡이 끝나면 클로저와 함께 사라진다.
+   */
+  const pseudonymRegistry = createPseudonymRegistry()
+
   const runTool = async (name, input, runCtx) => {
-    const result = await runToolInner(name, input, runCtx)
+    const raw = await runToolInner(name, input, runCtx)
+    /**
+     * 미신뢰 콘텐츠 가드 — 외부 문서에서 온 결과만 가명화 + 봉투 처리 (content-guard.js).
+     *
+     * placeholder 마스킹보다 **먼저** 건다. 순서를 뒤집으면 봉투 태그가 마스킹 대상 문자열에
+     * 섞여 경계가 흐려진다. 대상이 아니면 원본 객체를 그대로 돌려주므로 기존 경로는 무영향이다.
+     */
+    const result = guardToolResult({
+      name,
+      input,
+      result: raw,
+      registry: pseudonymRegistry,
+      types: opts.piiTypes,
+      onCounts: (counts) => ctx.onPiiPseudonymized?.(counts),
+    })
     if (result && typeof result.content === 'string') {
       // 프록시 차단(허용 호스트 미지정)은 자식 프로세스의 403 응답 본문으로만 존재한다. 여기서
       // 건져 올려 구조화 신호로 올리면 사용자가 "어떤 키가 어느 호스트에서 막혔는지"와 고칠 위치를
