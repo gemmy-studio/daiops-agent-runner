@@ -554,3 +554,101 @@ describe('거버넌스 경로 보호', () => {
     assert.notEqual(fallback.kind, 'allow', '구버전 cloud여도 내장 기본값으로 막힌다')
   })
 })
+
+// ── QA #105 축1 — 외부 MCP 서버 쓰기 도구 결재 ────────────────────────────────
+//
+// 배경: cloud의 deny/ask 목록은 **내장 도구 목록에서 파생**되므로 외부 서버 도구를 담을 수
+// 없다. 그래서 종전에는 `non-risky` 자동 통과로 새어 미팅노트 작성 같은 쓰기가 결재를 타지
+// 않았다. 판정 근거는 이름 목록이 아니라 MCP 표준 어노테이션이다(드리프트할 사본 없음).
+describe('evaluatePolicy — 외부 MCP 서버 쓰기 도구 (QA #105 축1)', () => {
+  const BUILTINS = ['daiops-mcp', 'daiops-wiki-local']
+  // 보수 설정 직원(전권 아님). 외부 도구는 RISKY_TOOL_NAMES가 아니라 allowlist 경로에 닿지 않는다.
+  // v:2 는 실제 운영의 전제다 — 없으면 그 앞의 fail-safe(구 cloud 대비)가 먼저 발동해
+  // MCP 도구 전부를 결재로 보낸다. 그 분기는 이 변경의 대상이 아니다.
+  const OVERRIDES = { v: 2, deny: [], ask: [], askSoft: [] }
+  const conservative = { security: 'allowlist', ask: 'on-miss', askFallback: 'deny', allowlist: [], builtinMcpServers: BUILTINS, toolOverrides: OVERRIDES }
+  const meta = (serverName, annotations) => ({ serverName, originalName: 'x', ...(annotations ? { annotations } : {}) })
+
+  it('외부 서버 + readOnlyHint:false → 결재', () => {
+    const d = evaluatePolicy(conservative, 'mcp__lattice__create_meeting_note', {}, true,
+      meta('lattice', { readOnlyHint: false }))
+    assert.equal(d.kind, 'plan_request')
+    assert.equal(d.reason, 'external-mcp-write')
+  })
+
+  it('외부 서버 + 어노테이션 미선언 → 결재 (침묵을 안전으로 읽지 않는다. MCP 규격 기본값도 false)', () => {
+    const d = evaluatePolicy(conservative, 'mcp__someserver__do_thing', {}, true, meta('someserver'))
+    assert.equal(d.kind, 'plan_request')
+    assert.equal(d.reason, 'external-mcp-undeclared')
+  })
+
+  it('외부 서버 + readOnlyHint:true → 통과 (조회 도구는 막지 않는다)', () => {
+    const d = evaluatePolicy(conservative, 'mcp__lattice__get_document', {}, true,
+      meta('lattice', { readOnlyHint: true }))
+    assert.equal(d.kind, 'allow')
+    assert.equal(d.reason, 'non-risky')
+  })
+
+  it('내장 서버(daiops-mcp)는 어노테이션이 없어도 통과 — cloud 목록이 이미 담당한다', () => {
+    const d = evaluatePolicy(conservative, 'mcp__daiops-mcp__wiki_search', {}, true, meta('daiops-mcp'))
+    assert.equal(d.kind, 'allow')
+    assert.equal(d.reason, 'non-risky')
+  })
+
+  it('내장 로컬 위키 서버도 통과', () => {
+    const d = evaluatePolicy(conservative, 'mcp__daiops-wiki-local__wiki_fact_get', {}, true, meta('daiops-wiki-local'))
+    assert.equal(d.kind, 'allow')
+  })
+
+  it('★전권(security:full) 직원은 무변경 — 결재를 새로 요구하지 않는다', () => {
+    const autonomous = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [], builtinMcpServers: BUILTINS, toolOverrides: OVERRIDES }
+    const d = evaluatePolicy(autonomous, 'mcp__lattice__create_meeting_note', {}, true,
+      meta('lattice', { readOnlyHint: false }))
+    assert.equal(d.kind, 'allow')
+  })
+
+  it('★구 cloud(builtinMcpServers 미전송)는 게이트를 걸지 않는다 — 내장 조회까지 막히면 대화가 멈춘다', () => {
+    // v:2 는 보내지만 builtinMcpServers 는 아직 없는 cloud(핀 갱신 전 배포 순서).
+    const oldCloud = { security: 'allowlist', ask: 'on-miss', askFallback: 'deny', allowlist: [], toolOverrides: OVERRIDES }
+    const d = evaluatePolicy(oldCloud, 'mcp__lattice__create_meeting_note', {}, true,
+      meta('lattice', { readOnlyHint: false }))
+    assert.equal(d.kind, 'allow')
+    assert.equal(d.reason, 'non-risky')
+  })
+
+  it('meta 미전달(구 turn-manager·직접 호출)이면 종전과 동일하게 통과', () => {
+    const d = evaluatePolicy(conservative, 'mcp__lattice__create_meeting_note', {}, true)
+    assert.equal(d.kind, 'allow')
+  })
+
+  it('결재 채널이 없고 askFallback:full 이면 통과 (askSoft 의미 — 자율 무인 실행 보존)', () => {
+    const soft = { ...conservative, askFallback: 'full' }
+    const d = evaluatePolicy(soft, 'mcp__lattice__create_meeting_note', {}, false,
+      meta('lattice', { readOnlyHint: false }))
+    assert.equal(d.kind, 'allow')
+  })
+
+  it('결재 채널이 없고 askFallback:deny 이면 deny', () => {
+    const d = evaluatePolicy(conservative, 'mcp__lattice__create_meeting_note', {}, false,
+      meta('lattice', { readOnlyHint: false }))
+    assert.equal(d.kind, 'deny')
+  })
+
+  it('cloud가 명시한 deny/ask 목록이 이 분기보다 우선한다', () => {
+    const withOverrides = {
+      ...conservative,
+      toolOverrides: { v: 2, deny: ['create_meeting_note'], ask: [], askSoft: [] },
+    }
+    const d = evaluatePolicy(withOverrides, 'mcp__lattice__create_meeting_note', {}, true,
+      meta('lattice', { readOnlyHint: false }))
+    assert.equal(d.kind, 'deny')
+    assert.equal(d.reason, 'channel-deny')
+  })
+
+  it('두 사유 키 모두 한국어 문구가 있다 — 없으면 결재 카드의 "왜" 줄이 공란이 된다', async () => {
+    const { REASON_LABEL_KO } = await import('./handler.js')
+    for (const key of ['external-mcp-write', 'external-mcp-undeclared']) {
+      assert.ok(REASON_LABEL_KO[key], `REASON_LABEL_KO에 '${key}' 문구가 없다`)
+    }
+  })
+})

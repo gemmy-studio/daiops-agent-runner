@@ -2,6 +2,35 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.23.0] — 2026-08-11
+
+### Added
+- **외부 MCP 서버의 쓰기 도구가 결재를 탄다** (Lattice QA #105 축1 — 러너 절반).
+  - 증상: lattice 미팅노트 작성 같은 **쓰기**가 결재 없이 실행됐다. 사용자가 자율성을 보수적으로
+    설정해도 소용없었다 — 그 통과가 `security`/`ask` 를 읽는 지점보다 **앞**에서 일어났기 때문이다.
+  - 원인: cloud 의 결재 대상 집합 3종이 전부 `ALL_MCP_TOOLS`(daiops **내장** 도구) 파생이라
+    외부 서버 도구가 어느 목록에도 없었고, `evaluatePolicy` 의 "위험 도구가 아니면 통과"
+    (`non-risky`)로 빠졌다. lattice 절반은 `eac445428` 에서 끝나 있었는데(21개 도구가 MCP 표준
+    `annotations` 로 성질을 밝힘, 쓰기는 `create_meeting_note` 하나) **러너가 그 어노테이션을
+    `tools/list` 에서 버리고 있어** 판정에 도달하지 못했다.
+  - 판정 근거는 **이름 목록이 아니라 MCP 표준 어노테이션**이다. 목록을 손으로 베끼는 방식은 이
+    저장소에서 두 번 갈렸다(QA #31·#64) — 드리프트할 사본이 없어야 재발하지 않는다.
+  - **미선언은 쓰기로 본다.** MCP 규격이 `readOnlyHint` 의 기본값을 `false` 로 정의하므로 규격을
+    따르는 해석이고, "침묵을 안전으로 읽지 않는다"는 lattice `catalog.test` 의 판단과도 같다.
+    사유 키를 둘로 갈라(`external-mcp-write` / `external-mcp-undeclared`) 결재 카드와 로그에서
+    "쓰기라고 밝혔다"와 "아무 말도 없었다"를 구분한다.
+  - **다이얼을 덮지 않는다.** 전권(`security:'full'`) 직원은 무변경이고, 결재 채널이 없으면
+    `askFallback` 을 따른다(자율 무인 실행 보존). 되살아나는 것은 보수 설정뿐이다.
+  - **내장/외부 구분은 cloud 가 준다** — `policy.builtinMcpServers`(예약 이름 2종). 러너에
+    하드코딩하지 않는 이유는 위 QA #31·#64 와 같다. **이 필드가 없으면 게이트를 걸지 않는다**
+    (fail-open): 구 cloud + 새 러너에서 닫으면 내장 조회 도구까지 결재를 요구해 대화가 막힌다.
+    배포 핸드셰이크의 '모름'과 도구 어노테이션의 '모름'은 다른 종류다.
+  - 배선: `mcp-client.listTools` 어노테이션 보존(불리언 아닌 값·규격 밖 키는 누락 처리) →
+    registry `getToolMeta` → `turn-manager` 가 `canUseTool` 3번째 인자로 전달 → `evaluatePolicy`.
+    모델에게 주는 도구 정의에는 싣지 않는다 — 게이트 입력을 모델이 볼 이유가 없다.
+  - 스냅샷 `minRunnerVersion` 을 0.23.0 으로 올린다. cloud 가 `builtinMcpServers` 를 보내도 구
+    러너는 무시해 게이트가 **조용히 사라지므로**, 핀이 이 아래로 내려가면 parity 테스트가 실패한다.
+
 ## [0.22.0] — 2026-08-10
 
 ### Added

@@ -711,3 +711,160 @@ describe('turn-manager × mcp-client 통합', () => {
     assert.deepEqual(names, ['Read', 'mcp__wiki__wiki_read'])
   })
 })
+
+// ── QA #105 축1 — 어노테이션 보존 ─────────────────────────────────────────────
+//
+// 종전에는 listTools가 name·description·inputSchema만 챙기고 annotations를 버렸다. 그래서
+// lattice가 MCP 표준으로 밝힌 "쓰기 도구"라는 사실이 게이트에 도달하지 못했다.
+describe('listTools — annotations 보존 (QA #105 축1)', () => {
+  const serverWith = (tools) => mockMcpServer({
+    routes: { initialize: () => ({}), 'tools/list': () => ({ tools }) },
+  })
+
+  it('표준 어노테이션을 그대로 싣는다', async () => {
+    const { fetchFn } = serverWith([
+      { name: 'create_meeting_note', inputSchema: { type: 'object' },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: '미팅노트 작성' } },
+    ])
+    const c = createMcpHttpClient({ name: 'lattice', url: 'http://mock' }, { fetchFn })
+    const [t] = await c.listTools()
+    assert.equal(t.annotations.readOnlyHint, false)
+    assert.equal(t.annotations.destructiveHint, false)
+    assert.equal(t.annotations.idempotentHint, true)
+    assert.equal(t.annotations.title, '미팅노트 작성')
+  })
+
+  it('어노테이션이 없으면 키 자체가 없다 — 기본값을 지어내지 않는다', async () => {
+    const { fetchFn } = serverWith([{ name: 'plain', inputSchema: { type: 'object' } }])
+    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn })
+    const [t] = await c.listTools()
+    assert.equal('annotations' in t, false)
+  })
+
+  it('★불리언이 아닌 값은 누락으로 취급한다 — "false" 문자열이 통과로 읽히면 안 된다', async () => {
+    const { fetchFn } = serverWith([
+      { name: 'sneaky', annotations: { readOnlyHint: 'true', destructiveHint: 1 } },
+    ])
+    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn })
+    const [t] = await c.listTools()
+    assert.equal('annotations' in t, false)
+  })
+
+  it('규격 밖 키는 싣지 않는다', async () => {
+    const { fetchFn } = serverWith([
+      { name: 'a', annotations: { readOnlyHint: true, somethingElse: 'x' } },
+    ])
+    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn })
+    const [t] = await c.listTools()
+    assert.deepEqual(t.annotations, { readOnlyHint: true })
+  })
+
+  it('배열·null 어노테이션은 무시', async () => {
+    const { fetchFn } = serverWith([
+      { name: 'a', annotations: [] },
+      { name: 'b', annotations: null },
+    ])
+    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn })
+    const tools = await c.listTools()
+    assert.equal('annotations' in tools[0], false)
+    assert.equal('annotations' in tools[1], false)
+  })
+})
+
+describe('createMcpToolRegistry — getToolMeta (QA #105 축1)', () => {
+  it('프리픽스 이름으로 출처 서버와 어노테이션을 돌려준다', async () => {
+    const { fetchFn } = mockMcpServer({
+      routes: {
+        initialize: () => ({}),
+        'tools/list': () => ({ tools: [{ name: 'create_meeting_note', annotations: { readOnlyHint: false } }] }),
+      },
+    })
+    const reg = await createMcpToolRegistry([{ name: 'lattice', url: 'http://mock' }], { fetchFn })
+    const meta = reg.getToolMeta('mcp__lattice__create_meeting_note')
+    assert.equal(meta.serverName, 'lattice')
+    assert.equal(meta.originalName, 'create_meeting_note')
+    assert.equal(meta.annotations.readOnlyHint, false)
+    await reg.close()
+  })
+
+  it('모델에게 주는 도구 정의(tools)에는 어노테이션을 싣지 않는다', async () => {
+    const { fetchFn } = mockMcpServer({
+      routes: {
+        initialize: () => ({}),
+        'tools/list': () => ({ tools: [{ name: 't', annotations: { readOnlyHint: true } }] }),
+      },
+    })
+    const reg = await createMcpToolRegistry([{ name: 's', url: 'http://mock' }], { fetchFn })
+    assert.equal('annotations' in reg.tools[0], false)
+    await reg.close()
+  })
+
+  it('등록되지 않은 이름은 undefined', async () => {
+    const { fetchFn } = mockMcpServer({ routes: { initialize: () => ({}), 'tools/list': () => ({ tools: [] }) } })
+    const reg = await createMcpToolRegistry([{ name: 's', url: 'http://mock' }], { fetchFn })
+    assert.equal(reg.getToolMeta('mcp__s__nope'), undefined)
+    await reg.close()
+  })
+})
+
+describe('turn-manager → canUseTool meta 전달 (QA #105 축1)', () => {
+  it('MCP 도구는 출처 서버·어노테이션이 게이트에 도달하고, 빌트인 도구는 meta가 없다', async () => {
+    const { runAnthropicTurnManager } = await import('./turn-manager.js')
+
+    const mcpFetch = mockMcpServer({
+      url: 'http://lat',
+      routes: {
+        initialize: () => ({}),
+        'tools/list': () => ({
+          tools: [{ name: 'create_meeting_note', inputSchema: { type: 'object' }, annotations: { readOnlyHint: false } }],
+        }),
+        'tools/call': () => ({ content: [{ type: 'text', text: 'saved' }] }),
+      },
+    }).fetchFn
+
+    const toolUse = (id, name) =>
+      `event: message_start\ndata: ${JSON.stringify({ message: { usage: { input_tokens: 5, output_tokens: 0 } } })}\n\n` +
+      `event: content_block_start\ndata: ${JSON.stringify({ index: 0, content_block: { type: 'tool_use', id, name, input: {} } })}\n\n` +
+      `event: content_block_delta\ndata: ${JSON.stringify({ index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } })}\n\n` +
+      `event: content_block_stop\ndata: ${JSON.stringify({ index: 0 })}\n\n` +
+      `event: message_delta\ndata: ${JSON.stringify({ delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 3 } })}\n\n` +
+      `event: message_stop\ndata: {}\n\n`
+    const done =
+      `event: message_start\ndata: ${JSON.stringify({ message: { usage: { input_tokens: 5, output_tokens: 0 } } })}\n\n` +
+      `event: content_block_start\ndata: ${JSON.stringify({ index: 0, content_block: { type: 'text', text: '' } })}\n\n` +
+      `event: content_block_delta\ndata: ${JSON.stringify({ index: 0, delta: { type: 'text_delta', text: 'ok' } })}\n\n` +
+      `event: content_block_stop\ndata: ${JSON.stringify({ index: 0 })}\n\n` +
+      `event: message_delta\ndata: ${JSON.stringify({ delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } })}\n\n` +
+      `event: message_stop\ndata: {}\n\n`
+
+    const script = [toolUse('t1', 'mcp__lat__create_meeting_note'), toolUse('t2', 'Read'), done]
+    let turn = 0
+    const anthropicFetch = async () => new Response(
+      new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(script[turn++] ?? done)); c.close() } }),
+      { status: 200 },
+    )
+
+    /** @type {Array<[string, unknown]>} */
+    const seen = []
+    for await (const _ of runAnthropicTurnManager(
+      { prompt: 'go', options: { model: 'claude-sonnet-4-6', mcpServers: [{ name: 'lat', url: 'http://lat' }] } },
+      {
+        fetchFn: anthropicFetch,
+        mcpFetchFn: mcpFetch,
+        apiKey: 'sk-test',
+        canUseTool: (name, _input, meta) => { seen.push([name, meta]); return { behavior: 'allow' } },
+        runTool: async () => ({ content: 'builtin ok' }),
+      },
+    )) { /* drain */ }
+
+    const mcpCall = seen.find(([n]) => n === 'mcp__lat__create_meeting_note')
+    assert.ok(mcpCall, 'MCP 도구가 게이트를 지나야 한다')
+    assert.equal(mcpCall[1].serverName, 'lat')
+    assert.equal(mcpCall[1].originalName, 'create_meeting_note')
+    assert.equal(mcpCall[1].annotations.readOnlyHint, false)
+
+    const builtinCall = seen.find(([n]) => n === 'Read')
+    assert.ok(builtinCall, '빌트인 도구도 게이트를 지나야 한다')
+    assert.equal(builtinCall[1], undefined, '빌트인은 meta가 없어야 한다')
+  })
+})

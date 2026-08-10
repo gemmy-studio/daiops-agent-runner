@@ -651,6 +651,12 @@ export const REASON_LABEL_KO = {
   'irreversible': '되돌릴 수 없는 일이라 진행 전 확인이 필요해요',
   'external-write': '바깥 서비스에 기록을 남기는 일이라 진행 전 확인이 필요해요',
   'channel-ask': '이 경로에서는 바로 진행할 수 없어 확인이 필요해요',
+  // 아래 둘은 cloud `ASK_SEMANTICS`가 아니라 **러너가 직접 판정**하는 사유다(QA #105 축1) —
+  // 외부 MCP 서버 도구는 cloud의 내장 도구 목록에 없어 `askReasons`에 담길 수 없기 때문이다.
+  // 그래서 parity 스냅샷의 `askReasonKeys`와도 대응하지 않는다(그쪽은 cloud가 보내는 키의 집합).
+  'external-mcp-write': '연동한 외부 서비스에 기록을 남기는 일이라 진행 전 확인이 필요해요',
+  'external-mcp-undeclared':
+    '연동한 외부 서비스의 도구인데 읽기 전용인지 밝히지 않아, 기록을 남길 수 있다고 보고 확인을 받아요',
 }
 
 /**
@@ -679,9 +685,12 @@ function buildPlanContent({ toolName, commandSummary, reason }) {
 
 /**
  * PreToolUse 정책 평가.
+ *
+ * @param {object} [toolMeta] — MCP 도구일 때만 채워진다(turn-manager가 registry에서 조회해 전달).
+ *   `{ serverName, originalName, annotations? }`. 외부 서버 쓰기 도구 판정에만 쓴다(QA #105 축1).
  * @returns { kind: 'allow'|'plan_request'|'deny', reason, toolName?, commandSummary? }
  */
-export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
+export function evaluatePolicy(policy, toolName, input, hasUiChannel, toolMeta) {
   // 채널-인식 도구 게이트 (ADR 21 §5.3) — 가장 먼저, 가장 제한적. cloud(policy.ts)가 인바운드
   // 채널 capability로 계산한 deny/ask 목록을 데이터로 강제(분류/채널 로직은 cloud 단일 소스).
   // 상태변경 MCP 도구(wiki_save 등)는 RISKY_TOOL_NAMES가 아니라 아래 non-risky로 새므로 여기서 막는다.
@@ -731,6 +740,31 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
   if (!cloudOwnsToolGates(overrides) && toolName.startsWith('mcp__')) {
     const summary = summarizeToolInput(toolName, input)
     return askOrFallback({ askFallback: 'deny' }, toolName, summary, hasUiChannel, 'channel-ask')
+  }
+
+  // ── 외부 MCP 서버의 쓰기 가능 도구 (QA #105 축1) ──────────────────────────────
+  // cloud의 deny/ask 목록은 **내장 도구 목록에서 파생**되므로 외부 서버 도구를 담을 수 없다.
+  // 그래서 여기까지 오면 아래 non-risky에서 통과해 버렸다 — 미팅노트 작성 같은 쓰기가
+  // 결재 없이 실행됐고, 그 통과는 security/ask를 읽는 지점보다 **앞**이라 다이얼과 무관했다.
+  //
+  // 판정 근거는 이름 목록이 아니라 **MCP 표준 어노테이션**이다(드리프트할 사본이 없다).
+  // 규격이 `readOnlyHint`의 기본값을 false로 정의하므로 **미선언은 쓰기로 본다** — 침묵을
+  // 안전으로 읽지 않는다(lattice catalog.test "침묵을 '안전'으로 읽히게 두지 않는다"와 같은 판단).
+  const externalWrite = classifyExternalMcpWrite(policy, toolName, toolMeta)
+  if (externalWrite) {
+    // 전권(security:'full') 직원은 무변경 — 이 변경의 목적은 보수 설정을 되살리는 것이지
+    // 자율 직원의 자동화를 멈추는 것이 아니다. 아래 일반 경로의 `security === 'full'` 통과와
+    // 같은 의미를 여기서 먼저 적용한다(외부 도구는 RISKY_TOOL_NAMES가 아니라 거기 도달 못 한다).
+    if ((policy?.security ?? 'allowlist') !== 'full') {
+      const summary = summarizeToolInput(toolName, input)
+      return askOrFallback(
+        { askFallback: policy?.askFallback ?? 'deny' },
+        toolName,
+        summary,
+        hasUiChannel,
+        externalWrite.reason,
+      )
+    }
   }
 
   if (!RISKY_TOOL_NAMES.has(toolName)) {
@@ -789,6 +823,29 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel) {
     return { kind: 'deny', reason: 'security-deny', toolName, commandSummary: summary }
   }
   return askOrFallback({ ask, askFallback }, toolName, summary, hasUiChannel, ask === 'always' ? 'always' : 'on-miss')
+}
+
+/**
+ * 외부 MCP 서버의 쓰기 가능 도구인지 판정한다.
+ *
+ * 셋 다 만족해야 한다:
+ *   1. cloud가 내장 서버 목록을 보냈다 — 없으면 구 cloud라 분류 자체가 불가능하다. 이때는
+ *      게이트를 걸지 않는다(fail-open). 여기서 닫으면 구 cloud + 새 러너에서 내장 조회 도구까지
+ *      전부 결재를 요구해 대화가 막힌다. 배포 핸드셰이크의 '모름'과 어노테이션의 '모름'은 다르다.
+ *   2. 이 도구가 MCP 도구이고 출처 서버가 내장이 아니다.
+ *   3. `readOnlyHint === true`가 **아니다** — 미선언 포함(MCP 규격 기본값이 false).
+ *
+ * @returns {{ reason: string } | null} 결재가 필요하면 사유 키, 아니면 null.
+ */
+function classifyExternalMcpWrite(policy, toolName, toolMeta) {
+  const builtins = policy?.builtinMcpServers
+  if (!Array.isArray(builtins)) return null
+  if (!toolMeta || typeof toolMeta.serverName !== 'string') return null
+  if (builtins.includes(toolMeta.serverName)) return null
+  if (toolMeta.annotations?.readOnlyHint === true) return null
+  // 사유를 둘로 가른다 — 결재 카드와 로그에서 "서버가 쓰기라고 밝혔다"와 "아무 말도 없었다"를
+  // 구분할 수 있어야 한다. 후자는 그 서버 운영자에게 어노테이션을 붙이라고 말할 근거가 된다.
+  return { reason: toolMeta.annotations ? 'external-mcp-write' : 'external-mcp-undeclared' }
 }
 
 function askOrFallback({ askFallback }, toolName, summary, hasUiChannel, reason) {
@@ -1197,7 +1254,7 @@ export async function handleChat(rawParams, res, req) {
      *  - plan_request → ApprovalManager.waitForDecision으로 in-flight pause.
      *    cloud가 SSE plan_request 수신 → 사용자 결재 → POST /v1/approval/:id로 resolve.
      */
-    const canUseTool = async (toolName, input) => {
+    const canUseTool = async (toolName, input, toolMeta) => {
       // request_secret(Phase B)은 정책 게이트를 적용하지 않는다 — 도구 자체가 사용자 결재(secret_request)로
       // 안전성을 확보하고, 값은 LLM에 노출되지 않고 env로만 주입된다. 실행은 runTool→onRequestSecret이 담당.
       if (toolName === 'request_secret') {
@@ -1224,7 +1281,7 @@ export async function handleChat(rawParams, res, req) {
       const effectivePolicy = SANDBOX_WRITE_FREE
         ? { ...params.policy, sandboxRoot: params.policy?.sandboxRoot ?? (params.context_dir ?? DEFAULT_CWD) }
         : params.policy
-      const decision = evaluatePolicy(effectivePolicy, toolName, input, params.has_approval_channel)
+      const decision = evaluatePolicy(effectivePolicy, toolName, input, params.has_approval_channel, toolMeta)
 
       if (decision.kind === 'allow') {
         return { behavior: 'allow', updatedInput: applyCacheRedirectCorrection(toolName, input) }

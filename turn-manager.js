@@ -324,11 +324,11 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
  * @property {AbortSignal} [signal]
  * @property {string} [apiKey] — 미지정 시 process.env.ANTHROPIC_API_KEY
  * @property {string} [apiUrl] — 미지정 시 https://api.anthropic.com/v1/messages
- * @property {(toolName: string, input: unknown) => Promise<CanUseToolResult> | CanUseToolResult} [canUseTool]
+ * @property {(toolName: string, input: unknown, meta?: { serverName: string, originalName: string, annotations?: { readOnlyHint?: boolean, destructiveHint?: boolean, idempotentHint?: boolean, openWorldHint?: boolean } }) => Promise<CanUseToolResult> | CanUseToolResult} [canUseTool] — `meta` 는 MCP 도구일 때만 채워진다(mcpRegistry.getToolMeta). 게이트가 외부 서버의 쓰기 도구를 판정하는 유일한 근거다.
  * @property {(toolName: string, input: unknown, ctx: { signal?: AbortSignal }) => Promise<{ content: string | Array<{type:'text', text:string}>, is_error?: boolean }>} [runTool]
  * @property {typeof globalThis.fetch} [fetchFn] — Anthropic Messages API용 테스트 주입.
  * @property {typeof globalThis.fetch} [mcpFetchFn] — MCP HTTP 호출용 테스트 주입 (미지정 시 fetchFn 재사용).
- * @property {{ tools: Array<any>, runTool: Function, close: () => Promise<void> }} [mcpRegistry] — 외부 관리 registry. 주입 시 mcpServers 자동 생성 스킵.
+ * @property {{ tools: Array<any>, runTool: Function, getToolMeta?: Function, close: () => Promise<void> }} [mcpRegistry] — 외부 관리 registry. 주입 시 mcpServers 자동 생성 스킵. `getToolMeta` 미구현 registry(구 테스트 더블)면 meta 없이 진행한다.
  * @property {(info: { attempt: number, delayMs: number, reason: string, status?: number }) => void} [onRetry] — turn 1+ per-turn 재시도 및 thinking 서명 복구 시 호출 (handler가 retry SSE로 가시화).
  * @property {{ baseMs?: number, maxMs?: number, jitterRatio?: number, maxAttempts?: number }} [retryOpts] — turn 1+ per-turn 재시도 backoff 파라미터 (미지정 시 retry-utils DEFAULT_BACKOFF). 주로 테스트용.
  * @property {(delta: string, index: number) => void} [onPartialText] — text 블록의 text_delta 도착 시점마다 호출. 호출자가 토큰 단위 라이브 표시(SSE text_delta 등)에 사용. 콜백 실패는 본 흐름에 영향 없음.
@@ -1422,7 +1422,10 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       let denied = false
       let denyMessage = ''
       if (ctx.canUseTool) {
-        const decision = await ctx.canUseTool(block.name, block.input)
+        // 3번째 인자 `meta` — MCP 도구일 때만 출처 서버·어노테이션을 실어 보낸다(QA #105 축1).
+        // 게이트는 이것 없이는 "외부 서버의 쓰기 도구"를 알 수 없다. 선택적 인자라 meta를 읽지
+        // 않는 호출자(테스트·구 배선)는 종전과 완전히 같이 동작한다.
+        const decision = await ctx.canUseTool(block.name, block.input, mcpRegistry?.getToolMeta?.(block.name))
         if (decision?.behavior === 'deny') {
           denied = true
           denyMessage = decision.message ?? `Tool '${block.name}' denied`

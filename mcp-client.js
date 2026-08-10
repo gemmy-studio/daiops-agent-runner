@@ -46,10 +46,21 @@ const MAX_LIST_PAGES = 20
  *   샌드박스 로컬 MCP 서버(127.0.0.1:PORT) 도달용. 신뢰된 호출자(cloud)만 설정한다.
  *   메타데이터/내부 엔드포인트는 이 값과 무관하게 항상 차단된다.
  *
+ * @typedef {Object} McpToolAnnotations
+ * @property {boolean} [readOnlyHint] — 규격 기본값 **false**(= 상태를 바꿀 수 있음). 없으면 없는 대로
+ *   보존한다 — 여기서 기본값을 채워 넣지 않는다. "서버가 밝히지 않았다"와 "서버가 false라고 밝혔다"는
+ *   게이트 입장에서 결과는 같아도 **로그·결재 사유가 달라야** 하기 때문이다.
+ * @property {boolean} [destructiveHint]
+ * @property {boolean} [idempotentHint]
+ * @property {boolean} [openWorldHint]
+ * @property {string} [title]
+ *
  * @typedef {Object} McpTool
  * @property {string} name — 원본 도구 이름 (프리픽스 전)
  * @property {string} [description]
  * @property {object} [inputSchema] — JSON Schema (Anthropic input_schema로 변환됨)
+ * @property {McpToolAnnotations} [annotations] — MCP 표준 `tools/list` 어노테이션.
+ *   **버리지 않는다** — 이것이 외부 서버 도구의 쓰기 여부를 아는 유일한 경로다(QA #105 축1).
  *
  * @typedef {Object} AnthropicToolDef
  * @property {string} name — 프리픽스된 이름 (mcp__<server>__<tool>)
@@ -67,6 +78,36 @@ const MAX_LIST_PAGES = 20
  *   getServerName: () => string,
  * }} McpClient
  */
+
+/** MCP 표준 `ToolAnnotations` 의 불리언 필드. 규격 밖 키는 싣지 않는다. */
+const ANNOTATION_BOOL_KEYS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']
+
+/**
+ * `tools/list` 어노테이션을 신뢰 가능한 형태로 좁힌다.
+ *
+ * 서버가 보낸 값을 그대로 들고 다니지 않는 이유: 이 객체는 **결재 판정의 입력**이 되므로,
+ * `readOnlyHint: "false"`(문자열)나 `readOnlyHint: 1` 같은 값이 진리값 검사에서 참으로 읽혀
+ * 쓰기 도구를 통과시키는 일이 없어야 한다. 불리언이 아닌 값은 **누락으로 취급**한다
+ * (= 미선언 → 결재. 규격 기본값과 같은 방향).
+ *
+ * 하나도 못 건지면 `undefined` — "빈 객체를 받았다"와 "필드가 없다"를 구분할 필요가 없고,
+ * 호출부가 `annotations ? … : …` 한 번으로 미선언을 판정할 수 있다.
+ *
+ * @param {unknown} raw
+ * @returns {import('./mcp-client.js').McpToolAnnotations | undefined}
+ */
+function normalizeAnnotations(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  /** @type {Record<string, unknown>} */
+  const out = {}
+  for (const key of ANNOTATION_BOOL_KEYS) {
+    const v = /** @type {Record<string, unknown>} */ (raw)[key]
+    if (typeof v === 'boolean') out[key] = v
+  }
+  const title = /** @type {Record<string, unknown>} */ (raw).title
+  if (typeof title === 'string' && title) out.title = title
+  return Object.keys(out).length > 0 ? out : undefined
+}
 
 /** 인증 헤더로 간주해 로그 직렬화 시 마스킹할 키들. case-insensitive. */
 const SENSITIVE_HEADER_KEYS = new Set([
@@ -385,7 +426,7 @@ export function createMcpHttpClient(spec, ctx = {}) {
 
   async function listTools() {
     await ensureInitialized()
-    /** @type {Array<{name: string, description?: string, inputSchema: object}>} */
+    /** @type {McpTool[]} */
     const all = []
     /** @type {string | undefined} */
     let cursor
@@ -396,10 +437,12 @@ export function createMcpHttpClient(spec, ctx = {}) {
       for (const t of tools) {
         const name = String(t?.name ?? '')
         if (!name) continue
+        const annotations = normalizeAnnotations(t?.annotations)
         all.push({
           name,
           description: typeof t?.description === 'string' ? t.description : undefined,
           inputSchema: t?.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : { type: 'object' },
+          ...(annotations ? { annotations } : {}),
         })
       }
       cursor = typeof result?.nextCursor === 'string' && result.nextCursor ? result.nextCursor : undefined
@@ -519,7 +562,14 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
         ...(t.description ? { description: t.description } : {}),
         input_schema: t.inputSchema ?? { type: 'object' },
       })
-      toolIndex.set(prefixed, { serverName: spec.name, originalName: t.name })
+      // annotations 는 **모델에게 주는 도구 정의(`tools`)에는 싣지 않고** 색인에만 둔다.
+      // 모델이 읽을 이유가 없고(도구 선택 근거가 아니다), 게이트 판정의 입력이므로 모델이
+      // 볼수록 "읽기 전용이라고 우기면 통과한다"를 학습시킬 여지만 생긴다.
+      toolIndex.set(prefixed, {
+        serverName: spec.name,
+        originalName: t.name,
+        ...(t.annotations ? { annotations: t.annotations } : {}),
+      })
     }
   }
 
@@ -538,9 +588,21 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
     await Promise.allSettled([...clients.values()].map((c) => c.close()))
   }
 
+  /**
+   * 프리픽스된 도구 이름 → 출처 서버와 어노테이션. 게이트(canUseTool)가 "이건 외부 서버의
+   * 쓰기 도구인가"를 판정하는 데 쓴다. 등록되지 않은 이름이면 `undefined`.
+   *
+   * @param {string} prefixedName
+   * @returns {{ serverName: string, originalName: string, annotations?: import('./mcp-client.js').McpToolAnnotations } | undefined}
+   */
+  function getToolMeta(prefixedName) {
+    return toolIndex.get(prefixedName)
+  }
+
   return {
     tools,
     runTool,
+    getToolMeta,
     close,
     getClient: (name) => clients.get(name),
   }
