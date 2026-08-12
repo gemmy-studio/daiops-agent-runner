@@ -1253,15 +1253,46 @@ describe('applyPromptCacheControl — system_and_3 전략', () => {
       ],
     })
     assert.equal(result.breakpoints, 4)
-    // system은 string → array of text block + cache_control
+    // system은 string → array of text block + cache_control (1h — 수십~수백 번 읽힌다)
     assert.ok(Array.isArray(result.system))
     assert.deepEqual(result.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
-    // 각 메시지 content가 array로 승격되고 마지막 블록에 cache_control 존재
+    // 각 메시지 content가 array로 승격되고 마지막 블록에 cache_control 존재 (꼬리는 5m)
     for (const m of result.messages) {
       assert.ok(Array.isArray(m.content))
       const last = m.content[m.content.length - 1]
-      assert.deepEqual(last.cache_control, { type: 'ephemeral', ttl: '1h' })
+      assert.deepEqual(last.cache_control, { type: 'ephemeral' })
     }
+  })
+
+  it('🔴 system은 1h · 꼬리는 5m — 둘의 TTL이 갈려 있어야 한다', () => {
+    // 이 테스트가 이 함수의 존재 이유다. 마커를 하나로 되돌리면 여기서 걸린다.
+    //
+    // 꼬리 엔트리는 도구 호출마다 뒤로 밀려 다음 한두 호출에서만 읽히고 버려진다.
+    // 1h 쓰기는 2.0배라 "읽기 1회"면 2.1배 — 캐시를 안 쓰는 2.0배보다 비싸진다.
+    // system 은 반대로 워크스페이스가 사는 동안 계속 읽히므로 1h 가 맞다.
+    const result = applyPromptCacheControl({
+      system: 'sys',
+      messages: [
+        { role: 'user', content: 'A' },
+        { role: 'assistant', content: 'B' },
+      ],
+    })
+    assert.deepEqual(result.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+    for (const m of result.messages) {
+      const last = m.content[m.content.length - 1]
+      assert.equal(last.cache_control.ttl, undefined, '꼬리에 1h 가 붙으면 손익분기 미달이다')
+    }
+  })
+
+  it('systemTtl·tailTtl로 각각 덮어쓸 수 있다', () => {
+    const result = applyPromptCacheControl({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'A' }],
+      systemTtl: '5m',
+      tailTtl: '1h',
+    })
+    assert.deepEqual(result.system[0].cache_control, { type: 'ephemeral' })
+    assert.deepEqual(result.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
   })
 
   it('메시지 5개 → system + 마지막 3개에만 마커 (총 4개, 1·2번째 메시지에는 없음)', () => {
@@ -1300,7 +1331,7 @@ describe('applyPromptCacheControl — system_and_3 전략', () => {
     assert.equal(result.breakpoints, 4)
   })
 
-  it('ttl=5m이면 ttl 필드 없는 마커', () => {
+  it('ttl=5m이면 ttl 필드 없는 마커 (하위호환 별칭 — system 에만 적용)', () => {
     const result = applyPromptCacheControl({
       system: 'sys',
       messages: [{ role: 'user', content: 'A' }],
@@ -1324,7 +1355,7 @@ describe('applyPromptCacheControl — system_and_3 전략', () => {
     })
     const blocks = result.messages[0].content
     assert.equal(blocks[0].cache_control, undefined, '첫 블록은 마커 없음')
-    assert.deepEqual(blocks[1].cache_control, { type: 'ephemeral', ttl: '1h' })
+    assert.deepEqual(blocks[1].cache_control, { type: 'ephemeral' })
   })
 
   it('호출 후 원본 messages는 변하지 않음 (in-place 수정 없음)', () => {
@@ -1393,9 +1424,10 @@ describe('buildAnthropicRequest — 3.2 정규화 통합', () => {
       messages: [{ role: 'user', content: 'hi' }],
     })
     assert.ok(Array.isArray(body.system))
-    assert.ok(body.system[0].cache_control)
     assert.ok(Array.isArray(body.messages[0].content))
-    assert.ok(body.messages[0].content[0].cache_control)
+    // 프로덕션 경로가 실제로 타는 기본값 — cloud 는 cacheControl 을 넘기지 않는다.
+    assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+    assert.deepEqual(body.messages[0].content[0].cache_control, { type: 'ephemeral' })
   })
 
   it('cacheControl=false 시 마커 없음', () => {

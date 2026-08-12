@@ -2,6 +2,34 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.24.0] — 2026-08-13
+
+### Changed
+- **prompt cache 마커를 둘로 나눈다 — system 1h · 메시지 꼬리 5m** (`applyPromptCacheControl`).
+  - 증상: lattice chat 프로덕션 실측(2026-08-12 · 블루 워크스페이스 · 201턴)에서 턴당 캐시
+    **쓰기가 34,041토큰**이었고, 그 비용이 턴 원가 $0.298 의 **68%**($0.204)를 차지했다.
+    읽기는 191,832토큰으로 5배 이상 많은데 금액은 쓰기가 3.5배였다.
+  - 원인: `system_and_3` 이 마커 **객체 하나**를 만들어 system 과 최근 메시지 3개에 똑같이
+    붙였고, cloud 가 `cacheControl` 을 넘기지 않아(핸들러 `queryOptions` 에 그 키가 없고
+    `CONTRACT.md` 에도 없다) 네 지점 전부 기본값 `'1h'` 였다.
+  - 왜 틀렸나: 캐시 쓰기 단가는 5분권 1.25배 · **1시간권 2.0배**이고 읽기는 0.1배다. 그래서
+    손익분기가 5m 은 2회, 1h 는 3회 읽기다. **메시지 꼬리는 도구 호출마다 뒤로 밀려 새
+    접미사가 생기므로 다음 한두 호출에서만 읽히고 버려진다** — 읽기 1회면 2.0+0.1 = 2.1배로,
+    캐시를 아예 안 쓰는 2.0배보다 비싸진다. 반대로 system 블록(실측 79k)은 워크스페이스가
+    사는 동안 계속 읽히므로 1h 가 맞다. 두 대상의 최적 TTL 이 반대인데 마커가 하나뿐이었다.
+  - 레퍼런스 3종은 모두 **5분이 기본이고 1시간은 옵트인**이다 — prime-agent
+    `resolveCacheRetention()` 기본 `"short"`, opencode `applyCaching()` ttl 미지정,
+    vellum-assistant. daiops 만 반대였다.
+  - 기대효과: 쓰기 2.0배 → 1.25배. 턴당 $0.298 → **$0.221 (−26%)**. 지연은 불변
+    (캐시 쓰기는 TTFT 에 거의 기여하지 않는다).
+  - 호환: `cacheControl.ttl` 은 **system TTL 별칭**으로 그대로 동작한다. 각각 덮어쓰려면
+    `cacheControl.systemTtl` · `cacheControl.tailTtl`. cloud 는 여전히 아무것도 넘기지
+    않아도 되며, 넘기지 않는 것이 기본 동작이다.
+  - ⚠️ 꼬리 마커 **개수는 3개를 유지**했다. Anthropic 브레이크포인트는 최대 20블록 뒤까지만
+    이전 엔트리를 찾는데, 도구 라운드마다 메시지 2개(assistant + 배치된 tool_result user)가
+    붙어 병렬 도구가 넓으면 한 라운드가 그 창에 근접한다. 3개의 조밀함이 지금 그 창을 메운다.
+    opencode 처럼 2개로 줄이는 것은 별도 검증 후에 한다.
+
 ## [0.23.0] — 2026-08-11
 
 ### Added

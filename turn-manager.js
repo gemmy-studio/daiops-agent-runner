@@ -448,6 +448,22 @@ export function forbidsSamplingParams(model) {
  *  - 마지막 3개 *non-system* 메시지의 마지막 콘텐츠 블록에 마커 → 누적 prefix 캐시.
  *  - 합계 ≤ 4 (Anthropic 한도). 메시지가 3개 미만이면 그만큼만.
  *
+ * ## system 과 메시지 꼬리는 TTL 이 다르다 (2026-08-13)
+ *
+ * 캐시 **쓰기**는 정가보다 비싸다 — 5분권 1.25배, 1시간권 2.0배. 읽기만 0.1배로 싸다.
+ * 그래서 "몇 번 읽히느냐"가 TTL 선택을 정한다(손익분기: 5m 은 2회, 1h 는 3회).
+ *
+ *  - **system 블록**은 워크스페이스가 사는 동안 수십~수백 번 읽힌다 → 1h 가 압도적으로 이득.
+ *    5m 으로 내리면 턴 간격이 5분만 넘어도 79k 를 통째로 재작성한다.
+ *  - **메시지 꼬리**는 같은 턴 안에서 0~2회 읽히고 버려진다. 도구를 부를 때마다 꼬리가
+ *    뒤로 밀려 *새 접미사*가 생기므로, 그 엔트리는 다음 호출 한두 번이 수명의 전부다.
+ *    1h(2.0배)를 매기면 **캐시를 안 쓰는 것(2.0배)보다 비싸진다** — 손익분기 미달이다.
+ *
+ * 종전에는 마커를 하나만 만들어 네 곳에 같이 썼고, cloud 가 ttl 을 넘기지 않아 전부 1h 였다.
+ * 프로덕션 실측(lattice chat, 2026-08-12, 201턴)에서 턴당 쓰기가 34,041토큰이었고 그 비용이
+ * 턴 원가의 68%를 차지했다. 레퍼런스 3종(prime-agent `resolveCacheRetention` 기본 "short",
+ * opencode `applyCaching` ttl 미지정, vellum)은 모두 5분이 기본이고 1시간은 옵트인이다.
+ *
  * 호출자 약속: 입력 messages는 본 함수가 deep-clone하지 않으므로, in-place 수정에 동의해야
  * 한다 (turn-manager 내부에서 매 turn마다 새로 빌드한 messages만 전달).
  *
@@ -455,7 +471,10 @@ export function forbidsSamplingParams(model) {
  *   system: string | Array<{type:'text', text:string, cache_control?:object}> | undefined,
  *   messages: Array<{role:'user'|'assistant', content: string | Array<any>}>,
  *   ttl?: '5m' | '1h',
+ *   systemTtl?: '5m' | '1h',
+ *   tailTtl?: '5m' | '1h',
  * }} args
+ *   `ttl` 은 하위호환 별칭 — **system 쪽에만** 적용된다(꼬리는 `tailTtl`).
  * @returns {{
  *   system: string | Array<{type:'text', text:string, cache_control?:object}> | undefined,
  *   messages: Array<{role:'user'|'assistant', content: string | Array<any>}>,
@@ -463,8 +482,9 @@ export function forbidsSamplingParams(model) {
  * }}
  */
 export function applyPromptCacheControl(args) {
-  const ttl = args.ttl ?? '1h'
-  const marker = ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
+  const mkMarker = (ttl) => (ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' })
+  const systemMarker = mkMarker(args.systemTtl ?? args.ttl ?? '1h')
+  const tailMarker = mkMarker(args.tailTtl ?? '5m')
 
   let system = args.system
   const messages = args.messages.map((m) => ({ ...m, content: cloneContent(m.content) }))
@@ -474,10 +494,10 @@ export function applyPromptCacheControl(args) {
   // 1) system 마커 — 항상 마지막 text 블록에 부착. string은 array of text block으로 승격.
   if (system) {
     if (typeof system === 'string') {
-      system = [{ type: 'text', text: system, cache_control: marker }]
+      system = [{ type: 'text', text: system, cache_control: systemMarker }]
     } else if (Array.isArray(system) && system.length > 0) {
       // 마지막 dict-like 블록에 부착 (immutable copy를 만들지 않으면 호출자 system 객체 수정).
-      system = system.map((blk, i) => (i === system.length - 1 ? { ...blk, cache_control: marker } : blk))
+      system = system.map((blk, i) => (i === system.length - 1 ? { ...blk, cache_control: systemMarker } : blk))
     }
     breakpoints++
   }
@@ -487,7 +507,7 @@ export function applyPromptCacheControl(args) {
   if (remaining > 0 && messages.length > 0) {
     const startIdx = Math.max(0, messages.length - remaining)
     for (let i = startIdx; i < messages.length; i++) {
-      attachCacheMarker(messages[i], marker)
+      attachCacheMarker(messages[i], tailMarker)
       breakpoints++
     }
   }
@@ -889,7 +909,8 @@ export async function* accumulateTurn(events, opts = {}) {
  *  - `thinking !== false` 이고 모델이 adaptive thinking 지원 세대(4.6/4.7)면 자동 활성화.
  *    `thinking.effort` (기본 'medium')에 따라 output_config.effort 설정. xhigh는 4.7+에서만.
  *  - `cacheControl !== false` 이면 system + 마지막 3개 non-system 메시지에 ephemeral 마커
- *    삽입 (system_and_3 전략). 기본 TTL은 '1h' (SDK 기본과 정합 — llm-wrapper 주석 참조).
+ *    삽입 (system_and_3 전략). 기본 TTL은 **system 1h · 꼬리 5m** — 근거는
+ *    `applyPromptCacheControl` 헤더("system 과 메시지 꼬리는 TTL 이 다르다").
  *  - 4.7+ 모델에서는 temperature/top_p/top_k가 비기본값이면 자동 제거.
  *
  * @param {{
@@ -899,7 +920,7 @@ export async function* accumulateTurn(events, opts = {}) {
  *   tools?: ToolDef[],
  *   maxTokens?: number,
  *   thinking?: { effort?: 'low'|'medium'|'high'|'xhigh'|'max'|'minimal' } | false,
- *   cacheControl?: { ttl?: '5m' | '1h' } | false,
+ *   cacheControl?: { ttl?: '5m' | '1h', systemTtl?: '5m' | '1h', tailTtl?: '5m' | '1h' } | false,
  *   temperature?: number,
  *   topP?: number,
  *   topK?: number,
@@ -918,8 +939,13 @@ export function buildAnthropicRequest(args) {
   let system = args.systemPrompt
   let messages = args.messages
   if (args.cacheControl !== false) {
-    const ttl = args.cacheControl?.ttl ?? '1h'
-    const cached = applyPromptCacheControl({ system, messages, ttl })
+    // 미지정은 그대로 넘긴다 — 기본값(system 1h · 꼬리 5m) 판정은 applyPromptCacheControl 한 곳에만 둔다.
+    const cached = applyPromptCacheControl({
+      system,
+      messages,
+      systemTtl: args.cacheControl?.systemTtl ?? args.cacheControl?.ttl,
+      tailTtl: args.cacheControl?.tailTtl,
+    })
     system = cached.system
     messages = cached.messages
   }
