@@ -1853,8 +1853,13 @@ export async function handleChat(rawParams, res, req) {
       }
 
       // assistant/result 메시지의 usage 필드에서 토큰 누적 + SSE 발행
-      // SDK는 prompt caching을 자동 적용 (1h ttl 기본). cache_* 필드를 끝까지 전파해
-      // 클라우드 측에서 hit ratio 측정 가능하게 한다.
+      // prompt caching 은 turn-manager 가 직접 건다(SDK 미사용 — llm-wrapper 헤더 참조).
+      // TTL 은 **섞여 있다**: system 블록 1h · 메시지 꼬리 5m(`applyPromptCacheControl`).
+      // cache_* 필드를 끝까지 전파해 클라우드가 hit ratio 를 측정할 수 있게 한다.
+      //
+      // ⚠️ 아직 `usage.cache_creation.{ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}`
+      // 내역은 전파하지 않는다 — cloud 는 그 탓에 단일 배수로 근사한다
+      // (daiops `usage-tracker.calculateTokenCost` 주석). 다음 릴리스에서 두 필드를 싣는다.
       const usage = message.message?.usage
       if (usage) {
         const inputTokens = usage.input_tokens ?? 0
