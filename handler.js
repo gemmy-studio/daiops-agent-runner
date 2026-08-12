@@ -1857,9 +1857,9 @@ export async function handleChat(rawParams, res, req) {
       // TTL 은 **섞여 있다**: system 블록 1h · 메시지 꼬리 5m(`applyPromptCacheControl`).
       // cache_* 필드를 끝까지 전파해 클라우드가 hit ratio 를 측정할 수 있게 한다.
       //
-      // ⚠️ 아직 `usage.cache_creation.{ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}`
-      // 내역은 전파하지 않는다 — cloud 는 그 탓에 단일 배수로 근사한다
-      // (daiops `usage-tracker.calculateTokenCost` 주석). 다음 릴리스에서 두 필드를 싣는다.
+      // 쓰기 토큰은 TTL 별 단가가 다르므로(5m 1.25배 · 1h 2.0배) 합계만으로는 원가를 낼 수 없다.
+      // `cache_creation` 내역을 그대로 실어 보내 cloud 가 각각 곱하게 한다(0.25.0~).
+      // 구버전 cloud 는 모르는 필드를 무시하므로 배포 순서에 의존하지 않는다.
       const usage = message.message?.usage
       if (usage) {
         const inputTokens = usage.input_tokens ?? 0
@@ -1874,6 +1874,7 @@ export async function handleChat(rawParams, res, req) {
             output_tokens: outputTokens,
             cache_read_input_tokens: cacheReadTokens,
             cache_creation_input_tokens: cacheCreationTokens,
+            ...(usage.cache_creation ? { cache_creation: usage.cache_creation } : {}),
           })
         }
       }

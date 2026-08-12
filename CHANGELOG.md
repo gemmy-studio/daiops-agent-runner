@@ -2,6 +2,23 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.25.0] — 2026-08-13
+
+### Added
+- **`usage.cache_creation` TTL 내역을 cloud 로 전파한다** (`turn-manager` → SSE `usage`).
+  - 배경: 0.24.0 이 캐시 TTL 을 섞었다(system 1h · 메시지 꼬리 5m). 그런데 러너는
+    `cache_creation_input_tokens` **합계만** 읽어 넘겼고, 쓰기 단가는 5m 1.25배 · 1h 2.0배로
+    다르다 — 합계만으로는 cloud 가 원가를 낼 수 없다. cloud 는 그동안 단일 배수로 근사했다
+    (daiops `usage-tracker.calculateTokenCost`).
+  - Anthropic 은 `usage.cache_creation.{ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}`
+    로 내역을 준다(두 값의 합 = `cache_creation_input_tokens`). **필드명을 그대로** 통과시킨다 —
+    이름을 바꾸면 공식 문서와 대조가 안 되고 사본이 하나 더 는다.
+  - `message_delta` 가 내역을 보내면 **통째로 교체**한다. 필드별 부분 갱신은 delta 가 한쪽만
+    보낼 때 합이 어긋난다.
+  - 내역이 없는 응답에서는 필드를 만들지 않는다 — 구 응답·구 cloud 양방향 호환.
+  - `schemaVersion` 유지(2). CONTRACT §4 가 "호환 변경(필드 추가 등)은 schemaVersion 유지"로
+    규정한다 — SSE **이벤트 종류**가 아니라 기존 이벤트의 필드 추가다.
+
 ## [0.24.0] — 2026-08-13
 
 ### Changed

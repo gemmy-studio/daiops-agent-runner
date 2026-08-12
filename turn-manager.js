@@ -290,7 +290,13 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
  *   output_tokens: number,
  *   cache_read_input_tokens?: number,
  *   cache_creation_input_tokens?: number,
+ *   cache_creation?: { ephemeral_5m_input_tokens?: number, ephemeral_1h_input_tokens?: number },
  * }} Usage
+ *
+ * `cache_creation` 은 쓰기 토큰의 **TTL 별 내역**이다(두 값의 합 = `cache_creation_input_tokens`).
+ * daiops 는 TTL 을 섞어 쓰므로(system 1h · 메시지 꼬리 5m — `applyPromptCacheControl`) 이 내역이
+ * 없으면 cloud 가 단가를 정확히 계산할 수 없다. 쓰기 단가가 5m 1.25배 · 1h 2.0배로 다르기 때문이다.
+ * Anthropic 응답의 필드명을 **그대로** 통과시킨다 — 이름을 바꾸면 문서와 대조가 안 된다.
  *
  * @typedef {'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | 'refusal' | 'model_context_window_exceeded'} AnthropicStopReason
  *
@@ -760,6 +766,7 @@ export async function* accumulateTurn(events, opts = {}) {
           output_tokens: u.output_tokens ?? 0,
           ...(u.cache_read_input_tokens !== undefined ? { cache_read_input_tokens: u.cache_read_input_tokens } : {}),
           ...(u.cache_creation_input_tokens !== undefined ? { cache_creation_input_tokens: u.cache_creation_input_tokens } : {}),
+          ...(u.cache_creation ? { cache_creation: u.cache_creation } : {}),
         }
       }
       continue
@@ -860,6 +867,9 @@ export async function* accumulateTurn(events, opts = {}) {
         if (typeof dU.input_tokens === 'number') usage.input_tokens = dU.input_tokens
         if (typeof dU.cache_read_input_tokens === 'number') usage.cache_read_input_tokens = dU.cache_read_input_tokens
         if (typeof dU.cache_creation_input_tokens === 'number') usage.cache_creation_input_tokens = dU.cache_creation_input_tokens
+        // 내역은 통째로 교체한다 — 두 값의 합이 cache_creation_input_tokens 와 맞아야 하므로
+        // 필드별로 부분 갱신하면 delta 가 한쪽만 보낼 때 합이 어긋난다.
+        if (dU.cache_creation) usage.cache_creation = dU.cache_creation
       }
       continue
     }

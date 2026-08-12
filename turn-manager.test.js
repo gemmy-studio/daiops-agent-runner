@@ -116,6 +116,63 @@ describe('parseAnthropicSSE', () => {
 
 // ── accumulateTurn ────────────────────────────────────────────────────
 
+describe('accumulateTurn — cache_creation TTL 내역 통과', () => {
+  // daiops 는 TTL 을 섞어 쓴다(system 1h · 꼬리 5m). 쓰기 단가가 5m 1.25배 · 1h 2.0배로
+  // 다르므로 합계(cache_creation_input_tokens)만으로는 cloud 가 원가를 낼 수 없다.
+  // Anthropic 필드명을 그대로 통과시킨다 — 이름을 바꾸면 문서와 대조가 안 된다.
+  const CACHE_CREATION = { ephemeral_5m_input_tokens: 148, ephemeral_1h_input_tokens: 100 }
+  async function* iter(events) { for (const e of events) yield e }
+
+  it('message_start 의 내역을 그대로 싣는다', async () => {
+    const events = [
+      {
+        event: 'message_start',
+        data: { message: { usage: { input_tokens: 10, output_tokens: 0, cache_creation_input_tokens: 248, cache_creation: CACHE_CREATION } } },
+      },
+      { event: 'message_delta', data: { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } } },
+      { event: 'message_stop', data: {} },
+    ]
+    const out = []
+    for await (const o of accumulateTurn(iter(events))) out.push(o)
+    const last = out[out.length - 1]
+    assert.deepEqual(last.usage.cache_creation, CACHE_CREATION)
+    // 합이 맞는지 — 두 값의 합 = cache_creation_input_tokens (Anthropic 규격)
+    assert.equal(
+      CACHE_CREATION.ephemeral_5m_input_tokens + CACHE_CREATION.ephemeral_1h_input_tokens,
+      last.usage.cache_creation_input_tokens
+    )
+  })
+
+  it('message_delta 가 내역을 보내면 통째로 교체한다', async () => {
+    const updated = { ephemeral_5m_input_tokens: 200, ephemeral_1h_input_tokens: 0 }
+    const events = [
+      {
+        event: 'message_start',
+        data: { message: { usage: { input_tokens: 10, output_tokens: 0, cache_creation: CACHE_CREATION } } },
+      },
+      {
+        event: 'message_delta',
+        data: { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5, cache_creation_input_tokens: 200, cache_creation: updated } },
+      },
+      { event: 'message_stop', data: {} },
+    ]
+    const out = []
+    for await (const o of accumulateTurn(iter(events))) out.push(o)
+    assert.deepEqual(out[out.length - 1].usage.cache_creation, updated)
+  })
+
+  it('내역이 없으면 필드를 만들지 않는다 (구 응답 호환)', async () => {
+    const events = [
+      { event: 'message_start', data: { message: { usage: { input_tokens: 10, output_tokens: 0, cache_creation_input_tokens: 248 } } } },
+      { event: 'message_delta', data: { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } } },
+      { event: 'message_stop', data: {} },
+    ]
+    const out = []
+    for await (const o of accumulateTurn(iter(events))) out.push(o)
+    assert.equal(out[out.length - 1].usage.cache_creation, undefined)
+  })
+})
+
 describe('accumulateTurn', () => {
   /** Anthropic SSE 시퀀스 헬퍼: assistant text + tool_use 패턴. */
   function buildEvents(opts) {
