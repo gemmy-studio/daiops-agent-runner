@@ -2,6 +2,31 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.26.0] — 2026-08-13
+
+### Added
+- **cloud 가 지목한 진입점 외의 MCP 도구를 `defer_loading` 으로 내린다** (A-1 도구 노출 축소).
+  - 배경: 챗 턴 입력의 **56% 가 도구 정의**인데(32,244 토큰), 3개월 창에서 daiops 브릿지 도구
+    26종 중 실제로 불린 것은 `skill_view`(126)·`wiki_search`(6)·`wiki_save`/`wiki_delete`(각 1)
+    뿐이고 나머지는 전부 0회다. 스키마를 매 턴 보내는 대신 내려두면 모델이 필요할 때
+    `tool_search` 서버 도구로 찾아 쓴다 — **능력은 남고 토큰만 사라진다.**
+  - 요청 파라미터 `tool_exposure: { alwaysLoadTools: string[] }`. **이름 목록만** 받는다 —
+    판정은 cloud 한 곳이다(ADR21). 이 경로는 고객이 등록한 외부 MCP 서버(ADR51)도 지나므로
+    서버가 자기 노출 등급을 주장하게 두지 않는다(같은 이유로 `mcp-client.listTools` 가
+    `_meta` 를 버리는 현재 동작도 유지).
+  - `applyToolExposure` 가 머지 직후 적용한다. 목록에 없는 **MCP 도구**만 대상 —
+    빌트인(`Read`·`Bash`)은 지시문이 절대 경로를 주며 곧바로 부르므로 내리면 손해다.
+  - 지연된 도구가 하나라도 있으면 `tool_search_tool_regex_20251119` 서버 도구를 함께 싣는다.
+    **안 실으면 지연된 도구는 모델에게 존재하지 않는 것과 같다.**
+    ⚠️ `name` 은 `'tool_search_tool_regex'` 고정 — 임의 이름은 400.
+  - `tool_search_tool_result` 를 보존 블록에 추가. 안 하면 그 턴의 assistant content 가 깨져
+    다음 턴 요청이 400 난다.
+  - 전량 지연이 되면 표시를 걷어낸다(Anthropic 이 `defer_loading=false` 도구를 최소 하나 요구).
+  - **미지정이면 전량 로드(현행 동작)** — 구버전 cloud 와의 배포 순서에 의존하지 않는다.
+  - `schemaVersion` 유지(2). 기존 요청에 선택 필드를 더한 호환 변경이다(CONTRACT §4).
+  - 안전성은 오프라인 궤적 재생으로 검증했다 — 실제 질문 41건 × 4구성에서
+    "도구 없이 답해버림" **0건**(대조 반복은 1건).
+
 ## [0.25.0] — 2026-08-13
 
 ### Added
