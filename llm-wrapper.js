@@ -142,7 +142,7 @@ export const SDK_BUILTIN_TOOLS = BUILTIN_TOOL_NAMES
  *  - 매 yield된 SDK 호환 메시지마다 ctx.emitLLMEvent(LLMEvent)로 변환 emit.
  *  - ctx.signal.aborted 또는 sdkInput.options.abortController.signal.aborted 시 즉시 종료.
  *
- * @param {{ prompt?: string, messages?: Array<{role:string, content: string | Array<unknown>}>, options: Object & { model?: string, systemPrompt?: string, allowedTools?: string[], tools?: Array<{name:string,description?:string,input_schema?:object}>, cwd?: string, maxTurns?: number, canUseTool?: Function, mcpServers?: Array<any>, abortController?: AbortController, thinking?: any, cacheControl?: any } }} sdkInput
+ * @param {{ prompt?: string, messages?: Array<{role:string, content: string | Array<unknown>}>, options: Object & { model?: string, systemPrompt?: string, allowedTools?: string[], tools?: Array<{name:string,description?:string,input_schema?:object}>, cwd?: string, maxTurns?: number, canUseTool?: Function, mcpServers?: Array<any>, abortController?: AbortController, thinking?: any, cacheControl?: any, toolExposure?: {alwaysLoadTools: string[]} } }} sdkInput
  *   messages 지정 시 role 분리 대화 시드로 사용(내부 태그 프라이밍 제거). 미지정 시 prompt 단일 user 폴백.
  * @param {{
  *   signal?: AbortSignal,
@@ -329,6 +329,8 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
       thinking: opts.thinking,
       cacheControl: opts.cacheControl,
       mcpServers: opts.mcpServers,
+      // A-1 — turn-manager가 이 목록에 없는 MCP 도구에 defer_loading을 붙인다. undefined면 전량 로드.
+      toolExposure: opts.toolExposure,
       webTools,
       // 구조화 출력: 존재 시 turn-manager가 submit_structured_response로 강제 + 검증 통과 시 조기 종료.
       structuredToolName: responseSchema ? STRUCTURED_TOOL_NAME : undefined,

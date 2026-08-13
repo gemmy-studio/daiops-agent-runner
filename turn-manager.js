@@ -218,12 +218,26 @@ export function pruneOldToolResults(
 const WEB_SEARCH_SERVER_TOOL = Object.freeze({ type: 'web_search_20250305', name: 'web_search' })
 const WEB_FETCH_SERVER_TOOL = Object.freeze({ type: 'web_fetch_20250910', name: 'web_fetch' })
 
+// 도구 검색 서버 도구(A-1) — `defer_loading` 으로 내린 도구를 모델이 찾는 수단.
+// 서버사이드라 왕복이 늘지 않는다: `server_tool_use → tool_search_tool_result → tool_use` 가
+// **한 응답 안에서** 끝난다(실측).
+//
+// ⚠️ `name` 은 임의로 정할 수 없다 — `'tool_search_tool_regex'` 가 아니면 400 이다
+// ("tools.0.tool_search_tool_regex_20251119.name: Input should be 'tool_search_tool_regex'").
+// 베타 헤더는 필요 없다(Claude API 직접 호출 기준. Vertex·Bedrock 은 다를 수 있다).
+const TOOL_SEARCH_SERVER_TOOL = Object.freeze({
+  type: 'tool_search_tool_regex_20251119',
+  name: 'tool_search_tool_regex',
+})
+
 // server_tool_use 결과 블록 — accumulateTurn이 final content에서 버리지 않고 보존해야
 // 멀티턴 메시지 히스토리가 유효하고 검색 결과가 노출된다.
 const SERVER_RESULT_BLOCK_TYPES = new Set([
   'web_search_tool_result',
   'web_fetch_tool_result',
   'code_execution_tool_result',
+  // 지연 도구 검색 결과. 보존하지 않으면 그 턴의 assistant content 가 깨져 다음 턴 요청이 400 난다.
+  'tool_search_tool_result',
 ])
 
 // ── 모델별 max_tokens 테이블 ────────────────────────────────────────────────
@@ -968,6 +982,9 @@ export function buildAnthropicRequest(args) {
   if (args.tools && args.tools.length > 0) tools.push(...args.tools)
   if (args.webTools?.search === 'server') tools.push(WEB_SEARCH_SERVER_TOOL)
   if (args.webTools?.fetch === 'server') tools.push(WEB_FETCH_SERVER_TOOL)
+  // 지연된 도구가 하나라도 있으면 모델이 그것을 찾을 수단을 함께 준다(A-1).
+  // 안 주면 지연된 도구는 **존재하지 않는 것과 같아진다.**
+  if (tools.some((t) => t?.defer_loading)) tools.push(TOOL_SEARCH_SERVER_TOOL)
   if (tools.length > 0) body.tools = tools
 
   // ── 구조화 출력(AGENT-API-2): 특정 도구 강제 호출 ───────────────────
@@ -1206,7 +1223,9 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
     })
     mcpRegistryOwned = true
   }
-  const effectiveTools = mergeTools(input.options.tools, mcpRegistry?.tools)
+  const merged = mergeTools(input.options.tools, mcpRegistry?.tools)
+  const exposed = applyToolExposure(merged, input.options.toolExposure)
+  const effectiveTools = exposed.tools
   const effectiveRunTool = mcpRegistry
     ? async (name, args, runCtx) => {
         if (isMcpToolName(name)) return mcpRegistry.runTool(name, args, runCtx)
@@ -1613,6 +1632,57 @@ function mergeTools(userTools, mcpTools) {
   if (!userTools || userTools.length === 0) return mcpTools
   const seen = new Set(userTools.map((t) => t.name))
   return [...userTools, ...mcpTools.filter((t) => !seen.has(t.name))]
+}
+
+/** `mcp__<server>__<tool>` 에서 맨 이름만 — cloud 는 서버 접두어 없이 이름을 준다. */
+function bareToolName(name) {
+  if (!isMcpToolName(name)) return name
+  const at = name.indexOf('__', 5)
+  return name.slice(at + 2)
+}
+
+/**
+ * 도구 노출 정책(A-1) 적용 — `alwaysLoadTools` 에 없는 **MCP 도구**에 `defer_loading` 을 붙인다.
+ *
+ * 지연된 도구는 스키마가 프리픽스에 실리지 않고, 모델이 필요할 때 `tool_search` 서버 도구로
+ * 찾아 쓴다. 즉 **능력은 남고 토큰만 사라진다**(실측: 21종 전량 로드 11,407토큰 →
+ * 2종 로드 + 19종 지연 1,904토큰).
+ *
+ * ## 러너는 판정하지 않는다 (ADR21)
+ *
+ * 여기서 하는 일은 집합 연산뿐이다. "왜 이 도구가 진입점인가"는 cloud
+ * (`integrations/tool-exposure.ts`)가 정하고 이름 목록만 보낸다. 이 경계를 지키는 이유는
+ * **고객이 등록한 외부 MCP 서버(ADR51)도 이 경로를 지나기 때문**이다 — 서버가 자기 노출
+ * 등급을 스스로 주장하게 두면 안 된다(그래서 `mcp-client.js`의 `listTools`가 `_meta`를
+ * 버리는 현재 동작도 그대로 둔다).
+ *
+ * ## 빌트인은 건드리지 않는다
+ *
+ * `Read`·`Bash` 같은 러너 빌트인은 지연 대상이 아니다. 스키마가 작고, 지시문이 절대 경로를
+ * 주며 곧바로 부르게 되어 있어 지연시키면 매 턴 검색이 붙는다.
+ *
+ * @param {Array<any>} tools 머지된 전체 도구
+ * @param {{alwaysLoadTools?: string[]}|undefined} exposure
+ * @returns {{tools: Array<any>, deferred: number}}
+ */
+export function applyToolExposure(tools, exposure) {
+  const always = Array.isArray(exposure?.alwaysLoadTools) ? exposure.alwaysLoadTools : null
+  if (!always || !tools || tools.length === 0) return { tools, deferred: 0 }
+
+  const allow = new Set(always)
+  const marked = tools.map((t) =>
+    isMcpToolName(t?.name) && !allow.has(bareToolName(t.name)) && !allow.has(t.name)
+      ? { ...t, defer_loading: true }
+      : t,
+  )
+  const deferred = marked.filter((t) => t.defer_loading).length
+
+  // 전부 지연이면 Anthropic 이 400 을 준다("At least one tool must have defer_loading=false").
+  // cloud 에도 같은 가드가 있지만 여기서도 막는다 — 목록이 갈리는 경우(외부 MCP 서버가
+  // 이름을 바꿨다든지)에도 턴이 죽지 않아야 한다. 표시를 걷어내면 현행 동작(전량 로드)이다.
+  if (deferred === marked.length) return { tools, deferred: 0 }
+
+  return { tools: marked, deferred }
 }
 
 /** @param {Response} res */

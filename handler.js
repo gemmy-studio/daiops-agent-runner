@@ -1035,6 +1035,27 @@ export function parseThinkingParam(raw) {
 }
 
 /**
+ * cloud가 보낸 `tool_exposure` 파라미터를 정규화한다 (A-1 — 도구 노출 정책).
+ *
+ * **미지정·빈 목록이면 undefined를 돌려준다** — `applyToolExposure`가 undefined를
+ * "정책 없음 = 전량 로드"로 해석하므로 이 필드를 보내지 않는 구버전 cloud와 동작이 같다.
+ *
+ * 빈 배열을 undefined로 떨어뜨리는 것이 중요하다. 그대로 넘기면 **모든 MCP 도구가 지연 대상**이
+ * 되고, `applyToolExposure`의 전량-지연 가드가 표시를 걷어내 결국 현행 동작으로 돌아오긴 하지만
+ * 의도가 불분명해진다. "끄려면 필드를 빼거나 빈 목록을 보낸다"를 한 자리에서 확정한다.
+ *
+ * @param {unknown} raw
+ * @returns {{ alwaysLoadTools: string[] } | undefined}
+ */
+export function parseToolExposureParam(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const list = /** @type {{ alwaysLoadTools?: unknown }} */ (raw).alwaysLoadTools
+  if (!Array.isArray(list)) return undefined
+  const names = list.filter((n) => typeof n === 'string' && n.length > 0)
+  return names.length > 0 ? { alwaysLoadTools: names } : undefined
+}
+
+/**
  * POST /v1/chat 핸들러.
  * Anthropic API 스트림(raw HTTP, turn-manager 경유)을 호출하고 결과를 SSE로 스트리밍합니다.
  * resume_session_id + from_seq 옵션 시 resume 모드(T5).
@@ -1085,6 +1106,14 @@ export async function handleChat(rawParams, res, req) {
     memory_ops: rawParams.memory_ops,
     /** adaptive thinking effort 오버라이드 (E-1). 미지정이면 undefined = 러너 기본 medium. */
     thinking: parseThinkingParam(rawParams.thinking),
+    /**
+     * 도구 노출 정책(A-1). `{ alwaysLoadTools: string[] }` — 여기 없는 **MCP 도구**를
+     * `defer_loading`으로 내린다. **미지정이면 undefined = 전량 로드(현행 동작)** 이라
+     * 구버전 cloud와의 배포 순서에 의존하지 않는다.
+     *
+     * 이름 목록 외에는 아무것도 받지 않는다 — 판정은 cloud 한 곳이다(ADR21).
+     */
+    tool_exposure: parseToolExposureParam(rawParams.tool_exposure),
     /** 사용자가 명시적으로 plan을 요구한 경우만 true. 메시지 텍스트 분류는 더 이상 사용하지 않음. */
     force_plan_mode: rawParams.force_plan_mode === true,
     session_id: rawParams.session_id ? String(rawParams.session_id) : undefined,
@@ -1612,6 +1641,9 @@ export async function handleChat(rawParams, res, req) {
       // E-1 — llm-wrapper가 opts.thinking을 turn-manager로 forward하고, buildThinkingOptions가
       // output_config.effort로 변환한다. undefined면 기본 'medium'(현행 동작).
       thinking: params.thinking,
+      // A-1 — turn-manager `applyToolExposure`가 이 목록에 없는 MCP 도구에 defer_loading을 붙인다.
+      // undefined면 전량 로드(현행 동작).
+      toolExposure: params.tool_exposure,
       // 개인정보 가명화 범위(content-guard). cloud가 워크스페이스 설정을 policy 봉투에 실어 보낸다.
       // 미지정(구버전 cloud)이면 러너 기본값 4종 — 그래서 배포 순서에 의존하지 않는다.
       piiTypes: params.policy?.piiTypes,
