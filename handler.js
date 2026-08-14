@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './tools/request-secret.js'
-import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX } from './tools/remember.js'
+import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX, isRememberFailure } from './tools/remember.js'
 import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps } from './tools/memory-edit.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { postTerminalIngest } from './ingest-client.js'
@@ -1484,7 +1484,15 @@ export async function handleChat(rawParams, res, req) {
           is_error: true,
         }
       }
-      if (result.kind === 'deny' || result.rememberAction === 'failed') {
+      // 정책 거부 — 재시도해도 결과가 같으므로 "다시 시도"를 안내하지 않는다(턴 낭비 차단).
+      if (result.rememberAction === 'blocked') {
+        return {
+          content:
+            '이 대화 경로에서는 규칙을 영구 저장할 수 없어요. 사람이 직접 대화하는 채널에서 저장하거나, 사용자에게 설정 메뉴에서 등록하도록 안내하세요.',
+          is_error: true,
+        }
+      }
+      if (result.kind === 'deny' || isRememberFailure(result.rememberAction)) {
         return { content: '기억 저장에 실패했어요. 잠시 후 다시 시도하세요.', is_error: true }
       }
       if (result.rememberAction === 'duplicate') {

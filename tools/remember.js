@@ -37,6 +37,31 @@ export const REMEMBER_TOOL = Object.freeze({
 })
 
 /**
+ * cloud가 `POST /v1/remember/:id`로 보낼 수 있는 처리 결과 어휘.
+ *
+ * **cloud `daytona/agent-runner-approval.ts`의 `RememberAction`과 짝이다.** 값을 바꾸면 양쪽을
+ * 함께 고쳐야 한다 — 러너가 이 문자열로 LLM 문구를 분기하기 때문. 인라인 배열로 두면 server.js와
+ * onRemember에 사본이 흩어져 한쪽만 고치는 사고가 난다(QA #31·#64와 같은 실패 모드).
+ *
+ * `blocked`(정책 거부)는 `failed`(일시 장애)와 **반드시 구분**한다 — 구분하지 않으면 러너가
+ * "잠시 후 다시 시도하세요"로 안내해 LLM이 남은 턴을 재시도로 태운다. 정책은 재시도해도 같다.
+ */
+export const REMEMBER_ACTIONS = Object.freeze(['saved', 'duplicate', 'failed', 'blocked'])
+
+/** 실패류 — deny로 매핑되는 결과. duplicate는 "정상 처리됐고 결과가 이것"이라 실패가 아니다. */
+export const REMEMBER_FAILURES = Object.freeze(['failed', 'blocked'])
+
+/** cloud가 보낸 action이 계약상 유효한가. */
+export function isRememberAction(action) {
+  return REMEMBER_ACTIONS.includes(action)
+}
+
+/** 이 action을 deny(실패)로 다룰지. */
+export function isRememberFailure(action) {
+  return REMEMBER_FAILURES.includes(action)
+}
+
+/**
  * 기억 본문 유효성 검사 — 비어있지 않고 최대 길이 이내.
  * @param {unknown} content
  * @returns {boolean}

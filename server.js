@@ -16,6 +16,7 @@ import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAll
 import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
 import { EgressObserver } from './proxy/egress-observer.js'
 import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure } from './tools/memory-edit.js'
+import { REMEMBER_ACTIONS, isRememberAction, isRememberFailure } from './tools/remember.js'
 import { collectRuntimeProbe } from './runtime-probe.js'
 import { sweepOrphanedBuffers } from './event-buffer.js'
 import { admissionStats } from './tool-cpu-lane.js'
@@ -369,13 +370,13 @@ const server = createServer(async (req, res) => {
       const raw = await parseBody(req)
       const body = raw ? JSON.parse(raw) : {}
       const action = String(body.action ?? 'saved')
-      if (action !== 'saved' && action !== 'duplicate' && action !== 'failed') {
-        sendJson(res, 400, { error: 'action must be saved|duplicate|failed' })
+      if (!isRememberAction(action)) {
+        sendJson(res, 400, { error: `action must be ${REMEMBER_ACTIONS.join('|')}` })
         return
       }
-      // failed → kind:'deny'로 매핑, 나머지는 allow_once. rememberAction으로 onRemember가 분기.
-      const decision = action === 'failed'
-        ? { kind: 'deny', rememberAction: 'failed' }
+      // 실패류(failed·blocked) → kind:'deny', 나머지는 allow_once. rememberAction으로 onRemember가 분기.
+      const decision = isRememberFailure(action)
+        ? { kind: 'deny', rememberAction: action }
         : { kind: 'allow_once', rememberAction: action }
       const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
       const ok = resolveApproval(rememberId, decision, resolvedBy)
