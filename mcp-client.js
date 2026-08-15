@@ -37,6 +37,29 @@ const CLIENT_VERSION = (() => {
 const MAX_LIST_PAGES = 20
 
 /**
+ * 단일 JSON-RPC 응답 본문의 바이트 상한. 넘으면 **거절**한다(자르면 JSON이 깨진다).
+ *
+ * per-call 결과 상한(offload `MCP_RESULT_MAX_CHARS`, 기본 10만 자)보다 훨씬 위에 둔다 —
+ * 이건 컨텍스트 보호가 아니라 **OOM 방어**다. 정상 응답이 걸릴 자리가 아니고, 걸렸다면
+ * 상대 서버가 고장 났거나 악의적인 것이다.
+ */
+const MAX_RESPONSE_BYTES = (() => {
+  const v = Number(process.env.AGENT_RUNNER_MCP_MAX_RESPONSE_BYTES)
+  return Number.isFinite(v) && v > 0 ? v : 16 * 1024 * 1024
+})()
+
+/**
+ * 외부 서버가 준 도구 설명의 상한(chars). 넘으면 자르고 표시를 남긴다.
+ *
+ * 도구 설명은 **모델 프롬프트에 그대로 들어간다** — 크기를 상대가 정하는 텍스트가 매 턴 실린다는
+ * 뜻이라 토큰 비용이자 인젝션 표면이다. openclaude `MAX_MCP_DESCRIPTION_LENGTH = 2048`과 같은 값.
+ *
+ * daiops 는 A-1 `defer_loading` 덕에 노출 자체가 이미 좁다(진입점 지정 도구만 상시 로드).
+ * 그래도 그 진입점들과 `tool_search` 가 꺼내는 것은 남으므로 상한을 둔다.
+ */
+const MAX_TOOL_DESCRIPTION_CHARS = 2048
+
+/**
  * @typedef {Object} McpServerSpec
  * @property {string} name — 서버 식별자 (도구 프리픽스 'mcp__<name>__'에 사용)
  * @property {string} url — JSON-RPC 엔드포인트 URL
@@ -269,6 +292,71 @@ function assertSafeMcpUrl(rawUrl, opts = {}) {
   if (loopback && !opts.allowLoopback) {
     throw new Error(`createMcpHttpClient: blocked URL host '${u.hostname}' (loopback not allowed)`)
   }
+
+  // 사설 대역 — MCP 규격 Security Best Practices(SSRF)가 클라이언트에 **SHOULD**로 요구한다:
+  // 10/8 · 172.16/12 · 192.168/16 · fc00::/7 · fe80::/10. 종전 이 가드는 메타데이터와 loopback만
+  // 봐서 `https://10.0.0.5/mcp` 가 그대로 통과했다(cloud 쪽 `validateExternalMcpServers` 가 IP
+  // literal 을 통째로 거절해 등록 경로는 막혀 있었지만, 러너는 2차 방어라 자기 몫을 해야 한다).
+  //
+  // ⚠️ **남는 구멍: DNS 로 사설 IP 를 가리키는 도메인.** 규격도 TOCTOU 로 명시하는 경우이고
+  // (검증 시점엔 공인 IP, 요청 시점엔 내부 IP), 호스트명만 보는 이 검사로는 못 잡는다.
+  // 제대로 막으려면 resolve 결과를 검사하고 그 IP 로 핀해야 하는데 `fetch` 로는 핀할 수 없다.
+  // 규격이 권하는 대안은 egress 프록시이고, daiops 에는 있으나 **MCP 아웃바운드가 우회한다**
+  // (ADR 51 §0). 그 배선이 이 구멍의 정본 해법이다.
+  if (isPrivateIpLiteral(host)) {
+    throw new Error(`createMcpHttpClient: blocked URL host '${u.hostname}' (private network not allowed)`)
+  }
+}
+
+/**
+ * 호스트 문자열이 **사설/예약 대역의 IP 리터럴**인지. 도메인이면 false(위 TOCTOU 주석 참조).
+ *
+ * 규격 노트가 "IP 검증을 손으로 만들지 말라(8진수·16진수·IPv4-mapped IPv6 같은 인코딩 트릭)"고
+ * 경고하므로, **모호한 표기를 파싱해 판정하려 들지 않고 거절**한다 — 정상적인 MCP 서버 주소는
+ * 도메인이고(cloud 검증이 IP 리터럴을 아예 금지한다), 8진수 IP 를 쓸 이유가 없다.
+ *
+ * @param {string} host — 대괄호가 벗겨진 lowercase 호스트
+ */
+function isPrivateIpLiteral(host) {
+  // IPv4 점 4옥텟 — 각 옥텟이 10진수이고 선행 0이 없을 때만 '정상 표기'로 본다.
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (v4) {
+    const parts = v4.slice(1)
+    // 선행 0(`010.0.0.1` = 8진수 해석 여지)이나 범위 초과는 판정하지 않고 막는다.
+    if (parts.some((p) => (p.length > 1 && p[0] === '0') || Number(p) > 255)) return true
+    const [a, b] = parts.map(Number)
+    if (a === 10) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && b === 168) return true
+    if (a === 100 && b >= 64 && b <= 127) return true // CGNAT 100.64/10
+    return false
+  }
+  // 숫자·점만으로 이뤄졌는데 위 형태가 아니면 비정상 IPv4 표기 — 막는다.
+  //
+  // ℹ️ 실제로는 여기 거의 도달하지 않는다. WHATWG `URL`이 호스트를 **먼저 정규화**하기 때문이다
+  // (실측: `010.0.0.1`→`8.0.0.1`, `0177.0.0.1`·`2130706433`·`0x7f000001`→`127.0.0.1`).
+  // 즉 규격이 경고한 인코딩 트릭은 파서 단계에서 이미 표준형이 되어 위 점4옥텟 분기와
+  // loopback 분기가 잡는다. 이 줄은 파서가 통과시키는 표기가 생길 경우의 나머지 방어다.
+  if (/^[0-9.]+$/.test(host)) return true
+
+  // IPv6 — ULA(fc00::/7)와 link-local(fe80::/10).
+  if (host.includes(':')) {
+    if (/^f[cd][0-9a-f]{0,2}:/.test(host)) return true
+    if (/^fe[89ab][0-9a-f]?:/.test(host)) return true
+
+    // IPv4-mapped(`::ffff:…`). ⚠️ **점4옥텟으로 들어와도 URL 파서가 16진수로 압축한다** —
+    // `::ffff:10.0.0.1` → `::ffff:a00:1`. 점 표기만 보던 초안이 이걸 놓쳤고 테스트가 잡았다.
+    const mappedDotted = host.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
+    if (mappedDotted) return isPrivateIpLiteral(mappedDotted[1])
+    const mappedHex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+    if (mappedHex) {
+      const hi = parseInt(mappedHex[1], 16)
+      const lo = parseInt(mappedHex[2], 16)
+      const dotted = `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`
+      return isPrivateIpLiteral(dotted)
+    }
+  }
+  return false
 }
 
 /**
@@ -380,8 +468,20 @@ export function createMcpHttpClient(spec, ctx = {}) {
         // Streamable HTTP — 응답이 SSE. data: 라인의 JSON-RPC 메시지 중 이 요청 id에 대응하는 것을 추출.
         payload = await readJsonRpcFromSse(res.body, id, spec.name, method)
       } else {
+        // **바이트 상한을 걸고 읽는다.** `res.json()`은 본문을 통째로 메모리에 올리므로 상대가
+        // 보내는 만큼 받는다 — 러너는 워크스페이스가 공유하는 **장수명 프로세스**라 OOM 하나가
+        // 슬랙·cron·API 전부를 끊는다(CLI 클라이언트는 자기 세션만 죽는다).
+        //
+        // ⚠️ 공식 SDK(`@modelcontextprotocol/sdk` v1.29.0 `client/streamableHttp.js`)도 상한 없이
+        // `await response.json()`을 한다. 즉 이건 레퍼런스 따라잡기가 아니라 **실행 모델이 달라서
+        // 넘어서는 것**이다.
+        //
+        // 잘라서 파싱할 수는 없으므로(JSON 이 깨진다) **거절**한다. 잘린 JSON 을 억지로 살리는
+        // 것보다 "너무 크다"가 정직하고, per-call 상한(offload)이 잡는 크기보다 훨씬 위쪽이라
+        // 정상 응답이 여기 걸릴 일은 없다.
+        const raw = await readBodyWithLimit(res, MAX_RESPONSE_BYTES, spec.name, method)
         try {
-          payload = await res.json()
+          payload = JSON.parse(raw)
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           throw new Error(`mcp-client(${spec.name}) ${method}: invalid JSON response: ${maskTokensInText(msg)}`)
@@ -440,7 +540,7 @@ export function createMcpHttpClient(spec, ctx = {}) {
         const annotations = normalizeAnnotations(t?.annotations)
         all.push({
           name,
-          description: typeof t?.description === 'string' ? t.description : undefined,
+          description: capDescription(t?.description),
           inputSchema: t?.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : { type: 'object' },
           ...(annotations ? { annotations } : {}),
         })
@@ -623,6 +723,66 @@ async function safeReadText(res) {
   } catch {
     return ''
   }
+}
+
+/**
+ * 외부 서버가 준 도구 설명을 상한까지만 남긴다. 잘렸다는 표시를 붙이는 이유: 설명이 도중에
+ * 끊기면 모델이 그 도구의 계약을 잘못 읽을 수 있는데, **잘렸다는 사실을 알면 조심해서 쓴다.**
+ * @param {unknown} raw
+ * @returns {string | undefined}
+ */
+function capDescription(raw) {
+  if (typeof raw !== 'string') return undefined
+  if (raw.length <= MAX_TOOL_DESCRIPTION_CHARS) return raw
+  return `${raw.slice(0, MAX_TOOL_DESCRIPTION_CHARS)}… [truncated]`
+}
+
+/**
+ * 응답 본문을 **바이트 상한을 걸고** 문자열로 읽는다. 넘으면 즉시 스트림을 취소하고 던진다 —
+ * 다 받은 뒤 길이를 재면 이미 메모리를 먹은 뒤라 방어가 되지 않는다.
+ *
+ * `content-length`가 있으면 먼저 보고 **한 바이트도 받기 전에** 끊는다(가장 싼 경로).
+ * chunked 응답은 헤더가 없으므로 읽으면서 누적 길이를 센다.
+ *
+ * 본문이 없거나(`res.body === null`) 리더를 못 얻는 환경(테스트 더블 등)이면 `res.text()`로
+ * 폴백한다 — 상한을 못 걸지만, 상한 때문에 정상 경로가 죽는 것이 더 나쁘다.
+ *
+ * @param {Response} res
+ * @param {number} limitBytes
+ * @param {string} serverName
+ * @param {string} method
+ * @returns {Promise<string>}
+ */
+async function readBodyWithLimit(res, limitBytes, serverName, method) {
+  const tooLarge = (n) =>
+    new Error(
+      `mcp-client(${serverName}) ${method}: response too large (${n} bytes > limit ${limitBytes})`,
+    )
+
+  const declared = Number(res.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > limitBytes) {
+    // 스트림을 열어 두면 소켓이 남는다 — 명시적으로 버린다.
+    try { await res.body?.cancel() } catch { /* 이미 닫혔을 수 있다 */ }
+    throw tooLarge(declared)
+  }
+
+  const reader = res.body?.getReader?.()
+  if (!reader) return await res.text()
+
+  const decoder = new TextDecoder()
+  let out = ''
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value?.byteLength ?? 0
+    if (total > limitBytes) {
+      try { await reader.cancel() } catch { /* best-effort */ }
+      throw tooLarge(total)
+    }
+    out += decoder.decode(value, { stream: true })
+  }
+  return out + decoder.decode()
 }
 
 /**

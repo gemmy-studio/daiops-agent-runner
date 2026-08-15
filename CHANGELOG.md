@@ -2,6 +2,50 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.27.0] — 2026-08-16
+
+외부 MCP 하드닝 (ADR 51 §6 잔여). 전부 **크기·주소를 상대가 정하는 입력**에 대한 방어다.
+
+### Added
+- **개별 MCP 도구 결과 상한** — 기본 100,000자(`AGENT_RUNNER_MCP_MAX_RESULT_CHARS`).
+  - per-turn 예산(`enforceTurnResultBudget`)은 **합계** 기준이라 호출 하나가 그 아래면 통과한다.
+    기본 예산이 200K window × 0.3 × 4 = **240,000자**이므로 단일 MCP 응답 20만 자(≈5만 토큰)가
+    무사히 컨텍스트로 들어갔다. 외부 서버의 목록 조회는 실제로 그만큼 준다.
+  - 값은 openclaude `DEFAULT_MAX_MCP_OUTPUT_TOKENS = 25_000`(× 4자)와 같게 잡았다. opencode 는
+    더 좁다(`Truncate.MAX_BYTES = 50KB`, 전 도구 공통). **두 레퍼런스 다 per-call 상한이 있고
+    daiops 만 없었다.**
+  - 자르지 않고 **파일로 뺀다** — 잘라 버리면 모델이 뒷부분의 존재조차 모른다. 문구는 openclaude
+    를 따라 **에러 형태 + 페이지네이션·필터 도구 권유**로 했다. 종전 per-turn 안내("Read로
+    여세요")만 두면 모델이 20만 자 파일을 그대로 다시 읽으러 간다.
+  - 빌트인 도구에는 걸지 않는다(Bash 64KB·Read 5MB 자체 상한이 있고 출력 형태를 우리가 통제한다).
+- **오프로드 파일 보관 기간 정리** — 기본 7일(`AGENT_RUNNER_OFFLOAD_RETENTION_MS`).
+  - ⚠️ 종전에는 **정리가 아예 없었다.** `/workspace`(persistent volume)라 샌드박스 재시작에도
+    남아 무한히 쌓인다. per-call 상한이 오프로드 빈도를 올리므로 **둘은 함께 가야 한다.**
+  - 러너에 스케줄러가 없어 오프로드 경로에 얹었다(쿨다운 1시간). 파일이 안 생기면 청소할 것도
+    없으므로 결합이 자연스럽다. opencode `Truncate`(7일 + 시간당 cleanup)와 같은 정책.
+- **MCP 응답 본문 바이트 상한** — 기본 16MB(`AGENT_RUNNER_MCP_MAX_RESPONSE_BYTES`).
+  - `res.json()`은 본문을 통째로 메모리에 올려 상대가 보내는 만큼 받는다. `content-length`가
+    있으면 한 바이트도 읽기 전에, 없으면(chunked) 누적 길이로 끊는다.
+  - ⚠️ **공식 SDK(v1.29.0 `client/streamableHttp.js`)도 상한이 없다.** 레퍼런스 따라잡기가 아니라
+    실행 모델이 달라서 넘어서는 것이다 — CLI 는 OOM 이 자기 세션만 죽이지만, 러너는 워크스페이스가
+    공유하는 장수명 프로세스라 슬랙·cron·API 가 함께 끊긴다.
+- **외부 도구 설명 상한** — 2,048자(openclaude `MAX_MCP_DESCRIPTION_LENGTH`와 동일).
+  도구 설명은 모델 프롬프트에 그대로 실린다 = 토큰 비용이자 인젝션 표면이다. A-1 `defer_loading`
+  덕에 노출 자체는 이미 좁지만 진입점 도구와 `tool_search` 결과는 남는다.
+
+### Security
+- **SSRF: 사설 대역 차단** (`assertSafeMcpUrl`). 종전에는 메타데이터·loopback 만 봐서
+  `https://10.0.0.5/mcp` 가 통과했다. MCP 규격 Security Best Practices 가 클라이언트에 **SHOULD**
+  로 요구하는 목록을 따른다 — `10/8` · `172.16/12` · `192.168/16` · `100.64/10`(CGNAT) ·
+  `fc00::/7` · `fe80::/10` · IPv4-mapped IPv6.
+  - ⚠️ IPv4-mapped 는 **URL 파서가 16진수로 압축**한다(`::ffff:10.0.0.1` → `::ffff:a00:1`).
+    점 표기만 보던 초안이 이걸 놓쳤고 테스트가 잡았다.
+  - 규격이 경고한 인코딩 트릭(8진수·16진수·정수형)은 WHATWG `URL`이 먼저 표준형으로 정규화하므로
+    (`0x7f000001` → `127.0.0.1`) 기존 분기가 잡는다. 실측으로 확인했다.
+  - **남는 구멍: DNS 로 사설 IP 를 가리키는 도메인**(규격도 TOCTOU 로 명시). 호스트명만 보는
+    검사로는 못 잡고, `fetch` 로는 resolve 결과를 핀할 수 없다. 규격이 권하는 대안은 egress
+    프록시이고 daiops 에는 있으나 **MCP 아웃바운드가 우회한다**(ADR 51 §0) — 그 배선이 정본 해법.
+
 ## [0.26.0] — 2026-08-13
 
 ### Added

@@ -23,7 +23,7 @@
 
 import { createMcpToolRegistry, isMcpToolName } from './mcp-client.js'
 import { withJitteredRetry } from './retry-utils.js'
-import { enforceTurnResultBudget, evictImagesForBudget } from './offload.js'
+import { enforceTurnResultBudget, evictImagesForBudget, enforceMcpResultCap } from './offload.js'
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -1228,7 +1228,14 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   const effectiveTools = exposed.tools
   const effectiveRunTool = mcpRegistry
     ? async (name, args, runCtx) => {
-        if (isMcpToolName(name)) return mcpRegistry.runTool(name, args, runCtx)
+        if (isMcpToolName(name)) {
+          const result = await mcpRegistry.runTool(name, args, runCtx)
+          // **per-call 상한** — per-turn 예산(`enforceTurnResultBudget`)은 *합계* 기준이라
+          // 호출 하나가 그 아래면 통과한다(기본 24만 자 ≈ 6만 토큰). 크기를 상대가 정하는 것은
+          // MCP 응답뿐이므로 여기서만 건다. 상세 근거는 offload.js `MCP_RESULT_MAX_CHARS`.
+          await enforceMcpResultCap(result, { toolName: name })
+          return result
+        }
         if (userRunTool) return userRunTool(name, args, runCtx)
         throw new Error(`runAnthropicTurnManager: no runTool for non-MCP tool '${name}'`)
       }

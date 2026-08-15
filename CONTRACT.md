@@ -155,6 +155,9 @@ agent-runner 시작 시 메인 앱(deployer)이 주입해야 하는 env:
 | `BASH_ENV` | no | Bash 도구 자동 source (사용자 secrets) |
 | `AGENT_RUNNER_HOST` | no | bind host (기본 0.0.0.0) |
 | `DAIOPS_SANDBOX_WRITE_FREE` | no | 샌드박스 격리 신뢰 (ADR 21 §2.4). 기본 on — 자기 cwd 하위 Write/Edit·비-네트워크 Bash를 결재 없이 허용. 로컬 호스트 등 격리가 아닌 배포에서 파일작업까지 게이트하려면 `false`. |
+| `AGENT_RUNNER_MCP_MAX_RESULT_CHARS` | no | **개별 MCP 도구 결과 상한**(기본 100,000자 ≈ 25K토큰). 넘으면 원문을 오프로드 파일로 빼고 프리뷰 + 페이지네이션 안내만 남긴다. per-turn 예산(`AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS`)은 *합계* 기준이라 단일 호출을 못 잡는다. |
+| `AGENT_RUNNER_MCP_MAX_RESPONSE_BYTES` | no | **MCP 응답 본문 바이트 상한**(기본 16MB). 넘으면 스트림을 끊고 거절한다 — 자르면 JSON이 깨지므로 거절이 정직하다. 컨텍스트 보호가 아니라 **OOM 방어**다(러너는 워크스페이스 공유 프로세스). |
+| `AGENT_RUNNER_OFFLOAD_RETENTION_MS` | no | 오프로드 파일 보관 기간(기본 7일). 지난 파일은 다음 오프로드 때(시간당 1회) 정리한다. |
 
 ### 3-1. cloud LLM proxy로 나가는 헤더
 

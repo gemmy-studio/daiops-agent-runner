@@ -31,6 +31,42 @@ export const TURN_RESULT_BUDGET_CHARS = (() => {
 /** 이보다 작은 개별 결과는 오프로드 대상 아님(작은 것 여러 개를 파일로 빼도 이득 없음). */
 export const OFFLOAD_SINGLE_MIN_CHARS = 8_000
 
+/**
+ * **개별 MCP 도구 결과 상한(chars).** per-turn 예산(위)과 **다른 것을 막는다.**
+ *
+ * per-turn 예산은 *합계* 기준이라 호출 하나가 그 아래면 통과한다 — 기본 예산이
+ * 200K토큰 window × 0.3 × 4 = 240,000자이므로, **단일 MCP 응답 20만 자(≈5만 토큰)가
+ * 무사히 컨텍스트로 들어간다.** 외부 서버의 목록 조회는 실제로 그만큼 준다.
+ *
+ * 값은 openclaude `DEFAULT_MAX_MCP_OUTPUT_TOKENS = 25_000`(× 4자/토큰 = 100,000자)를 따랐다.
+ * opencode 는 더 좁다(`Truncate.MAX_BYTES = 50KB`, 모든 도구 공통). 두 레퍼런스 다 **per-call**
+ * 상한을 두고 있고 daiops 만 없었다.
+ *
+ * 빌트인 도구에는 걸지 않는다 — Bash·Read 는 이미 자체 상한(64KB·5MB)이 있고, 그쪽은 우리가
+ * 출력 형태를 통제한다. MCP 응답만 크기를 상대가 정한다.
+ */
+export const MCP_RESULT_MAX_CHARS = (() => {
+  const v = Number(process.env.AGENT_RUNNER_MCP_MAX_RESULT_CHARS)
+  return Number.isFinite(v) && v > 0 ? v : 100_000
+})()
+
+/**
+ * 오프로드 파일 보관 기간(ms). 지나면 다음 오프로드 때 청소한다.
+ *
+ * ⚠️ 종전에는 **정리가 아예 없었다.** 저장 위치가 `/workspace`(Daytona persistent volume)라
+ * 샌드박스 재시작에도 살아남아 무한히 쌓인다. per-call 상한이 생기면 오프로드 빈도가 올라가므로
+ * 정리 없이 상한만 넣으면 디스크 문제를 키운다 — 둘은 함께 가야 한다.
+ * (opencode `Truncate`: 7일 보관 + 시간당 cleanup 스케줄러. 러너에는 스케줄러가 없어
+ *  오프로드 경로에 얹는다 — 파일이 안 생기면 청소할 것도 없으므로 그 결합이 자연스럽다.)
+ */
+export const OFFLOAD_RETENTION_MS = (() => {
+  const v = Number(process.env.AGENT_RUNNER_OFFLOAD_RETENTION_MS)
+  return Number.isFinite(v) && v > 0 ? v : 7 * 24 * 60 * 60 * 1000
+})()
+
+/** 청소 최소 간격(ms) — 매 오프로드마다 디렉토리를 훑지 않는다. */
+const OFFLOAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000
+
 /** 프리뷰 head+tail 총 길이(chars). */
 export const OFFLOAD_PREVIEW_CHARS = 1_500
 
@@ -71,6 +107,42 @@ async function ensureOffloadDir() {
   }
 }
 
+/** 마지막 청소 시각(프로세스 로컬). 0이면 아직 안 함. */
+let lastSweepAt = 0
+
+/**
+ * 보관 기간이 지난 오프로드 파일을 지운다. 실패는 전부 무시한다 — 청소는 부수적이고,
+ * 여기서 던지면 정작 오프로드(문맥 보존)가 실패한다.
+ *
+ * 시간 기준은 파일명이 아니라 **mtime**이다. 파일명은 randomUUID라 시각 정보가 없다.
+ * @returns {Promise<number>} 지운 파일 수
+ */
+export async function sweepOffloadDir(now = Date.now()) {
+  if (now - lastSweepAt < OFFLOAD_SWEEP_INTERVAL_MS) return 0
+  lastSweepAt = now
+  let removed = 0
+  try {
+    const entries = await fs.readdir(OFFLOAD_DIR)
+    for (const name of entries) {
+      if (!name.startsWith('tool-result-')) continue
+      const p = path.join(OFFLOAD_DIR, name)
+      try {
+        const st = await fs.stat(p)
+        if (now - st.mtimeMs < OFFLOAD_RETENTION_MS) continue
+        await fs.unlink(p)
+        removed++
+      } catch { /* 개별 파일 실패는 건너뛴다 */ }
+    }
+  } catch { /* 디렉토리 부재 등 — 청소할 것이 없다 */ }
+  if (removed > 0) console.log(`[offload] 만료 파일 ${removed}개 정리`)
+  return removed
+}
+
+/** 테스트 전용 — 프로세스 로컬 청소 쿨다운 초기화. */
+export function _resetOffloadSweepForTest() {
+  lastSweepAt = 0
+}
+
 /**
  * 원문을 오프로드 파일에 저장.
  * @param {string} text
@@ -78,6 +150,9 @@ async function ensureOffloadDir() {
  */
 async function writeOffload(text) {
   await ensureOffloadDir()
+  // 쓰기 직전에 만료분을 턴다(쿨다운 있음). 파일이 생기는 자리에 청소를 붙여야
+  // "쌓이기만 하고 안 지워지는" 상태가 구조적으로 불가능해진다.
+  void sweepOffloadDir()
   const p = path.join(OFFLOAD_DIR, `tool-result-${randomUUID()}.txt`)
   try {
     await fs.writeFile(p, text, 'utf-8')
@@ -138,6 +213,57 @@ export async function enforceTurnResultBudget(toolResults, { onOffload, budgetCh
 
   if (offloaded > 0) onOffload?.({ offloaded, freedChars })
   return offloaded
+}
+
+/**
+ * **개별 MCP 도구 결과 상한 적용.** 상한을 넘으면 원문을 파일로 빼고 프리뷰 + 안내만 남긴다.
+ *
+ * ## 왜 자르지 않고 파일로 빼나
+ *
+ * 그냥 잘라 버리면 모델이 **뒷부분이 존재했다는 사실조차 모른다.** 페이지네이션이 있는 서버였다면
+ * 다시 물어볼 수 있는데 그 판단 근거가 사라진다. 세 레퍼런스가 모두 같은 결론이다 —
+ * openclaude `mcpOutputStorage`, opencode `Truncate`(outputPath), daiops per-turn offload.
+ *
+ * ## 문구가 상한 자체보다 중요하다
+ *
+ * openclaude 문구를 따라 **에러 형태**로 주고 **페이지네이션·필터 도구를 먼저 권한다.**
+ * 종전 per-turn 안내("Read로 여세요")만 두면 모델이 20만 자 파일을 그대로 다시 읽으러 간다 —
+ * 상한을 넣은 이유가 사라진다.
+ *
+ * per-turn 예산(`enforceTurnResultBudget`)과 **같은 마커**를 쓴다. 그래야 뒤이어 도는 per-turn
+ * 패스가 이미 처리된 결과를 다시 오프로드하지 않는다(멱등).
+ *
+ * @param {{content: string | Array<unknown>, is_error?: boolean}} result — in-place mutate
+ * @param {{ maxChars?: number, toolName?: string }} [opts]
+ * @returns {Promise<boolean>} 상한을 적용했으면 true
+ */
+export async function enforceMcpResultCap(result, { maxChars, toolName } = {}) {
+  if (!result) return false
+  const limit = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : MCP_RESULT_MAX_CHARS
+
+  // 이미지 블록이 있으면 건드리지 않는다. base64를 JSON으로 굳히면 이미지 압축·재열람 경로가
+  // 죽는다(openclaude도 `contentContainsImages`면 오프로드 대신 잘라내기로 폴백한다).
+  if (Array.isArray(result.content) && result.content.some((c) => c && c.type === 'image')) {
+    return false
+  }
+  const text = toText(result.content)
+  if (text.length <= limit) return false
+  // 이미 오프로드된 것은 다시 처리하지 않는다(per-turn 패스와 공유하는 멱등 조건).
+  if (typeof result.content === 'string' && result.content.startsWith(OFFLOAD_MARKER)) return false
+
+  const savedPath = await writeOffload(text)
+  const preview = truncateMiddle(text, OFFLOAD_PREVIEW_CHARS)
+  const where = savedPath
+    ? `전체 ${text.length.toLocaleString()}자는 ${savedPath} 에 저장됐습니다. Read("${savedPath}") 로 부분씩 여세요.`
+    : `전체 ${text.length.toLocaleString()}자 중 앞부분만 표시됩니다(저장 실패).`
+  result.content =
+    `${OFFLOAD_MARKER} 도구 결과가 상한(${limit.toLocaleString()}자)을 넘었습니다.\n` +
+    `${where}\n` +
+    // 이 한 줄이 핵심 — 다시 읽는 것보다 좁혀 묻는 것이 낫다는 방향을 준다.
+    `이 MCP 서버에 페이지네이션·필터·검색 도구가 있으면 그것으로 필요한 부분만 다시 조회하세요` +
+    `${toolName ? ` (호출한 도구: ${toolName})` : ''}.\n\n` +
+    preview
+  return true
 }
 
 /** 이미지 evict 시 남기는 플레이스홀더 마커(재-evict 무한 방지 = 멱등). */
