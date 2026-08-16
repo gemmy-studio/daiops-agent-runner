@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
 import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
-import { EgressObserver } from './proxy/egress-observer.js'
+import { EgressObserver, setActiveEgressObserver } from './proxy/egress-observer.js'
 import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure } from './tools/memory-edit.js'
 import { REMEMBER_ACTIONS, isRememberAction, isRememberFailure } from './tools/remember.js'
 import { collectRuntimeProbe } from './runtime-probe.js'
@@ -112,6 +112,21 @@ async function initInjectionProxy() {
     console.warn('[injection-proxy] 필수 설정 누락(LLM_PROXY_ORIGIN/WORKSPACE_ID/토큰) — 프록시 미기동')
     return { ok: false, error: 'missing config' }
   }
+  // 관측기는 **시크릿보다 먼저** 만든다. 종전에는 materialize 성공 뒤에 만들어서, 그 호출이
+  // 실패하면(fail-open으로 러너는 계속 돈다) 관측이 통째로 사라졌다. 관측 대상은 시크릿이
+  // 아니라 아웃바운드 목적지라 시크릿 유무와 무관하다.
+  if (!egressObserver) {
+    egressObserver = new EgressObserver({
+      proxyOrigin: LLM_PROXY_ORIGIN,
+      workspaceId: WORKSPACE_ID,
+      token: AUTH_TOKEN,
+      logger: console,
+    })
+    egressObserver.start()
+    // 프록시를 안 지나는 아웃바운드(러너 본체 fetch = 외부 MCP)도 여기에 기록한다. 근거는
+    // `proxy/egress-observer.js` 의 싱글턴 주석.
+    setActiveEgressObserver(egressObserver)
+  }
   try {
     const secrets = await fetchMaterializedSecrets({
       proxyOrigin: LLM_PROXY_ORIGIN,
@@ -129,16 +144,6 @@ async function initInjectionProxy() {
       await writePlaceholderEnvFile(INTEGRATIONS_ENV_PATH, placeholderByKey)
       console.log(`[injection-proxy] 갱신 — 시크릿 ${secrets.length}건`)
       return { ok: true, count: secrets.length }
-    }
-    // egress 관측기는 프록시와 생애를 공유한다(프록시가 유일한 관측 지점).
-    if (!egressObserver) {
-      egressObserver = new EgressObserver({
-        proxyOrigin: LLM_PROXY_ORIGIN,
-        workspaceId: WORKSPACE_ID,
-        token: AUTH_TOKEN,
-        logger: console,
-      })
-      egressObserver.start()
     }
     injectionBroker = await startInjectionBroker({ secrets, logger: console, observer: egressObserver })
     // 자식 셸이 프록시/CA를 쓰도록 process.env에 설정 (buildToolEnv가 자식 env로만 번역).

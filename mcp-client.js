@@ -21,6 +21,8 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { lookup as dnsLookup } from 'node:dns/promises'
+import { getActiveEgressObserver } from './proxy/egress-observer.js'
 
 const MCP_PROTOCOL_VERSION = '2025-06-18'
 
@@ -298,14 +300,109 @@ function assertSafeMcpUrl(rawUrl, opts = {}) {
   // 봐서 `https://10.0.0.5/mcp` 가 그대로 통과했다(cloud 쪽 `validateExternalMcpServers` 가 IP
   // literal 을 통째로 거절해 등록 경로는 막혀 있었지만, 러너는 2차 방어라 자기 몫을 해야 한다).
   //
-  // ⚠️ **남는 구멍: DNS 로 사설 IP 를 가리키는 도메인.** 규격도 TOCTOU 로 명시하는 경우이고
-  // (검증 시점엔 공인 IP, 요청 시점엔 내부 IP), 호스트명만 보는 이 검사로는 못 잡는다.
-  // 제대로 막으려면 resolve 결과를 검사하고 그 IP 로 핀해야 하는데 `fetch` 로는 핀할 수 없다.
-  // 규격이 권하는 대안은 egress 프록시이고, daiops 에는 있으나 **MCP 아웃바운드가 우회한다**
-  // (ADR 51 §0). 그 배선이 이 구멍의 정본 해법이다.
+  // ℹ️ 이 함수는 **호스트 문자열만** 본다. 도메인이 사설 IP 로 해소되는 경우(TOCTOU)는
+  // 요청 직전에 `assertResolvedHostSafe` 가 해소된 주소로 다시 판정한다.
   if (isPrivateIpLiteral(host)) {
     throw new Error(`createMcpHttpClient: blocked URL host '${u.hostname}' (private network not allowed)`)
   }
+}
+
+/**
+ * 해소된 주소 하나가 막아야 할 대역인지. 막을 사유를 문자열로, 아니면 null.
+ * @param {string} address `dns.lookup` 이 준 주소(IPv4 점4옥텟 또는 IPv6)
+ * @param {boolean} allowLoopback
+ */
+function resolvedAddressIssue(address, allowLoopback) {
+  const a = String(address).toLowerCase().replace(/^\[|\]$/g, '')
+  if (a === '0.0.0.0' || a === '::') return 'wildcard'
+  if (a.startsWith('169.254.')) return 'metadata/link-local'
+  if (a === '::1' || /^127\./.test(a)) return allowLoopback ? null : 'loopback'
+  if (isPrivateIpLiteral(a)) return 'private network'
+  return null
+}
+
+/** 해소 결과 캐시 TTL. 러너의 다른 캐시들과 같은 60초를 쓴다. */
+const DNS_GUARD_TTL_MS = 60_000
+/**
+ * 해소 대기 상한. **넘기면 판정을 포기하고 통과시킨다(fail-open).**
+ *
+ * 이 상한이 없으면 응답하지 않는 리졸버 하나가 **모든 MCP 호출을 무기한 붙잡는다** — 테스트에서
+ * 실제로 그렇게 멈췄고(180초에 강제 종료), 프로덕션에서도 같은 일이 난다. 방어 하나를 넣으려다
+ * 가용성을 통째로 걸 수는 없다. 2초는 정상 해소(캐시 히트 ms 단위, 미스도 보통 수십 ms)보다
+ * 충분히 크고 사용자가 체감하기엔 짧다.
+ */
+const DNS_GUARD_TIMEOUT_MS = 2_000
+/** 캐시 상한 — 무한 증가 방지. 초과하면 통째로 비운다(LRU 를 둘 만큼 큰 맵이 아니다). */
+const DNS_GUARD_MAX_ENTRIES = 256
+/** @type {Map<string, { atMs: number, reason: string | null }>} */
+const dnsGuardCache = new Map()
+
+/** 테스트용 — 캐시를 비운다. */
+export function _resetDnsGuardCache() {
+  dnsGuardCache.clear()
+}
+
+/**
+ * **DNS TOCTOU 방어** — 호스트를 실제로 해소해 사설/loopback/메타데이터 대역을 가리키는지 본다.
+ *
+ * `assertSafeMcpUrl` 은 등록된 **글자**만 보므로 `evil.example.com → 192.168.0.1` 을 못 잡는다.
+ * MCP 규격 Security Best Practices 가 SSRF 절에서 명시적으로 경고하는 경우다.
+ *
+ * ## 한계를 정확히 적어 둔다
+ *
+ * 이건 **완전한 핀(pinning)이 아니다.** 여기서 해소한 뒤 `fetch` 가 다시 해소하므로 그 사이에
+ * 응답이 바뀌면 통과한다. 완전히 막으려면 해소한 IP 로 connect 를 고정해야 하는데, 전역 `fetch`
+ * 로는 dispatcher 없이 불가능하고 dispatcher 를 쓰려면 undici 의존성이 필요하다(러너는 의존성 0).
+ * 그래도 **현실적인 공격면의 대부분**(등록 후 DNS 레코드를 내부 IP 로 바꿔 두는 것)은 닫힌다.
+ *
+ * ## DNS 실패는 막지 않는다 (fail-open)
+ *
+ * 일시적 해소 실패를 차단으로 바꾸면, 이어지는 `fetch` 가 어차피 같은 이유로 실패할 것을
+ * "정책 차단"으로 오보고해 원인 진단만 어려워진다. 실패는 그냥 통과시키고 fetch 가 말하게 둔다.
+ *
+ * @param {string} host 대괄호가 벗겨진 lowercase 호스트
+ * @param {{ allowLoopback?: boolean, lookupFn?: typeof dnsLookup }} [opts]
+ */
+async function assertResolvedHostSafe(host, opts = {}) {
+  // IP 리터럴이면 `assertSafeMcpUrl` 이 이미 판정했다 — DNS 에 물을 것이 없다.
+  if (/^[0-9.]+$/.test(host) || host.includes(':')) return
+
+  const now = Date.now()
+  const cached = dnsGuardCache.get(host)
+  if (cached && now - cached.atMs < DNS_GUARD_TTL_MS) {
+    if (cached.reason) throw new Error(`mcp-client: blocked host '${host}' — resolves to ${cached.reason}`)
+    return
+  }
+
+  const lookupFn = opts.lookupFn ?? dnsLookup
+  let addrs
+  /** @type {NodeJS.Timeout | undefined} */
+  let timer
+  try {
+    addrs = await Promise.race([
+      lookupFn(host, { all: true, verbatim: true }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('dns timeout')), DNS_GUARD_TIMEOUT_MS)
+        // 이 타이머가 이벤트 루프를 붙잡으면 러너 종료가 2초 늦어진다. 판정용 곁가지라 unref.
+        timer.unref?.()
+      }),
+    ])
+  } catch {
+    return // 해소 실패·시간 초과 모두 fail-open — 위 주석 참조
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+  if (!Array.isArray(addrs)) return
+
+  const allowLoopback = opts.allowLoopback === true
+  let reason = null
+  for (const entry of addrs) {
+    const issue = resolvedAddressIssue(entry?.address ?? '', allowLoopback)
+    if (issue) { reason = issue; break }
+  }
+  if (dnsGuardCache.size >= DNS_GUARD_MAX_ENTRIES) dnsGuardCache.clear()
+  dnsGuardCache.set(host, { atMs: now, reason })
+  if (reason) throw new Error(`mcp-client: blocked host '${host}' — resolves to ${reason}`)
 }
 
 /**
@@ -384,6 +481,31 @@ export function createMcpHttpClient(spec, ctx = {}) {
   }
   assertSafeMcpUrl(spec.url, { allowLoopback: spec.allowLoopback === true })
 
+  /** 목적지 호스트 — 요청마다 재파싱하지 않도록 여기서 한 번만 뽑는다. */
+  const destHost = new URL(spec.url).hostname.toLowerCase().replace(/^\[|\]$/g, '')
+
+  /**
+   * 요청 직전 관문. **관측 + DNS TOCTOU 판정**을 한자리에서 한다.
+   *
+   * 관측이 여기 있는 이유: injection 프록시는 자식 셸 프로세스만 지나가므로(그건 의도된 설계다,
+   * `tools/_common.js` 주석) 러너 본체 `fetch` 로 나가는 MCP 호출은 **아무 장부에도 안 남았다**.
+   * 실측(2026-08-16)으로 외부 MCP 호출 4,306건에 관측 0건이었다. 근거·프록시 배선을 기각한
+   * 사유는 cloud ADR 51 §6-e.
+   */
+  async function guardAndObserve() {
+    const observer = getActiveEgressObserver()
+    try {
+      await assertResolvedHostSafe(destHost, {
+        allowLoopback: spec.allowLoopback === true,
+        lookupFn: ctx.lookupFn,
+      })
+    } catch (err) {
+      observer?.record(destHost, { blocked: true })
+      throw err
+    }
+    observer?.record(destHost)
+  }
+
   const fetchFn = ctx.fetchFn ?? globalThis.fetch
   if (typeof fetchFn !== 'function') {
     throw new Error('createMcpHttpClient: fetch is not available; provide ctx.fetchFn')
@@ -436,6 +558,7 @@ export function createMcpHttpClient(spec, ctx = {}) {
     /** @type {{ jsonrpc?: string, id?: number, result?: any, error?: { code: number, message: string, data?: any } }} */
     let payload
     try {
+      await guardAndObserve()
       let res
       try {
         res = await fetchFn(spec.url, {
@@ -512,6 +635,7 @@ export function createMcpHttpClient(spec, ctx = {}) {
       // notifications/initialized — 일부 서버는 필수. 실패해도 list_tools가 동작하면 무시.
       try {
         const notifyBody = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
+        await guardAndObserve()
         await fetchFn(spec.url, {
           method: 'POST',
           headers: buildHeaders({ accept: 'application/json' }),

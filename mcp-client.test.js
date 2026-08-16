@@ -18,6 +18,16 @@ import {
  * routes: { [method]: handler(params, headers) => result | { error: { code, message } } }
  * 호출 로그를 calls 배열에 기록.
  */
+/**
+ * DNS 가드 스텁 — 이 파일의 목 서버 호스트(`mock`·`wiki`·`search` 등)는 실재하지 않는다.
+ *
+ * 주입하지 않으면 `assertResolvedHostSafe` 가 **진짜 `getaddrinfo`** 를 부르고, 응답하지 않는
+ * 리졸버 환경에서는 그 요청이 취소되지 않아 **테스트 파일이 끝나도 프로세스가 종료되지 못한다**
+ * (실측: "Promise resolution is still pending but the event loop has already resolved").
+ * 가드 자체에는 2초 상한이 있어 판정은 제때 포기하지만, libuv 요청은 그대로 남는다.
+ */
+const stubLookup = async () => [{ address: '93.184.216.34', family: 4 }]
+
 function mockMcpServer({ routes, url = 'http://mock', onCall } = {}) {
   const calls = []
   async function fakeFetch(reqUrl, init) {
@@ -273,7 +283,7 @@ describe('createMcpHttpClient — 기본', () => {
         }),
       },
     })
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const tools = await c.listTools()
     assert.equal(tools.length, 2)
     assert.equal(tools[0].name, 'wiki_read')
@@ -296,7 +306,7 @@ describe('createMcpHttpClient — 기본', () => {
         },
       },
     })
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const result = await c.callTool('wiki_read', { path: 'a.md' })
     assert.equal(result.content, 'contents')
   })
@@ -308,13 +318,13 @@ describe('createMcpHttpClient — 기본', () => {
         'tools/call': () => ({ error: { code: -32602, message: 'invalid params' } }),
       },
     })
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     await assert.rejects(c.callTool('wiki_read', {}), /JSON-RPC error -32602/)
   })
 
   it('HTTP error → throw with status', async () => {
     const fetchFn = async () => new Response('rate limited', { status: 429 })
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     await assert.rejects(c.listTools(), /HTTP 429/)
   })
 
@@ -324,7 +334,7 @@ describe('createMcpHttpClient — 기본', () => {
     })
     const c = createMcpHttpClient(
       { name: 'wiki', url: 'http://mock', headers: { Authorization: 'Bearer sk-test-secret' } },
-      { fetchFn },
+      { fetchFn, lookupFn: stubLookup },
     )
     await c.listTools()
     const initCall = calls.find((c) => c.body?.method === 'initialize')
@@ -338,7 +348,7 @@ describe('createMcpHttpClient — 기본', () => {
         'tools/call': () => ({ error: { code: -32603, message: 'failed for Bearer sk-test-secret' } }),
       },
     })
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     try {
       await c.callTool('x', {})
       assert.fail('should have thrown')
@@ -360,7 +370,7 @@ describe('createMcpHttpClient — 기본', () => {
       if (body.method === 'tools/call') return sse(body.id, { content: [{ type: 'text', text: 'sse-ok' }] })
       return sse(body.id, {})
     }
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const result = await c.callTool('wiki_read', {})
     assert.equal(result.content, 'sse-ok')
   })
@@ -379,7 +389,7 @@ describe('createMcpHttpClient — 기본', () => {
       const right = `data: ${JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'RIGHT' }] } })}\n\n`
       return new Response(noise + wrong + right, { status: 200, headers: { 'content-type': 'text/event-stream' } })
     }
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const result = await c.callTool('x', {})
     assert.equal(result.content, 'RIGHT')
   })
@@ -395,7 +405,7 @@ describe('createMcpHttpClient — 기본', () => {
         },
       },
     })
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const tools = await c.listTools()
     assert.deepEqual(tools.map((t) => t.name), ['a', 'b', 'c'])
   })
@@ -411,7 +421,7 @@ describe('createMcpHttpClient — 기본', () => {
       const result = body.method === 'tools/list' ? { tools: [] } : {}
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { status: 200, headers })
     }
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     await c.listTools()
     const initCall = calls.find((c) => c.method === 'initialize')
     const listCall = calls.find((c) => c.method === 'tools/list')
@@ -461,7 +471,7 @@ describe('createMcpHttpClient — 기본', () => {
     const { fetchFn } = mockMcpServer({
       routes: { initialize: () => ({}), 'tools/list': () => ({ tools: [] }) },
     })
-    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'wiki', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     await c.close()
     await assert.rejects(c.listTools(), /closed/)
   })
@@ -493,7 +503,7 @@ describe('createMcpToolRegistry — 멀티 서버 라우팅', () => {
         { name: 'wiki', url: 'http://wiki' },
         { name: 'search', url: 'http://search' },
       ],
-      { fetchFn: router },
+      { fetchFn: router, lookupFn: stubLookup },
     )
     try {
       assert.equal(reg.tools.length, 3)
@@ -528,7 +538,7 @@ describe('createMcpToolRegistry — 멀티 서버 라우팅', () => {
         { name: 'wiki', url: 'http://wiki' },
         { name: 'search', url: 'http://search' },
       ],
-      { fetchFn: router },
+      { fetchFn: router, lookupFn: stubLookup },
     )
     try {
       const r1 = await reg.runTool('mcp__wiki__wiki_read', { path: 'x' })
@@ -556,7 +566,7 @@ describe('createMcpToolRegistry — 멀티 서버 라우팅', () => {
     await assert.rejects(
       createMcpToolRegistry(
         [{ name: 'wiki', url: 'http://a' }, { name: 'wiki', url: 'http://b' }],
-        { fetchFn },
+        { fetchFn, lookupFn: stubLookup },
       ),
       /duplicate server name/,
     )
@@ -571,7 +581,7 @@ describe('createMcpToolRegistry — 멀티 서버 라우팅', () => {
     const router = async (url, init) => (url === 'http://good' ? f1(url, init) : f2(url, init))
     const reg = await createMcpToolRegistry(
       [{ name: 'good', url: 'http://good' }, { name: 'bad', url: 'http://bad' }],
-      { fetchFn: router },
+      { fetchFn: router, lookupFn: stubLookup },
     )
     try {
       assert.equal(reg.tools.length, 1)
@@ -585,7 +595,7 @@ describe('createMcpToolRegistry — 멀티 서버 라우팅', () => {
     const { fetchFn } = mockMcpServer({
       routes: { initialize: () => ({}), 'tools/list': () => ({ tools: [] }) },
     })
-    const reg = await createMcpToolRegistry([{ name: 'wiki', url: 'http://mock' }], { fetchFn })
+    const reg = await createMcpToolRegistry([{ name: 'wiki', url: 'http://mock' }], { fetchFn, lookupFn: stubLookup })
     try {
       const client = reg.getClient('wiki')
       assert.ok(client)
@@ -726,7 +736,7 @@ describe('listTools — annotations 보존 (QA #105 축1)', () => {
       { name: 'create_meeting_note', inputSchema: { type: 'object' },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: '미팅노트 작성' } },
     ])
-    const c = createMcpHttpClient({ name: 'lattice', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'lattice', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const [t] = await c.listTools()
     assert.equal(t.annotations.readOnlyHint, false)
     assert.equal(t.annotations.destructiveHint, false)
@@ -736,7 +746,7 @@ describe('listTools — annotations 보존 (QA #105 축1)', () => {
 
   it('어노테이션이 없으면 키 자체가 없다 — 기본값을 지어내지 않는다', async () => {
     const { fetchFn } = serverWith([{ name: 'plain', inputSchema: { type: 'object' } }])
-    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const [t] = await c.listTools()
     assert.equal('annotations' in t, false)
   })
@@ -745,7 +755,7 @@ describe('listTools — annotations 보존 (QA #105 축1)', () => {
     const { fetchFn } = serverWith([
       { name: 'sneaky', annotations: { readOnlyHint: 'true', destructiveHint: 1 } },
     ])
-    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const [t] = await c.listTools()
     assert.equal('annotations' in t, false)
   })
@@ -754,7 +764,7 @@ describe('listTools — annotations 보존 (QA #105 축1)', () => {
     const { fetchFn } = serverWith([
       { name: 'a', annotations: { readOnlyHint: true, somethingElse: 'x' } },
     ])
-    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const [t] = await c.listTools()
     assert.deepEqual(t.annotations, { readOnlyHint: true })
   })
@@ -764,7 +774,7 @@ describe('listTools — annotations 보존 (QA #105 축1)', () => {
       { name: 'a', annotations: [] },
       { name: 'b', annotations: null },
     ])
-    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn })
+    const c = createMcpHttpClient({ name: 'x', url: 'http://mock' }, { fetchFn, lookupFn: stubLookup })
     const tools = await c.listTools()
     assert.equal('annotations' in tools[0], false)
     assert.equal('annotations' in tools[1], false)
@@ -779,7 +789,7 @@ describe('createMcpToolRegistry — getToolMeta (QA #105 축1)', () => {
         'tools/list': () => ({ tools: [{ name: 'create_meeting_note', annotations: { readOnlyHint: false } }] }),
       },
     })
-    const reg = await createMcpToolRegistry([{ name: 'lattice', url: 'http://mock' }], { fetchFn })
+    const reg = await createMcpToolRegistry([{ name: 'lattice', url: 'http://mock' }], { fetchFn, lookupFn: stubLookup })
     const meta = reg.getToolMeta('mcp__lattice__create_meeting_note')
     assert.equal(meta.serverName, 'lattice')
     assert.equal(meta.originalName, 'create_meeting_note')
@@ -794,14 +804,14 @@ describe('createMcpToolRegistry — getToolMeta (QA #105 축1)', () => {
         'tools/list': () => ({ tools: [{ name: 't', annotations: { readOnlyHint: true } }] }),
       },
     })
-    const reg = await createMcpToolRegistry([{ name: 's', url: 'http://mock' }], { fetchFn })
+    const reg = await createMcpToolRegistry([{ name: 's', url: 'http://mock' }], { fetchFn, lookupFn: stubLookup })
     assert.equal('annotations' in reg.tools[0], false)
     await reg.close()
   })
 
   it('등록되지 않은 이름은 undefined', async () => {
     const { fetchFn } = mockMcpServer({ routes: { initialize: () => ({}), 'tools/list': () => ({ tools: [] }) } })
-    const reg = await createMcpToolRegistry([{ name: 's', url: 'http://mock' }], { fetchFn })
+    const reg = await createMcpToolRegistry([{ name: 's', url: 'http://mock' }], { fetchFn, lookupFn: stubLookup })
     assert.equal(reg.getToolMeta('mcp__s__nope'), undefined)
     await reg.close()
   })

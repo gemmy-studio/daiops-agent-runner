@@ -48,6 +48,45 @@ const OBSERVATIONS_PATH = '/api/internal/egress-observations'
  * @property {number} lastAtMs
  */
 
+/**
+ * 활성 관측기 싱글턴.
+ *
+ * ## 왜 필요한가 — 프록시만 보면 **관측에 구멍이 난다**
+ *
+ * 이 관측기는 원래 injection 프록시 hot path 전용이었다. 그런데 프록시를 지나는 것은
+ * **자식 셸 프로세스**(Bash 가 띄우는 curl·python 등)뿐이다 — `HTTP_PROXY` env 를 자식에게만
+ * 주기 때문이고, 그건 의도된 설계다(`tools/_common.js` 주석). 러너 프로세스 **자신의** `fetch`
+ * 로 나가는 외부 MCP 호출은 프록시를 안 지나므로 **목적지가 아무 데도 안 남았다.**
+ *
+ * 실측(2026-08-16): 워크스페이스 하나에서 외부 MCP 호출 4,306건에 대응하는 관측이 **0건**.
+ * 사고가 났을 때 "이 직원이 어디로 나갔나"를 답할 장부가 그만큼 비어 있었다는 뜻이다.
+ *
+ * ## 왜 프록시로 배선하지 않았나
+ *
+ * Node 의 전역 `fetch` 는 `HTTP_PROXY` 를 읽지 않는다. 읽히려면 Node 24+ 의 `--use-env-proxy`
+ * 가 필요한데 러너는 Node 22 이고, 대안인 undici `ProxyAgent` 는 npm 패키지를 요구해
+ * **의존성 0 원칙**을 깬다. 관측만 원하는 일에 베이스 이미지와 의존성 정책을 바꿀 이유가 없다.
+ * 상세 근거·기각 사유는 cloud ADR 51 §6-e.
+ *
+ * ## 왜 import 가 아니라 싱글턴인가
+ *
+ * 관측기 인스턴스는 `server.js` 가 부팅 시 워크스페이스 id·토큰과 함께 만든다. `mcp-client.js`
+ * 가 그걸 쓰려면 `server.js` 를 import 해야 하는데 그러면 순환이 된다. 등록/조회를 이 모듈에
+ * 두면 의존 방향이 `mcp-client → egress-observer` 한 방향으로만 흐른다.
+ */
+/** @type {EgressObserver | null} */
+let activeObserver = null
+
+/** @param {EgressObserver | null} observer */
+export function setActiveEgressObserver(observer) {
+  activeObserver = observer
+}
+
+/** 미설정이면 null — 테스트·로컬 dev 에서는 관측 없이 동작한다(호출부가 옵셔널 체이닝). */
+export function getActiveEgressObserver() {
+  return activeObserver
+}
+
 export class EgressObserver {
   /**
    * @param {{

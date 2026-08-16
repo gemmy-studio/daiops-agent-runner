@@ -233,3 +233,167 @@ describe('sweepOffloadDir — 보관 기간 정리', () => {
     assert.ok(await fs.stat(old))
   })
 })
+
+// ── DNS TOCTOU 가드 + egress 관측 ─────────────────────────────────────
+// `assertSafeMcpUrl` 은 등록된 **글자**만 본다. 도메인이 사설 IP 로 해소되는 경우
+// (`evil.example.com` → `192.168.0.1`)는 요청 직전 해소 결과로 다시 판정해야 잡힌다.
+//
+// 관측이 같은 자리에 있는 이유: injection 프록시는 자식 셸만 지나가므로 러너 본체 fetch 로
+// 나가는 MCP 호출은 아무 장부에도 안 남았다(실측 4,306건 대 0건). 상세는 cloud ADR 51 §6-e.
+
+const { setActiveEgressObserver, EgressObserver } = await import('./proxy/egress-observer.js')
+const { _resetDnsGuardCache } = await import('./mcp-client.js')
+
+/** 호출되면 안 되는 fetch — 가드가 요청 **전에** 막는지 보려면 이게 필요하다. */
+function neverFetch() {
+  throw new Error('fetch가 호출되면 안 된다 — 가드가 요청 전에 막아야 한다')
+}
+
+/** 목적지만 세는 최소 관측기(보고는 하지 않는다 — canReport=false). */
+function makeObserver() {
+  return new EgressObserver({ logger: { info() {}, warn() {} } })
+}
+
+describe('DNS TOCTOU 가드', () => {
+  // 호스트별 60초 캐시가 있어 케이스끼리 새면 판정이 섞인다.
+  const fresh = () => { _resetDnsGuardCache(); setActiveEgressObserver(null) }
+
+  const privateAddrs = [
+    ['10/8', '10.0.0.5'],
+    ['172.16/12', '172.20.1.1'],
+    ['192.168/16', '192.168.0.1'],
+    ['CGNAT 100.64/10', '100.100.0.1'],
+    ['link-local(메타데이터)', '169.254.169.254'],
+    ['IPv6 ULA', 'fd00::1'],
+  ]
+  for (const [label, address] of privateAddrs) {
+    it(`도메인이 ${label} 로 해소되면 요청 전에 막는다`, async () => {
+      fresh()
+      const c = createMcpHttpClient(
+        { name: 'evil', url: 'https://evil.example.com/mcp' },
+        { fetchFn: neverFetch, lookupFn: async () => [{ address, family: address.includes(':') ? 6 : 4 }] },
+      )
+      await assert.rejects(() => c.listTools(), /resolves to/)
+    })
+  }
+
+  it('주소 여러 개 중 하나만 사설이어도 막는다 — 라운드로빈으로 섞어 두면 통과해선 안 된다', async () => {
+    fresh()
+    const c = createMcpHttpClient(
+      { name: 'evil', url: 'https://mixed.example.com/mcp' },
+      {
+        fetchFn: neverFetch,
+        lookupFn: async () => [
+          { address: '93.184.216.34', family: 4 },
+          { address: '10.1.2.3', family: 4 },
+        ],
+      },
+    )
+    await assert.rejects(() => c.listTools(), /resolves to/)
+  })
+
+  it('loopback 해소는 allowLoopback opt-in 시에만 통과한다', async () => {
+    fresh()
+    const lookupFn = async () => [{ address: '127.0.0.1', family: 4 }]
+    const blocked = createMcpHttpClient(
+      { name: 'x', url: 'https://loop.example.com/mcp' },
+      { fetchFn: neverFetch, lookupFn },
+    )
+    await assert.rejects(() => blocked.listTools(), /loopback/)
+
+    fresh()
+    let reached = false
+    const allowed = createMcpHttpClient(
+      { name: 'x', url: 'https://loop.example.com/mcp', allowLoopback: true },
+      { fetchFn: async () => { reached = true; throw new Error('stop here') }, lookupFn },
+    )
+    await assert.rejects(() => allowed.listTools())
+    assert.equal(reached, true, 'opt-in 했으면 가드를 지나 fetch 까지 가야 한다')
+  })
+
+  it('해소 실패는 통과시킨다(fail-open) — 일시 DNS 장애를 정책 차단으로 바꾸지 않는다', async () => {
+    fresh()
+    let reached = false
+    const c = createMcpHttpClient(
+      { name: 'x', url: 'https://nx.example.com/mcp' },
+      {
+        fetchFn: async () => { reached = true; throw new Error('stop here') },
+        lookupFn: async () => { throw new Error('ENOTFOUND') },
+      },
+    )
+    await assert.rejects(() => c.listTools())
+    assert.equal(reached, true)
+  })
+
+  it('IP 리터럴 URL 은 DNS 를 묻지 않는다 — assertSafeMcpUrl 이 이미 판정했다', async () => {
+    fresh()
+    let asked = false
+    // 통과해야 하는 공인 IP. 리터럴이므로 lookupFn 이 불리면 안 된다.
+    const c = createMcpHttpClient(
+      { name: 'x', url: 'https://93.184.216.34/mcp' },
+      {
+        fetchFn: async () => { throw new Error('stop here') },
+        lookupFn: async () => { asked = true; return [] },
+      },
+    )
+    await assert.rejects(() => c.listTools())
+    assert.equal(asked, false)
+  })
+})
+
+describe('egress 관측 — 프록시를 안 지나는 MCP 아웃바운드', () => {
+  it('요청마다 목적지 호스트를 관측기에 남긴다', async () => {
+    _resetDnsGuardCache()
+    const observer = makeObserver()
+    setActiveEgressObserver(observer)
+    try {
+      const c = createMcpHttpClient(
+        { name: 'x', url: 'https://mcp.example.com/mcp' },
+        {
+          fetchFn: async () => { throw new Error('stop here') },
+          lookupFn: async () => [{ address: '93.184.216.34', family: 4 }],
+        },
+      )
+      await assert.rejects(() => c.listTools())
+      const stat = observer.stats.get('mcp.example.com')
+      assert.ok(stat, '목적지가 관측되지 않았다')
+      assert.equal(stat.requests, 1)
+      assert.equal(stat.blocked, 0)
+    } finally {
+      setActiveEgressObserver(null)
+    }
+  })
+
+  it('가드가 막은 요청은 blocked 로 센다 — 막힌 것이 안 보이면 관측의 쓸모가 없다', async () => {
+    _resetDnsGuardCache()
+    const observer = makeObserver()
+    setActiveEgressObserver(observer)
+    try {
+      const c = createMcpHttpClient(
+        { name: 'x', url: 'https://evil.example.com/mcp' },
+        { fetchFn: neverFetch, lookupFn: async () => [{ address: '10.0.0.5', family: 4 }] },
+      )
+      await assert.rejects(() => c.listTools(), /resolves to/)
+      const stat = observer.stats.get('evil.example.com')
+      assert.ok(stat)
+      assert.equal(stat.blocked, 1)
+    } finally {
+      setActiveEgressObserver(null)
+    }
+  })
+
+  it('관측기가 없으면 조용히 지나간다 — 테스트·로컬 dev 에서 관측 없이도 동작해야 한다', async () => {
+    _resetDnsGuardCache()
+    setActiveEgressObserver(null)
+    let reached = false
+    const c = createMcpHttpClient(
+      { name: 'x', url: 'https://mcp.example.com/mcp' },
+      {
+        fetchFn: async () => { reached = true; throw new Error('stop here') },
+        lookupFn: async () => [{ address: '93.184.216.34', family: 4 }],
+      },
+    )
+    await assert.rejects(() => c.listTools())
+    assert.equal(reached, true)
+  })
+})

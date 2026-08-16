@@ -2,6 +2,38 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.28.0] — 2026-08-16
+
+외부 MCP 아웃바운드의 **관측**과 **DNS TOCTOU** 방어. 둘 다 injection 프록시로 배선하는 대신
+러너 안에서 닫았다 — 근거는 cloud ADR 51 §6-e.
+
+### Added
+- **MCP 아웃바운드 egress 관측** — 요청마다 목적지 호스트를 `EgressObserver` 에 기록한다.
+  - 종전에는 **아무 장부에도 안 남았다.** injection 프록시는 `HTTP_PROXY` env 를 **자식 셸
+    프로세스에만** 주므로(의도된 설계, `tools/_common.js`) 러너 본체 `fetch` 로 나가는 MCP 는
+    지나가지 않는다. 실측(2026-08-16): 워크스페이스 하나에서 외부 MCP 호출 **4,306건**에 대응하는
+    관측 **0건**. 사고 시 "이 직원이 어디로 나갔나"를 답할 장부가 그만큼 비어 있었다.
+  - 관측기는 `proxy/egress-observer.js` 의 싱글턴(`setActiveEgressObserver`)으로 얻는다.
+    `server.js` 를 import 하면 순환이 되기 때문이다.
+  - 관측기 생성을 **시크릿 materialize 보다 앞으로** 옮겼다. 종전에는 그 호출이 실패하면
+    (fail-open 이라 러너는 계속 돈다) 관측이 통째로 사라졌다.
+- **DNS TOCTOU 가드** (`assertResolvedHostSafe`) — 요청 직전 호스트를 해소해 사설/loopback/
+  메타데이터 대역을 가리키면 막는다. `assertSafeMcpUrl` 은 등록된 **글자**만 보므로
+  `evil.example.com → 192.168.0.1` 을 못 잡는다(MCP 규격 SSRF 절이 경고하는 경우).
+  - 해소 결과는 60초 캐시(호스트당). 상한 256개, 초과 시 통째로 비운다.
+  - **완전한 핀은 아니다.** 여기서 해소한 뒤 `fetch` 가 다시 해소한다. 핀하려면 dispatcher 가
+    필요하고 그건 undici 의존성을 요구한다(러너는 의존성 0). 현실적 공격면 대부분은 닫힌다.
+  - **2초 상한 + fail-open.** 없으면 응답하지 않는 리졸버 하나가 모든 MCP 호출을 무기한
+    붙잡는다 — 테스트에서 실제로 그렇게 멈췄다. 일시적 DNS 장애를 "정책 차단"으로 바꾸면
+    원인 진단만 어려워지므로 실패·시간 초과는 통과시킨다.
+  - `ctx.lookupFn` 으로 주입 가능(`ctx.fetchFn` 과 같은 규약).
+
+### Why not the egress proxy
+Node 의 전역 `fetch` 는 `HTTP_PROXY` 를 읽지 않는다(실측). 읽히려면 Node 24+ 의
+`--use-env-proxy` 가 필요한데 러너는 Node 22 이고, 대안인 undici `ProxyAgent` 는 npm 패키지를
+요구해 **의존성 0 원칙**을 깬다. 게다가 프록시의 `_forward()` 에는 사설 IP 검사가 아예 없어
+배선해도 TOCTOU 는 따라오지 않는다. 상세는 cloud ADR 51 §6-e.
+
 ## [0.27.0] — 2026-08-16
 
 외부 MCP 하드닝 (ADR 51 §6 잔여). 전부 **크기·주소를 상대가 정하는 입력**에 대한 방어다.
