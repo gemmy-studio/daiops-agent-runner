@@ -1,10 +1,19 @@
 /**
  * 크레덴셜 주입 프록시 — 서버 본체 (Phase 1).
  *
- * 샌드박스의 모든 아웃바운드(bash curl·python·MCP)를 HTTP_PROXY/HTTPS_PROXY로 이 프록시에
- * 통과시킨다. 프록시는 요청 헤더/URL/바디에서 placeholder를 찾아, **그 placeholder의 allowed_hosts에
- * 목적지가 포함될 때만** 진짜 값으로 치환한 뒤 업스트림으로 전달한다. 허용되지 않으면 placeholder를
- * 그대로 보내 업스트림이 인증 실패 → 진짜 값은 임의 목적지로 새지 않는다.
+ * **자식 셸 프로세스의 아웃바운드**(Bash 도구가 띄우는 curl·python·git 등)를 HTTP_PROXY/HTTPS_PROXY로
+ * 이 프록시에 통과시킨다. 프록시는 요청 헤더/URL/바디에서 placeholder를 찾아, **그 placeholder의
+ * allowed_hosts에 목적지가 포함될 때만** 진짜 값으로 치환한 뒤 업스트림으로 전달한다. 허용되지 않으면
+ * placeholder를 그대로 보내 업스트림이 인증 실패 → 진짜 값은 임의 목적지로 새지 않는다.
+ *
+ * ⚠️ **"모든 아웃바운드"가 아니다.** 종전 이 주석은 MCP까지 여기를 지난다고 적었는데 **사실이 아니고**,
+ * 그 오기가 ADR 51 §6-e의 처방을 틀어지게 했다(2026-08-16 정정). 프록시 env는 `buildToolEnv`가
+ * **자식 env 객체에만** 넣고 러너 본체 `process.env`에는 넣지 않는다(`tools/_common.js`). 그리고
+ * Node의 전역 `fetch`는 애초에 HTTP_PROXY를 읽지 않는다. 따라서 러너 프로세스 자신이 보내는 요청
+ * — **LLM API 호출과 외부 MCP 호출** — 은 여기를 지나지 않는다.
+ *
+ * 그래서 MCP의 목적지 관측과 DNS TOCTOU 판정은 `mcp-client.js`가 직접 한다(0.28.0). 배선을 여기로
+ * 끌어오지 않은 이유(Node 22 · 의존성 0 · 이 프록시에 사설 IP 검사가 없음)는 ADR 51 §6-e 참조.
  *
  * - plain http:// : absolute-form 요청을 그대로 파싱해 치환·전달.
  * - https:// : CONNECT를 MITM한다(cert-manager가 호스트별 인증서 발급, 샌드박스는 CA를 신뢰).
