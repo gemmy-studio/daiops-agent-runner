@@ -24,7 +24,8 @@
 import http from 'node:http'
 import https from 'node:https'
 import {
-  substituteInText,
+  substituteInUrl,
+  substituteInBody,
   substituteHeaders,
   detectBlockedSecrets,
   PLACEHOLDER_PREFIX,
@@ -216,17 +217,27 @@ export class InjectionProxy {
     const { headers: subHeaders, substituted: headerKeys } = substituteHeaders(cleaned, dest, this.injectionMap)
     for (const k of headerKeys) usedKeys.add(k)
 
-    // URL 치환 (쿼리파라미터에 placeholder가 있을 수 있음)
-    const subPathResult = substituteInText(path, dest, this.injectionMap)
+    // URL 치환 — 헤더와 **다른 함수**를 쓴다. 값이 URL에 들어갈 때는 percent-encoding이 필요하고,
+    // 그것을 빠뜨리면 `+`가 공백으로 읽혀 키가 조용히 깨진다(2026-08-20 실사고).
+    const subPathResult = substituteInUrl(path, dest, this.injectionMap)
     const subPath = subPathResult.text
     for (const k of subPathResult.substituted) usedKeys.add(k)
 
-    // 바디 치환 (placeholder가 있을 때만 — 일반/바이너리 바디는 건드리지 않음)
+    // 바디 치환 (placeholder가 있을 때만 — 일반/바이너리 바디는 건드리지 않음).
+    // content-type을 함께 넘긴다 — JSON이면 문자열 이스케이프, form이면 percent-encoding이라야
+    // 값에 든 따옴표·`&`가 바디 구조를 깨뜨리지 않는다.
     let outBody = bodyBuf
     if (bodyBuf && bodyBuf.length && bodyBuf.includes(PLACEHOLDER_PREFIX)) {
-      const r = substituteInText(bodyBuf.toString('utf-8'), dest, this.injectionMap)
-      outBody = Buffer.from(r.text, 'utf-8')
-      for (const k of r.substituted) usedKeys.add(k)
+      const r = substituteInBody(
+        bodyBuf.toString('utf-8'),
+        cleaned['content-type'] ?? '',
+        dest,
+        this.injectionMap,
+      )
+      if (!r.skipped) {
+        outBody = Buffer.from(r.text, 'utf-8')
+        for (const k of r.substituted) usedKeys.add(k)
+      }
     }
 
     // `?.()` — 관측기를 주입하지 않는 테스트·로컬 dev에서도 프록시는 그대로 동작해야 한다.

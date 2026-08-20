@@ -2,6 +2,45 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [0.28.1] — 2026-08-20
+
+시크릿 치환이 **들어가는 자리에 맞는 인코딩을 하지 않던 것**을 고쳤다. 헤더만 맞고 URL·바디는
+전부 틀려 있었는데, 헤더 경로가 멀쩡해 원인이 오래 가려졌다.
+
+### Fixed
+- **URL 치환에 percent-encoding 적용** (`substituteInUrl` 신설) — 종전에는 헤더·URL·바디가
+  같은 raw 치환 함수(`substituteInText`)를 썼다. 진짜 값에 `+` `/` `=` 가 섞이면 URL에서는
+  **구분자로 읽힌다**(쿼리스트링의 `+`는 공백).
+  - 실사고(2026-08-20): 공공데이터포털 서비스키(base64라 `+/=` 포함)를 쿼리에 실었더니
+    받는 쪽이 `+`를 공백으로 해석해 `SERVICE_KEY_IS_NOT_REGISTERED_ERROR` 403. 같은
+    워크스페이스의 다른 키는 `Authorization` 헤더로 쓰여 정상 동작했으므로 **"키가 틀렸다"로
+    두 시간 오진**됐다. 표면마다 증상이 다른 것이 이 결함의 성질이다.
+  - 쿼리는 **전체를 재직렬화하지 않고** placeholder 자리만 바꾼다. 우리가 만들지 않은 다른
+    파라미터의 인코딩(`sig=A%20B`)이 바뀌면 서명 기반 API가 깨진다.
+  - 경로에 들어간 값도 같은 인코더를 쓴다 — `/`가 살아 있으면 경로가 갈라진다.
+- **바디 치환을 content-type별로 분리** (`substituteInBody` 신설) — JSON은 문자열 이스케이프,
+  form-urlencoded는 percent-encoding, multipart는 건드리지 않는다(경계 문자열 훼손 방지),
+  그 밖은 raw(종전 동작). 값에 따옴표가 든 키를 JSON 바디에 실으면 바디가 통째로 깨지던
+  **미발현 결함**을 함께 닫았다.
+
+### Security
+- **헤더 인젝션 가드** — 진짜 값에 CR/LF가 있으면 치환하지 않고 placeholder를 그대로 둔다.
+  종전에는 그대로 삽입돼 헤더를 하나 더 만들어 붙일 수 있었다. 호스트 불허와 같은 fail-closed
+  처리이므로 요청은 나가되 업스트림 인증이 실패한다. `substituteHeaders`가 `rejected` 키 목록을
+  함께 반환한다.
+
+### Changed
+- ⚠️ **이미 percent-encoding된 값을 저장해 우회하던 워크스페이스는 원본 값으로 되돌려야 한다.**
+  이 버전부터 프록시가 인코딩하므로 미리 인코딩된 값은 **이중 인코딩**된다. 공공데이터포털
+  기준으로는 Encoding 키(`%` 포함)가 아니라 **Decoding 키**를 저장한다.
+- 상단 주석의 placeholder 형식 표기 정정 — `dai_phantom_<64hex>`가 아니라
+  `dai_phantom_<키이름>_<16hex>`다. 길이를 근거로 placeholder 여부를 판정하면 어긋난다.
+
+### 참조
+- 설계는 Infisical Agent Vault(`internal/brokercore/substitution.go`, MIT)와 같다 — 같은 구조의
+  크레덴셜 주입 프록시가 표면별 인코딩(path=PathEscape · query=QueryEscape · header=raw+CRLF 가드 ·
+  body=content-type별)을 쓴다. 우리는 헤더 하나만 그 규약과 일치했다.
+
 ## [0.28.0] — 2026-08-16
 
 외부 MCP 아웃바운드의 **관측**과 **DNS TOCTOU** 방어. 둘 다 injection 프록시로 배선하는 대신

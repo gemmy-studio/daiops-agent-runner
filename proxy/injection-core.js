@@ -6,7 +6,8 @@
  * 값을 읽거나 훔쳐 나가도 가짜라 무용지물이다. (Agent Vault / vellum egress-proxy 모델)
  *
  * 설계 원칙:
- *  - placeholder는 `dai_phantom_<64hex>` — 고유·긴 문자열이라 일반 출력/토큰과 충돌하지 않는다.
+ *  - placeholder는 `dai_phantom_<키이름>_<16hex>` — 고유·긴 문자열이라 일반 출력/토큰과 충돌하지 않는다.
+ *    (문서에 오래 `<64hex>`로 적혀 있었으나 실제는 라벨+16hex다. 길이를 근거로 판정하면 어긋난다.)
  *  - host allowlist는 **fail-closed**: allowedHosts가 비면 어느 목적지로도 치환하지 않는다
  *    (진짜 값이 임의 호스트로 유출되는 것을 원천 차단 — 사용자가 설정에서 허용 호스트를 지정).
  *  - 치환은 요청의 헤더·URL·바디 어디서든(문자열 단위) 일어난다 — Agent Vault처럼 인증 스킴
@@ -169,22 +170,126 @@ export function substituteInText(text, host, injectionMap) {
 }
 
 /**
- * 헤더 객체 전체에 대해 치환 — 얕은 복사본 반환(원본 불변).
+ * URL(경로+쿼리)에 대한 치환 — **percent-encoding을 적용한다.** 헤더·바디와 다른 함수인 이유가 이것이다.
+ *
+ * 진짜 값에 `+` `/` `=` 가 섞여 있으면 URL에서는 **구분자로 읽힌다** — 쿼리스트링의 `+`는 공백이다.
+ * 실사고(2026-08-20): 공공데이터포털 서비스키(base64라 `+/=` 포함)를 쿼리에 실었는데 raw 치환이라
+ * 받는 쪽에서 키가 깨져 "등록되지 않은 서비스키" 403이 났다. 헤더로 쓰는 키는 멀쩡했으므로
+ * "키가 틀렸다"로 오래 오진됐다 — **표면마다 증상이 다른 것이 이 결함의 성질이다.**
+ *
+ * 설계는 Agent Vault(`internal/brokercore/substitution.go`)와 같다: 경로·쿼리는 percent-encode,
+ * 헤더는 raw(+CRLF 가드), 바디는 content-type별. 쿼리는 **전체를 재직렬화하지 않고** placeholder
+ * 자리만 바꾼다 — 우리가 만들지 않은 다른 파라미터의 인코딩을 보존해야 서명 기반 API가 깨지지 않는다.
+ *
+ * placeholder 자체는 `[A-Za-z0-9_]`(RFC 3986 unreserved)라 인코딩 전후 형태가 같다. 그래서 wire
+ * 형태의 문자열에서 그대로 찾을 수 있다 — 이 전제가 깨지면(접두사·라벨 문자 확대) 매칭이 조용히 끊긴다.
+ *
+ * @param {string} pathWithQuery — 요청 라인의 경로(`/a/b?x=y`)
+ * @param {string} host
+ * @param {Map<string,InjectionEntry>} injectionMap
+ * @returns {{ text: string, substituted: string[] }}
+ */
+export function substituteInUrl(pathWithQuery, host, injectionMap) {
+  const s = typeof pathWithQuery === 'string' ? pathWithQuery : ''
+  const substituted = new Set()
+  if (!s || !injectionMap || injectionMap.size === 0) return { text: s, substituted: [] }
+
+  const q = s.indexOf('?')
+  let pathPart = q === -1 ? s : s.slice(0, q)
+  let queryPart = q === -1 ? '' : s.slice(q + 1)
+
+  for (const [placeholder, entry] of injectionMap) {
+    const inPath = pathPart.includes(placeholder)
+    const inQuery = queryPart.includes(placeholder)
+    if (!inPath && !inQuery) continue
+    if (!isHostAllowed(host, entry.allowedHosts)) continue // fail-closed
+    // 경로 세그먼트 안의 값도 `/`가 살아 있으면 경로가 갈라지므로 같은 인코더를 쓴다.
+    const encoded = encodeURIComponent(entry.realValue)
+    if (inPath) pathPart = pathPart.split(placeholder).join(encoded)
+    if (inQuery) queryPart = queryPart.split(placeholder).join(encoded)
+    substituted.add(entry.key)
+  }
+
+  return { text: q === -1 ? pathPart : `${pathPart}?${queryPart}`, substituted: [...substituted] }
+}
+
+/** JSON 문자열 리터럴 안에 넣을 수 있게 이스케이프(따옴표를 벗긴다). */
+function jsonEscape(value) {
+  const s = JSON.stringify(String(value))
+  return s.slice(1, -1)
+}
+
+/**
+ * 요청 바디에 대한 치환 — **content-type에 맞는 인코딩**을 쓴다.
+ *
+ * 값에 따옴표·역슬래시가 있으면 JSON 바디가 깨지고, `&`·`=`가 있으면 form 바디의 필드 경계가
+ * 무너진다. multipart는 경계 문자열을 훼손할 위험이 있어 손대지 않는다(Agent Vault와 동일한 판단).
+ *
+ * @param {string} text — 바디 원문
+ * @param {string} contentType — 요청의 `content-type` 헤더(없으면 빈 문자열)
+ * @param {string} host
+ * @param {Map<string,InjectionEntry>} injectionMap
+ * @returns {{ text: string, substituted: string[], skipped: boolean }}
+ */
+export function substituteInBody(text, contentType, host, injectionMap) {
+  let s = typeof text === 'string' ? text : ''
+  const substituted = []
+  if (!s || !injectionMap || injectionMap.size === 0) return { text: s, substituted, skipped: false }
+
+  // `application/json; charset=utf-8` 처럼 매개변수가 붙으므로 미디어 타입만 떼어 소문자로 본다.
+  const media = String(contentType ?? '').split(';')[0].trim().toLowerCase()
+  if (media.startsWith('multipart/')) return { text: s, substituted, skipped: true }
+
+  const encode =
+    media === 'application/x-www-form-urlencoded' ? encodeURIComponent
+    : media === 'application/json' ? jsonEscape
+    : (v) => v
+
+  for (const [placeholder, entry] of injectionMap) {
+    if (!s.includes(placeholder)) continue
+    if (!isHostAllowed(host, entry.allowedHosts)) continue // fail-closed
+    s = s.split(placeholder).join(encode(entry.realValue))
+    substituted.push(entry.key)
+  }
+  return { text: s, substituted, skipped: false }
+}
+
+/**
+ * 헤더 객체 전체에 대해 치환 — 얕은 복사본 반환(원본 불변). 헤더 값은 **raw**로 넣는다
+ * (percent-encoding을 하면 `Authorization: Basic <base64>` 같은 값이 오히려 깨진다).
+ *
+ * 다만 값에 CR·LF가 있으면 **치환하지 않는다** — 그대로 넣으면 헤더를 하나 더 만들어 붙이는
+ * 헤더 인젝션이 된다. 호스트 불허와 같은 fail-closed 처리라, placeholder가 남은 채 나가고
+ * 업스트림이 인증에 실패한다(Agent Vault는 여기서 요청 자체를 거부한다 — 우리는 기존 정책과
+ * 일관되게 '치환 안 함'을 택했다).
+ *
  * @param {Record<string,string>} headers
  * @param {string} host
  * @param {Map<string,InjectionEntry>} injectionMap
- * @returns {{ headers: Record<string,string>, substituted: string[] }}
+ * @returns {{ headers: Record<string,string>, substituted: string[], rejected: string[] }}
  */
 export function substituteHeaders(headers, host, injectionMap) {
   /** @type {Record<string,string>} */
   const out = {}
   const substituted = new Set()
+  const rejected = new Set()
   for (const [k, v] of Object.entries(headers ?? {})) {
-    const r = substituteInText(String(v ?? ''), host, injectionMap)
-    out[k] = r.text
-    for (const key of r.substituted) substituted.add(key)
+    let s = String(v ?? '')
+    if (s && injectionMap && injectionMap.size > 0) {
+      for (const [placeholder, entry] of injectionMap) {
+        if (!s.includes(placeholder)) continue
+        if (!isHostAllowed(host, entry.allowedHosts)) continue // fail-closed
+        if (/[\r\n]/.test(entry.realValue)) {
+          rejected.add(entry.key) // 헤더 인젝션 가드 — placeholder를 그대로 둔다
+          continue
+        }
+        s = s.split(placeholder).join(entry.realValue)
+        substituted.add(entry.key)
+      }
+    }
+    out[k] = s
   }
-  return { headers: out, substituted: [...substituted] }
+  return { headers: out, substituted: [...substituted], rejected: [...rejected] }
 }
 
 /**
