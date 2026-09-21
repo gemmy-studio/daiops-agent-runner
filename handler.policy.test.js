@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { hasUnquotedShellMetachar, evaluatePolicy, isDangerousCommand, isSafeAllowlistPattern, isSandboxSafeCommand, isUnderSandbox, resolveAllowedTools } from './handler.js'
+import { hasUnquotedShellMetachar, evaluatePolicy, isDangerousCommand, isSafeAllowlistPattern, isSandboxSafeCommand, isUnderSandbox, resolveAllowedTools, DENY_GUIDANCE_EN } from './handler.js'
 
 const SDK_BUILTINS = ['Read', 'Edit', 'Glob', 'Grep', 'Bash', 'Write', 'BashOutput', 'KillShell', 'WebSearch', 'WebFetch']
 
@@ -649,6 +649,24 @@ describe('evaluatePolicy — 외부 MCP 서버 쓰기 도구 (QA #105 축1)', ()
     const { REASON_LABEL_KO } = await import('./handler.js')
     for (const key of ['external-mcp-write', 'external-mcp-undeclared']) {
       assert.ok(REASON_LABEL_KO[key], `REASON_LABEL_KO에 '${key}' 문구가 없다`)
+    }
+  })
+})
+
+describe('DENY_GUIDANCE_EN — 거부 사유별 모델 안내', () => {
+  // 사유를 새로 만들면 여기서 잡힌다. 안내가 빠지면 모델은 코드 이름만 받고, 그것이
+  // 2026-09-21 사고의 원인이었다(직원이 존재하지 않는 처방을 지어냄).
+  const DENY_REASONS = ['security-deny', 'ask-fallback-deny', 'auto-block', 'channel-deny', 'report-only']
+
+  it('policy.ts 의 deny 사유를 전부 덮는다', () => {
+    for (const reason of DENY_REASONS) {
+      assert.ok(DENY_GUIDANCE_EN[reason], `${reason} 안내 없음`)
+    }
+  })
+
+  it('모든 안내가 재시도가 의미 있는지를 말한다', () => {
+    for (const [reason, text] of Object.entries(DENY_GUIDANCE_EN)) {
+      assert.match(text, /retry|Retry|retrying|Retrying/, `${reason} 안내에 재시도 판단이 없음`)
     }
   })
 })

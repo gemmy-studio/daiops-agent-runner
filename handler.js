@@ -660,6 +660,34 @@ export const REASON_LABEL_KO = {
 }
 
 /**
+ * **거부 사유별 모델 안내** (2026-09-21 신설).
+ *
+ * 종전에는 `Tool 'X' blocked by policy: security-deny` 처럼 **코드 이름만** 돌려줬다. 그 문구만
+ * 받은 직원이 원인을 짚지 못하고 존재하지 않는 처방을 지어내 고객이 실행할 뻔했다(실사고).
+ *
+ * 문구는 **영문 고정**이다 — 이건 모델이 읽는 자리라 사전을 타지 않는다(cloud 가 사용자에게
+ * 보여 주는 한국어는 별도). 레퍼런스 실측에서 opencode 가 같은 구분을 하고 있었다.
+ *
+ * 각 문장은 **재시도가 의미 있는지**를 반드시 말한다. 그러지 않으면 모델이 같은 명령을 변형해
+ * 다시 시도하는데, 정책 거부는 변형으로 풀리지 않는다.
+ * (`saas/daiops/.claude/64-error-messages.md` 표면별 계약)
+ */
+export const DENY_GUIDANCE_EN = {
+  'security-deny':
+    'The command is not on this workspace allowlist, and this request has no channel to ask for approval. Retrying or rewriting the command will not help. Report what you could not do, and say that the workspace execution policy or the API key policy profile decides this.',
+  'ask-fallback-deny':
+    'This action needs approval and no approval channel is attached to this request. Retrying will not help. Report that approval is required.',
+  'channel-deny':
+    'This tool is not available on this channel, or this API key lacks the scope for it. Retrying will not help. Use a different approach, or report the limitation.',
+  'auto-block':
+    'The command was blocked as unsafe. A narrower command may be allowed, but do not retry this one as written.',
+  'report-only':
+    'This action is outside the delegated scope for this run. Do not retry. Summarize what you would have done instead.',
+  'repeat-failure':
+    'The same call already failed repeatedly, so retrying it will not help. Change the approach, or report that it cannot be done here.',
+}
+
+/**
  * Plan request 본문 markdown 생성.
  * 카드 본문 + 외부 채널 forwarding(슬랙·팀즈)에서 사용자가 무엇을 결재하는지 즉시 파악 가능하도록 구성.
  * 직원 메타포 + 해요체 톤(.claude/rules/terminology.md, glossary.md). 슬랙 mrkdwn 호환.
@@ -1327,7 +1355,13 @@ export async function handleChat(rawParams, res, req) {
           tool_index: toolIndex++,
           blocked_by_policy: decision.reason,
         })
-        return { behavior: 'deny', message: `Tool '${toolName}' blocked by policy: ${decision.reason}` }
+        // 코드(`decision.reason`)와 문장을 함께 준다 — 코드는 기계가 분기하는 안정 계약이고
+        // 문장은 모델이 다음 행동을 정하는 근거다. 한쪽만 주면 둘 다 못 한다.
+        const guidance = DENY_GUIDANCE_EN[decision.reason] ?? 'Retrying the same call is unlikely to help. Report what you could not do.'
+        return {
+          behavior: 'deny',
+          message: `Tool '${toolName}' was not run (policy: ${decision.reason}). ${guidance}`,
+        }
       }
 
       // plan_request — in-flight pause
