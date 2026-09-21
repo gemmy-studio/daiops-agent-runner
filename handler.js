@@ -1236,6 +1236,7 @@ export async function handleChat(rawParams, res, req) {
       if (abortController.signal.aborted) return
       emitSseEvent(sessionId, 'error', {
         code: 'response_deadline',
+        category: 'response_deadline',
         message: '응답 시간이 예산을 초과해 여기서 멈췄어요. 더 짧게 나눠 다시 요청하거나 예산을 늘려주세요',
         recoverable: false,
       })
@@ -1767,6 +1768,7 @@ export async function handleChat(rawParams, res, req) {
           // 호출자 명시 하드캡(max_turns)과 자동연장 소진(turn_budget_exhausted)을 코드로 구분.
           emitSseEvent(sessionId, 'error', {
             code: params.max_turns_hard ? 'max_turns' : 'turn_budget_exhausted',
+            category: params.max_turns_hard ? 'max_turns' : 'turn_budget_exhausted',
             message: params.max_turns_hard
               ? `요청한 ${params.max_turns}턴 상한에 도달해 종료했어요`
               : '작업이 예상보다 길어져 여기서 일단 멈췄어요. 더 작은 단위로 나눠 다시 요청해주세요',
@@ -1924,6 +1926,7 @@ export async function handleChat(rawParams, res, req) {
         if (message.subtype === 'error_max_turns') {
           emitSseEvent(sessionId, 'error', {
             code: 'max_turns',
+            category: 'max_turns',
             message: `도구 루프가 ${params.max_turns}턴 상한에 도달해 종료했어요. 더 작은 단위로 나눠 다시 요청해주세요`,
             recoverable: false,
           })
@@ -1932,6 +1935,7 @@ export async function handleChat(rawParams, res, req) {
           // (REF-T1 압축의 트리거. 압축 도입 전까지는 새 세션 권장으로 안내.)
           emitSseEvent(sessionId, 'error', {
             code: 'context_overflow',
+            category: 'context_overflow',
             message: '대화가 너무 길어져 컨텍스트 한도에 도달했어요. 새 세션에서 다시 시작하면 이어갈 수 있어요',
             recoverable: false,
           })
