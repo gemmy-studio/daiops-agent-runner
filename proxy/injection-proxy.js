@@ -110,17 +110,38 @@ export class InjectionProxy {
     await new Promise((r) => (this.mitm ? this.mitm.close(r) : r()))
   }
 
+  /**
+   * 기계 코드 + 구조화 필드 + 사람 문장 — 403 차단 응답과 같은 형식을 400/502 실패에도 적용한다
+   * (64-error-messages.md B4). 예외 원문(`err.message`)은 담지 않는다.
+   */
+  _sendJsonError(res, status, payload) {
+    const body = JSON.stringify(payload)
+    res.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-length': Buffer.byteLength(body),
+    })
+    res.end(body)
+  }
+
   /** plain http:// (absolute-form) 요청 처리. */
   _handleAbsolute(req, res) {
     let target
     try {
       target = new URL(req.url)
     } catch {
-      res.writeHead(400).end('bad request target')
+      this._sendJsonError(res, 400, {
+        error: 'bad_request_target',
+        message: '요청 대상 URL을 해석하지 못했습니다. 프록시로 보낸 요청의 URL 형식을 확인해 주세요',
+      })
       return
     }
     if (target.protocol !== 'http:') {
-      res.writeHead(400).end('unsupported scheme')
+      this._sendJsonError(res, 400, {
+        error: 'unsupported_scheme',
+        scheme: target.protocol,
+        host: target.hostname,
+        message: `이 프록시는 http 스킴만 처리합니다(받은 스킴: ${target.protocol}). https는 CONNECT로 보내 주세요`,
+      })
       return
     }
     this._collectBody(req, (bodyBuf) => {
@@ -199,7 +220,7 @@ export class InjectionProxy {
         secret: keys[0],
         secrets: keys,
         host: dest,
-        message: `이 시크릿(${keys.join(', ')})은 ${dest}에 대해 허용되지 않았어요. 워크스페이스 오너가 설정 → 시크릿의 허용 호스트에 ${dest}을(를) 추가해야 해요`,
+        message: `이 시크릿(${keys.join(', ')})은 ${dest}에 대해 허용되지 않았습니다. 워크스페이스 오너가 설정 → 시크릿의 허용 호스트에 ${dest}을(를) 추가해 주세요`,
       })
       res.writeHead(403, {
         'content-type': 'application/json; charset=utf-8',
@@ -269,8 +290,20 @@ export class InjectionProxy {
     })
     upstream.on('error', (err) => {
       this.log.warn('[injection-proxy] upstream 오류', { host: dest, error: err.message })
-      if (!res.headersSent) res.writeHead(502)
-      res.end('upstream error')
+      // 예외 원문(err.message)은 응답에 담지 않는다(64-error-messages.md 조항 7) — err.code(예:
+      // ENOTFOUND·ECONNREFUSED·ETIMEDOUT)는 Node가 고정으로 쓰는 기계 코드라 담아도 내부 구현
+      // 노출이 아니다.
+      if (!res.headersSent) {
+        this._sendJsonError(res, 502, {
+          error: 'upstream_unreachable',
+          host: dest,
+          cause: err.code || 'unknown',
+          message: `${dest}에 연결하지 못했습니다. 호스트 이름과 네트워크 상태를 확인한 뒤 다시 시도해 주세요. 반복되면 이 호스트가 도달 가능한지부터 확인해 주세요`,
+        })
+        return
+      }
+      // 응답이 이미 시작된 뒤 끊기면 본문 구조를 보장할 수 없으므로 JSON을 덧붙이지 않고 소켓만 닫는다.
+      res.end()
     })
     if (outBody && outBody.length) upstream.write(outBody)
     upstream.end()
