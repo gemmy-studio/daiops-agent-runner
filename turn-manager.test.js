@@ -26,6 +26,7 @@ import {
   resolveOffloadBudgetChars,
   ANTHROPIC_DEFAULT_CONTEXT_WINDOW,
   ANTHROPIC_1M_CONTEXT_WINDOW,
+  promptTokensOf,
 } from './turn-manager.js'
 import { sdkMessageToLLMEvents } from './llm-wrapper.js'
 
@@ -334,7 +335,10 @@ describe('stopReasonToResultSubtype', () => {
   it('max_tokens → error_max_turns', () => assert.equal(stopReasonToResultSubtype('max_tokens'), 'error_max_turns'))
   it('model_context_window_exceeded → error_context_overflow (#14, success로 두지 않음)', () =>
     assert.equal(stopReasonToResultSubtype('model_context_window_exceeded'), 'error_context_overflow'))
-  it('null → success', () => assert.equal(stopReasonToResultSubtype(null), 'success'))
+  // 감사 A-204: message_stop 없이 끊긴 스트림은 완료가 아니다.
+  it('null → error_stream_interrupted', () => assert.equal(stopReasonToResultSubtype(null), 'error_stream_interrupted'))
+  it('이어 붙이기 상한을 넘긴 pause_turn → error_stream_interrupted', () =>
+    assert.equal(stopReasonToResultSubtype('pause_turn'), 'error_stream_interrupted'))
 })
 
 // ── buildAnthropicRequest ─────────────────────────────────────────────
@@ -2148,4 +2152,99 @@ describe('runAnthropicTurnManager — connect/헤더 타임아웃 (P1①)', () =
     // 취소는 timeout 재작성 대상이 아님 — throw되면 ETIMEDOUT이 아니어야 하고, 조용히 종료돼도 무방.
     assert.ok(!thrown || thrown.code !== 'ETIMEDOUT')
   })
+})
+
+// ── 감사 U-1 (A-201·A-203·A-204·A-209) ──────────────────────────────────
+
+describe('5세대 모델 표 (A-201)', () => {
+  const GEN5 = ['claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'anthropic/claude-opus-5.5']
+  it('adaptive thinking · xhigh · 샘플링 거부를 모두 안다', () => {
+    for (const m of GEN5) {
+      assert.equal(supportsAdaptiveThinking(m), true, m)
+      assert.equal(supportsXhighEffort(m), true, m)
+      assert.equal(forbidsSamplingParams(m), true, m)
+    }
+  })
+  it('claude-3-5-sonnet 같은 옛 이름과 겹치지 않는다', () => {
+    assert.equal(supportsAdaptiveThinking('claude-3-5-sonnet'), false)
+    assert.equal(supportsAdaptiveThinking('claude-haiku-4-5'), false)
+  })
+  it('claude-opus-5 요청에 thinking 과 effort 가 실린다', () => {
+    const opts = buildThinkingOptions('claude-opus-5', { effort: 'xhigh' })
+    assert.deepEqual(opts?.output_config, { effort: 'xhigh' })
+    assert.equal(opts?.thinking?.type, 'adaptive')
+  })
+})
+
+/** 호출마다 다른 SSE 를 돌려주는 mock fetch. */
+function sequenceFetch(sseTexts) {
+  const calls = []
+  const fn = async function (_url, init) {
+    calls.push(JSON.parse(init.body))
+    const text = sseTexts[Math.min(calls.length - 1, sseTexts.length - 1)]
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(text)); c.close() } })
+    return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+  fn.calls = calls
+  return fn
+}
+
+function textTurnSse(text, stopReason, usage = { input_tokens: 10, output_tokens: 0 }, { withStop = true } = {}) {
+  return sse([
+    { event: 'message_start', data: { message: { usage } } },
+    { event: 'content_block_start', data: { index: 0, content_block: { type: 'text', text: '' } } },
+    { event: 'content_block_delta', data: { index: 0, delta: { type: 'text_delta', text } } },
+    { event: 'content_block_stop', data: { index: 0 } },
+    ...(withStop
+      ? [
+          { event: 'message_delta', data: { delta: { stop_reason: stopReason }, usage: { output_tokens: 2 } } },
+          { event: 'message_stop', data: {} },
+        ]
+      : []),
+  ])
+}
+
+async function collect(gen) {
+  const out = []
+  for await (const m of gen) out.push(m)
+  return out
+}
+
+describe('runAnthropicTurnManager — 턴 종료 판정 (A-203·A-204)', () => {
+  const input = { prompt: 'hi', options: { model: 'claude-sonnet-4-6', cacheControl: false } }
+
+  it('pause_turn 은 응답을 이어 붙여 다시 요청하고 user 메시지를 더하지 않는다', async () => {
+    const fetchFn = sequenceFetch([textTurnSse('검색 중', 'pause_turn'), textTurnSse('끝', 'end_turn')])
+    const out = await collect(runAnthropicTurnManager(input, { fetchFn, apiKey: 'sk-test' }))
+    assert.equal(fetchFn.calls.length, 2)
+    const second = fetchFn.calls[1].messages
+    assert.equal(second[second.length - 1].role, 'assistant')
+    assert.deepEqual(out.at(-1), { type: 'result', subtype: 'success' })
+  })
+
+  it('pause_turn 이어 붙이기는 상한에서 멈추고 성공으로 끝내지 않는다', async () => {
+    const fetchFn = sequenceFetch([textTurnSse('검색 중', 'pause_turn')])
+    const out = await collect(runAnthropicTurnManager(input, { fetchFn, apiKey: 'sk-test' }))
+    assert.equal(fetchFn.calls.length, 6)
+    assert.equal(out.at(-1).subtype, 'error_stream_interrupted')
+  })
+
+  it('message_stop 없이 끊긴 스트림은 success 가 아니다', async () => {
+    const fetchFn = sequenceFetch([textTurnSse('반쯤', null, undefined, { withStop: false })])
+    const out = await collect(runAnthropicTurnManager(input, { fetchFn, apiKey: 'sk-test' }))
+    assert.equal(out.at(-1).subtype, 'error_stream_interrupted')
+  })
+
+  it('refusal 은 완료로 두되 stop_reason 을 함께 넘긴다', async () => {
+    const fetchFn = sequenceFetch([textTurnSse('', 'refusal')])
+    const out = await collect(runAnthropicTurnManager(input, { fetchFn, apiKey: 'sk-test' }))
+    assert.deepEqual(out.at(-1), { type: 'result', subtype: 'success', stop_reason: 'refusal' })
+  })
+})
+
+describe('promptTokensOf — 프루닝 트리거 크기 (A-209)', () => {
+  it('캐시 읽기·쓰기를 더한다 (input_tokens 는 캐시 제외값)', () => {
+    assert.equal(promptTokensOf({ input_tokens: 7, cache_read_input_tokens: 150_000, cache_creation_input_tokens: 2_000 }), 152_007)
+  })
+  it('usage 가 없으면 0', () => assert.equal(promptTokensOf(undefined), 0))
 })

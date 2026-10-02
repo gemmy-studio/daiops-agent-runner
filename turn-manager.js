@@ -273,14 +273,35 @@ export const ANTHROPIC_OUTPUT_LIMITS = Object.freeze({
 
 export const ANTHROPIC_DEFAULT_OUTPUT_LIMIT = 128_000
 
-/** Adaptive thinking 지원 세대 — 4.6/4.7/4.8. 매칭은 점·하이픈 양쪽 모두 시도(OpenRouter 호환). */
-export const ADAPTIVE_THINKING_SUBSTRINGS = Object.freeze(['4-6', '4.6', '4-7', '4.7', '4-8', '4.8'])
+/**
+ * 5세대(Opus 5·5.5, Sonnet 5·5.5, Fable 5·5.1, Mythos 5·5.1) 식별자. 버전 숫자가 아니라 「계열-5」로
+ * 잡는다 — `-5-5`·`-5-1`·점 표기를 모두 덮고, `claude-3-5-sonnet`(「5-sonnet」)과는 겹치지 않는다.
+ * 세 표 모두 이 세대를 포함한다(감사 A-201: 종전 표가 4.x 만 알아 claude-opus-5 에서 thinking 이 꺼졌다).
+ * 근거: Claude API 문서 Thinking & Effort 표(2026-09-25) — 5세대 전부 adaptive, xhigh 지원, 샘플링 400.
+ */
+const GEN5_SUBSTRINGS = Object.freeze(['opus-5', 'sonnet-5', 'fable-5', 'mythos-5'])
 
-/** xhigh effort 지원 세대 — 4.7+. 미지원 모델에서 xhigh 요청 시 'max'로 다운그레이드. */
-export const XHIGH_EFFORT_SUBSTRINGS = Object.freeze(['4-7', '4.7', '4-8', '4.8'])
+/** Adaptive thinking 지원 세대 — 4.6/4.7/4.8 + 5세대. 매칭은 점·하이픈 양쪽 모두 시도(OpenRouter 호환). */
+export const ADAPTIVE_THINKING_SUBSTRINGS = Object.freeze(['4-6', '4.6', '4-7', '4.7', '4-8', '4.8', ...GEN5_SUBSTRINGS])
 
-/** sampling param(temperature/top_p/top_k) 거부 세대 — 4.7+. 비기본값 전송 시 400. */
-export const NO_SAMPLING_PARAMS_SUBSTRINGS = Object.freeze(['4-7', '4.7', '4-8', '4.8'])
+/** xhigh effort 지원 세대 — 4.7+ · 5세대. 미지원 모델에서 xhigh 요청 시 'max'로 다운그레이드. */
+export const XHIGH_EFFORT_SUBSTRINGS = Object.freeze(['4-7', '4.7', '4-8', '4.8', ...GEN5_SUBSTRINGS])
+
+/** sampling param(temperature/top_p/top_k) 거부 세대 — 4.7+ · 5세대. 비기본값 전송 시 400. */
+export const NO_SAMPLING_PARAMS_SUBSTRINGS = Object.freeze(['4-7', '4.7', '4-8', '4.8', ...GEN5_SUBSTRINGS])
+
+/**
+ * 한 호출의 실제 프롬프트 크기(토큰) = input + 캐시 읽기 + 캐시 쓰기. Anthropic 의 `input_tokens` 는
+ * 캐시를 뺀 값이라 그것만으로 컨텍스트 크기를 재면 캐시가 잘 맞을수록 0 에 가까워진다(감사 A-209).
+ * @param {Usage | undefined} usage
+ */
+export function promptTokensOf(usage) {
+  const u = usage ?? {}
+  return (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+}
+
+/** pause_turn(서버 도구 루프 상한) 이어 붙이기 상한. 문서 권장대로 무한 반복을 막는다. */
+export const MAX_PAUSE_CONTINUATIONS = 5
 
 /** Adaptive effort 매핑. legacy 'minimal'은 'low'로. */
 const ADAPTIVE_EFFORT_MAP = Object.freeze({
@@ -357,6 +378,9 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
 /**
  * Anthropic stop_reason → SDK result.subtype 매핑.
  * SDK 호환: end_turn/stop_sequence/refusal → success, max_tokens → error_max_turns.
+ * refusal 은 success 로 두되 호출자가 `stop_reason` 을 함께 받아 거절을 표시한다(감사 A-203, 제품 결정:
+ * 완료 + 거절 표시 · 자동 복구 안 탐). null(message_stop 없이 끊김)은 완료가 아니라 error_stream_interrupted
+ * (감사 A-204: 중간에 끊긴 답이 완료로 저장됐다). pause_turn 은 루프가 이어 붙이므로 여기 오지 않는다.
  * model_context_window_exceeded → error_context_overflow: 컨텍스트 한도 초과는 정상 end-of-turn이
  * 아니라 *잘린* 응답이다. success로 매핑하면 호출자가 절단을 완료로 오인한다(silent truncation).
  * 호출자(handler.js)가 이 subtype을 error SSE로 surface하고, REF-T1 압축의 트리거로 쓴다.
@@ -364,11 +388,12 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
  *  금지 — anthropic_adapter.py:1501-1516. opencode/openhuman도 overflow를 success로 두지 않는다.)
  *
  * @param {AnthropicStopReason | null | undefined} stopReason
- * @returns {'success' | 'error_max_turns' | 'error_context_overflow'}
+ * @returns {'success' | 'error_max_turns' | 'error_context_overflow' | 'error_stream_interrupted'}
  */
 export function stopReasonToResultSubtype(stopReason) {
   if (stopReason === 'max_tokens') return 'error_max_turns'
   if (stopReason === 'model_context_window_exceeded') return 'error_context_overflow'
+  if (stopReason === null || stopReason === undefined || stopReason === 'pause_turn') return 'error_stream_interrupted'
   return 'success'
 }
 
@@ -1252,6 +1277,8 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   let thinkingSigRetryDone = false
   // A2-② 컨텍스트 압축: 직전 turn의 실제 input_tokens. 임계 초과 시 다음 turn 전 프루닝 트리거.
   let lastInputTokens = 0
+  /** pause_turn 이어 붙이기 횟수(턴 수와 별개). */
+  let pauseContinuations = 0
 
   // 단일 turn의 LLM 호출(fetch + 전체 SSE 누적)을 1 단위로 묶는다. accumulateTurn이 스트림을 끝까지
   // 소비한 뒤에야 결과를 반환하므로 — turn-manager가 아직 아무것도 yield하지 않은 시점 — 이 함수 전체를
@@ -1434,10 +1461,21 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       message: { content: assistantTurn.content, usage: assistantTurn.usage },
     }
 
-    // A2-② — 다음 turn 프루닝 판정용. Anthropic usage.input_tokens(캐시 포함 실제 프롬프트 크기).
-    lastInputTokens = assistantTurn.usage?.input_tokens ?? 0
+    // A2-② — 다음 turn 프루닝 판정용. 실제 프롬프트 크기 = input + 캐시 읽기 + 캐시 쓰기.
+    // Anthropic 의 input_tokens 는 캐시를 **뺀** 값이라(prod 평균 sonnet 7·opus 3) 그것만 보면 이 분기가
+    // 영영 닿지 않았다(감사 A-209).
+    lastInputTokens = promptTokensOf(assistantTurn.usage)
 
     const stop = assistantTurn.stop_reason
+
+    // pause_turn — 서버 도구(웹 검색 등) 루프가 상한에 닿아 멈춘 것. 응답을 그대로 이어 붙여 다시 요청하면
+    // 서버가 이어서 진행한다(「계속」 같은 user 메시지는 넣지 않는다). 종전에는 success 로 끝나 답이 비었다.
+    if (stop === 'pause_turn' && pauseContinuations < MAX_PAUSE_CONTINUATIONS) {
+      pauseContinuations++
+      messages.push({ role: 'assistant', content: assistantTurn.content })
+      continue
+    }
+
     if (stop !== 'tool_use') {
       // 최종턴 전환(AGENT-API-5): final_turn 모드에서 도구 자유 사용 후 자연 종료(성공 subtype)가 나오면,
       // 방금 답변을 history에 넣고 구조화 제출을 지시한 뒤 forcing phase로 1회 전환한다. max_tokens/
@@ -1459,7 +1497,7 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
         }
         continue
       }
-      yield { type: 'result', subtype: stopReasonToResultSubtype(stop) }
+      yield { type: 'result', subtype: stopReasonToResultSubtype(stop), ...(stop === 'refusal' ? { stop_reason: 'refusal' } : {}) }
       return
     }
 

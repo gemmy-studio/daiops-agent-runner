@@ -730,6 +730,9 @@ export const REASON_LABEL_KO = {
  * 다시 시도하는데, 정책 거부는 변형으로 풀리지 않는다.
  * (`saas/daiops/.claude/64-error-messages.md` 표면별 계약)
  */
+/** 모델이 거절해 본문이 비었을 때 사용자에게 보이는 안내. 같은 파일의 다른 안내 문구와 같은 해요체. */
+export const REFUSAL_NOTICE = '이 요청은 처리하지 못했어요. 요청 내용을 바꿔 다시 시도해주세요'
+
 export const DENY_GUIDANCE_EN = {
   'security-deny':
     'The command is not on this workspace allowlist, and this request has no channel to ask for approval. Retrying or rewriting the command will not help. Report what you could not do, and say that the workspace execution policy or the API key policy profile decides this.',
@@ -1369,6 +1372,8 @@ export async function handleChat(rawParams, res, req) {
     const mcpServers = Array.isArray(params.mcp_servers) ? params.mcp_servers : []
 
     let finalContent = ''
+    /** done 이벤트에 실을 종료 사유. 지금은 refusal 만 싣는다(감사 A-203). */
+    let stopReasonForDone = null
 
     /**
      * canUseTool 훅 (T1) — SDK가 도구 실행 직전 호출. 정책 평가 결과에 따라 분기:
@@ -2029,6 +2034,21 @@ export async function handleChat(rawParams, res, req) {
             message: `도구 루프가 ${params.max_turns}턴 상한에 도달해 종료했어요. 더 작은 단위로 나눠 다시 요청해주세요`,
             recoverable: false,
           })
+        } else if (message.subtype === 'error_stream_interrupted') {
+          // 모델 스트림이 message_stop 없이 끊겼거나 pause_turn 이어 붙이기가 상한에 닿았다(감사 A-204).
+          // 받은 데까지를 완료로 두면 중간에 끊긴 답이 정상 답처럼 저장된다. 재실행은 하지 않는다
+          // (도구를 이미 돌렸을 수 있다) — 서버 오류 계열로 알린다.
+          emitSseEvent(sessionId, 'error', {
+            code: 'stream_interrupted',
+            category: 'server_error',
+            message: '답변을 만드는 중에 연결이 끊겼어요. 다시 요청해주세요',
+            recoverable: false,
+          })
+        } else if (message.subtype === 'success' && message.stop_reason === 'refusal') {
+          // 모델이 요청을 거절했다(감사 A-203, 제품 결정: 완료 + 거절 표시, 자동 복구 안 탐).
+          // 본문이 비면 사용자에게 빈 말풍선이 남으므로 안내 한 줄을 넣는다.
+          stopReasonForDone = 'refusal'
+          if (!String(finalContent ?? '').trim()) finalContent = REFUSAL_NOTICE
         } else if (message.subtype === 'error_context_overflow') {
           // 컨텍스트 한도 초과 — 응답이 잘렸다. success로 두면 절단을 완료로 오인하므로 error로 surface.
           // (REF-T1 압축의 트리거. 압축 도입 전까지는 새 세션 권장으로 안내.)
@@ -2048,6 +2068,7 @@ export async function handleChat(rawParams, res, req) {
       session_id: sessionId,
       total_input_tokens: totalInputTokens,
       total_output_tokens: totalOutputTokens,
+      ...(stopReasonForDone ? { stop_reason: stopReasonForDone } : {}),
     })
     // Phase 3a-ii backstop: 정상 종료 결과를 finally의 ingest POST가 쓸 수 있게 outer로 복제.
     terminalIngestContent = finalContent

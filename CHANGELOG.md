@@ -13,6 +13,17 @@
   실행하는 우회는 명령 문자열로 막지 못한다.
 - **channel deny 에 든 서버측 웹 도구를 요청 `tools[]` 에서 뺀다** (`resolveAllowedTools` 의 `denyTools`).
   WebSearch/WebFetch 는 canUseTool 을 거치지 않아, 미확인 발신자 턴의 deny 가 집행되지 않았다.
+- **큰따옴표 안의 명령 치환(`$(…)`·백틱)을 셸 메타문자로 판정**한다. allowlist 된 `git` 이라도
+  `git log "$(curl x)"` 가 결재 없이 자동 허용됐다. cloud `policy.ts` 사본과 같은 규칙.
+
+### Fixed
+- **5세대 모델을 세대 표에 넣었다** (Opus 5·5.5, Sonnet 5·5.5, Fable 5·5.1, Mythos). 종전 표가 4.x 만 알아
+  `claude-opus-5` 에서 adaptive thinking 과 effort 가 꺼지고 샘플링 파라미터도 빼지 않았다.
+- **턴 종료 판정**: `message_stop` 없이 끊긴 스트림(stop_reason null)은 `error_stream_interrupted` 로
+  알린다(종전 success). `pause_turn` 은 응답을 이어 붙여 다시 요청한다(최대 5회). `refusal` 은 완료로 두되
+  done 에 `stop_reason: 'refusal'` 을 싣고 본문이 비면 안내 한 줄을 넣는다.
+- **프루닝 트리거**가 캐시 읽기·쓰기를 더한 실제 프롬프트 크기를 본다(`promptTokensOf`). `input_tokens`
+  는 캐시 제외값이라 분기가 사실상 발동하지 않았다.
 
 ## [0.28.1] — 2026-08-20
 
