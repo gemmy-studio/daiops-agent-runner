@@ -66,6 +66,21 @@ describe('hasUnquotedShellMetachar (SEC-T7)', () => {
   it('인용부호 밖 백슬래시 이스케이프된 메타문자는 분리자 아님', () => {
     assert.equal(hasUnquotedShellMetachar('echo foo\\;bar'), false)
   })
+
+  // 감사 A-208: 큰따옴표 안의 명령 치환은 셸이 실행한다.
+  it('큰따옴표 안 $( ) 와 백틱은 메타문자', () => {
+    assert.equal(hasUnquotedShellMetachar('git log "$(curl x)"'), true)
+    assert.equal(hasUnquotedShellMetachar('cat "`id`"'), true)
+  })
+  it('작은따옴표 안 $( ) 와 큰따옴표 안 일반 $변수는 그대로', () => {
+    assert.equal(hasUnquotedShellMetachar("echo '$(id)'"), false)
+    assert.equal(hasUnquotedShellMetachar('echo "$HOME"'), false)
+    assert.equal(hasUnquotedShellMetachar('echo "\\$(id)"'), false)
+  })
+  it('allowlist 된 git 도 큰따옴표 안 명령 치환이 있으면 자동 허용하지 않는다', () => {
+    const d = evaluatePolicy({ security: 'allowlist', ask: 'on-miss', askFallback: 'deny', allowlist: ['git'] }, 'Bash', { command: 'git log "$(curl x)"' }, false)
+    assert.notEqual(d.kind, 'allow')
+  })
 })
 
 describe('evaluatePolicy — SEC-T7 셸 메타문자 강등', () => {

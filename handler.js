@@ -336,6 +336,8 @@ export function hasUnquotedShellMetachar(command) {
         i++
         continue
       }
+      // 큰따옴표 안에서도 셸은 명령 치환(`$(…)`·백틱)을 실행한다(감사 A-208). 작은따옴표 안은 리터럴.
+      if (quote === '"' && (ch === '`' || (ch === '$' && str[i + 1] === '('))) return true
       if (ch === quote) quote = null
       continue
     }
