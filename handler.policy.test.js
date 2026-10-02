@@ -670,3 +670,64 @@ describe('DENY_GUIDANCE_EN — 거부 사유별 모델 안내', () => {
     }
   })
 })
+
+// 감사 A-301: 서버측 웹 도구는 canUseTool 을 안 거치므로 deny 를 tools[] 단계에서 집행해야 한다.
+describe('resolveAllowedTools: channel deny 의 서버측 도구 제거 (A-301)', () => {
+  it('deny 에 든 WebSearch/WebFetch 는 목록에서 빠진다', () => {
+    const out = resolveAllowedTools({ builtins: SDK_BUILTINS, userTools: [], toolAllowlist: undefined, denyTools: ['WebSearch', 'WebFetch', 'Bash'] })
+    assert.equal(out.includes('WebSearch'), false)
+    assert.equal(out.includes('WebFetch'), false)
+  })
+  it('로컬 도구는 deny 여도 목록에 남는다 (canUseTool 이 막는다)', () => {
+    const out = resolveAllowedTools({ builtins: SDK_BUILTINS, userTools: [], toolAllowlist: undefined, denyTools: ['WebSearch', 'Bash'] })
+    assert.equal(out.includes('Bash'), true)
+    assert.equal(out.includes('WebFetch'), true)
+  })
+})
+
+// 감사 A-601: 거버넌스 경로 쓰기가 전권·샌드박스 자유 쓰기·상대경로로 새지 않아야 한다.
+describe('evaluatePolicy: 거버넌스 경로 보호 (A-601)', () => {
+  const full = { security: 'full', ask: 'off', askFallback: 'full', allowlist: [], sandboxRoot: '/workspace' }
+  const sandboxed = { security: 'allowlist', ask: 'on-miss', askFallback: 'deny', allowlist: [], sandboxRoot: '/workspace' }
+
+  it('전권 직원도 Bash cp 로 스킬을 active/ 에 넣을 수 없다 (결재 채널 없음 → deny)', () => {
+    const d = evaluatePolicy(full, 'Bash', { command: 'cp -r /workspace/.daiops/skills/candidates/x /workspace/.daiops/skills/active/x' }, false)
+    assert.equal(d.kind, 'deny')
+    assert.equal(d.reason, 'protected-path')
+  })
+  it('샌드박스 자유 쓰기에서도 리다이렉트로 규칙 파일을 덮을 수 없다', () => {
+    const d = evaluatePolicy(sandboxed, 'Bash', { command: 'echo hi > .daiops/instructions/core.md' }, true)
+    assert.equal(d.kind, 'plan_request')
+    assert.equal(d.reason, 'protected-path')
+  })
+  it('cd 뒤 상대 이동도 잡는다', () => {
+    const d = evaluatePolicy(full, 'Bash', { command: 'cd /workspace/.daiops && mv skills/candidates/x skills/active/x' }, false)
+    assert.equal(d.kind, 'deny')
+  })
+  it('상대 경로 Write 도 보호 목록과 대조한다', () => {
+    const d = evaluatePolicy(sandboxed, 'Write', { file_path: '.daiops/skills/active/x/SKILL.md', content: 'x' }, false)
+    assert.equal(d.kind, 'deny')
+    assert.equal(d.reason, 'protected-path')
+  })
+  it('전권 직원의 절대 경로 Edit 도 막는다', () => {
+    const d = evaluatePolicy(full, 'Edit', { file_path: '/workspace/schema/persona.yaml', old_string: 'a', new_string: 'b' }, false)
+    assert.equal(d.kind, 'deny')
+  })
+  it('읽기는 막지 않는다', () => {
+    const d = evaluatePolicy(sandboxed, 'Bash', { command: 'cat /workspace/.daiops/skills/active/x/SKILL.md' }, false)
+    assert.equal(d.kind, 'allow')
+  })
+  it('보호 밖 경로의 쓰기는 종전대로 자동 허용', () => {
+    const d = evaluatePolicy(sandboxed, 'Bash', { command: 'cp a.txt /workspace/knowledge/b.txt' }, false)
+    assert.equal(d.kind, 'allow')
+    const e = evaluatePolicy(full, 'Write', { file_path: '/workspace/out/report.md', content: 'x' }, false)
+    assert.equal(e.kind, 'allow')
+  })
+  it('stderr 리다이렉트만 있는 읽기는 쓰기로 보지 않는다', () => {
+    const d = evaluatePolicy(sandboxed, 'Bash', { command: 'ls /workspace/.daiops/skills/active 2>/dev/null' }, false)
+    assert.equal(d.kind, 'allow')
+  })
+  it('거부 사유에 모델 안내 문구가 있다', () => {
+    assert.ok(DENY_GUIDANCE_EN['protected-path'])
+  })
+})

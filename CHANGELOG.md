@@ -2,6 +2,18 @@
 
 `daiops-agent-runner`의 버전별 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/) 준용, 버전은 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+- **거버넌스 경로 쓰기를 전권·샌드박스 자유 쓰기보다 먼저 막는다** (`guardProtectedHarnessWrite`).
+  종전에는 Write/Edit 의 절대경로만 보호 목록과 대조했고, `security:'full'` 은 그보다 먼저 통과했으며,
+  샌드박스 안전 Bash 는 목적지를 보지 않았다. 그래서 `cp …/candidates/x …/active/x` 한 줄로 승인 없이
+  스킬을 활성화할 수 있었다. 이제 결재 채널이 있으면 묻고(`protected-path`), 없으면 askFallback 과
+  무관하게 거부한다. 상대경로는 sandboxRoot 기준으로 풀어 대조한다. 한계: 스크립트 파일을 만들어
+  실행하는 우회는 명령 문자열로 막지 못한다.
+- **channel deny 에 든 서버측 웹 도구를 요청 `tools[]` 에서 뺀다** (`resolveAllowedTools` 의 `denyTools`).
+  WebSearch/WebFetch 는 canUseTool 을 거치지 않아, 미확인 발신자 턴의 deny 가 집행되지 않았다.
+
 ## [0.28.1] — 2026-08-20
 
 시크릿 치환이 **들어가는 자리에 맞는 인코딩을 하지 않던 것**을 고쳤다. 헤더만 맞고 URL·바디는

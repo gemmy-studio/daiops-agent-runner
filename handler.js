@@ -8,6 +8,7 @@
 
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import path from 'node:path'
 import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './tools/request-secret.js'
 import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX, isRememberFailure } from './tools/remember.js'
@@ -109,8 +110,14 @@ export function decideTurnBudget({ turnCount, turnBudget, extensionsUsed, maxTur
  *   없이 opaque 식별자만 전달 — cloud=해석 단일지점, 러너=데이터 강제(ADR21).
  * @returns {string[]}
  */
-export function resolveAllowedTools({ builtins, userTools, toolAllowlist }) {
+export function resolveAllowedTools({ builtins, userTools, toolAllowlist, denyTools }) {
   let allowedTools = [...new Set([...(builtins ?? []), ...(userTools ?? [])])]
+  // 서버측 도구(WebSearch/WebFetch)는 canUseTool 을 거치지 않으므로 channel deny 를 여기서 집행한다
+  // (감사 A-301). 미확인 발신자 턴의 `buildUnverifiedToolOverrides` 가 두 도구를 deny 에 넣지만,
+  // 종전에는 evaluatePolicy 에서만 읽혀 요청 tools[] 에 그대로 실렸다. 로컬 도구는 canUseTool 이 막는다.
+  if (Array.isArray(denyTools) && denyTools.length > 0) {
+    allowedTools = allowedTools.filter((t) => !(SERVER_SIDE_TOOL_NAMES.has(t) && denyTools.includes(t)))
+  }
   if (Array.isArray(toolAllowlist) && toolAllowlist.length > 0) {
     allowedTools = allowedTools.filter((t) => {
       const bare = t.replace(/^mcp__.+?__/, '')
@@ -217,6 +224,8 @@ This call is a follow-up turn in an ongoing conversation, not the first turn of 
 /** Tool 호출 정책 평가. 호출자가 보낸 policy(security/ask/allowlist)와 동일 스키마 —
  *  policy 미전달 시 아래 DEFAULT_POLICY(deny-on-miss)로 보수적 fallback. */
 const RISKY_TOOL_NAMES = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit'])
+/** Anthropic 서버측 도구 — 실행이 API 안에서 일어나 canUseTool 을 거치지 않는다. */
+const SERVER_SIDE_TOOL_NAMES = new Set(['WebSearch', 'WebFetch'])
 const SAFE_BINS = new Set(['jq', 'grep', 'cut', 'sort', 'uniq', 'head', 'tail', 'tr', 'wc'])
 
 /**
@@ -483,6 +492,51 @@ export function isProtectedHarnessPath(filePath, protectedPaths) {
   return protectedPaths.some((p) => (p.endsWith('/') ? filePath.startsWith(p) : filePath === p))
 }
 
+/**
+ * 파일 도구의 `file_path`를 절대경로로 푼다. 상대경로는 cwd(=sandboxRoot, 없으면 /workspace) 기준.
+ * 보호 목록이 절대경로라 상대경로를 그대로 비교하면 `.daiops/skills/x` 가 빠져나간다.
+ */
+export function resolveToolFilePath(filePath, sandboxRoot) {
+  const fp = String(filePath ?? '')
+  if (!fp) return ''
+  return path.posix.resolve(sandboxRoot || '/workspace', fp)
+}
+
+// Bash 가 보호 경로에 쓰는지 가르는 휴리스틱. 정본 판정은 아니다: 스크립트 파일을 만들어 실행하는
+// 우회는 명령 문자열로 못 막는다(ADR 42 가 같은 한계를 적고 있다). 여기서 닫는 것은 한 줄짜리
+// `cp`·`mv`·`>` 로 승인 원장을 건너뛰는 경로다. 읽기(`cat`·`ls`)는 막지 않는다.
+const PROTECTED_PATH_MENTION_RE =
+  /\.daiops\/+(skills|instructions|persona_overrides\.yaml)|schema\/+persona\.yaml|\.integrations\.env|\.daiops\b[\s\S]*\b(skills|instructions)\b/
+const SHELL_WRITE_RE =
+  /(^|[^0-9&<])>>?(?!&)|\b(cp|mv|rm|rmdir|ln|tee|touch|mkdir|install|rsync|truncate|dd|chmod|chown|unzip|patch)\b|\b(sed|perl)\b[^;&|\n]*\s-[a-zA-Z]*i|\btar\b[^;&|\n]*\s-?[a-zA-Z]*x/
+
+/** Bash 명령이 거버넌스 경로를 언급하면서 쓰기 동작을 포함하는지. */
+export function bashWritesProtectedPath(command) {
+  const cmd = String(command ?? '')
+  return PROTECTED_PATH_MENTION_RE.test(cmd) && SHELL_WRITE_RE.test(cmd)
+}
+
+/**
+ * 거버넌스 경로 쓰기는 전권(`security:'full'`)·샌드박스 자유 쓰기보다 먼저 막는다(감사 A-601).
+ * 정식 창구(skill_manage·/remember)는 승인 원장을 지나는데, 파일 도구로 직접 쓰면 그걸 건너뛴다
+ * (`active/` 폴더에 있으면 곧 활성이다). 결재 채널이 있으면 묻고, 없으면 askFallback 과 무관하게 거부한다.
+ * @returns {null | { kind: 'deny' | 'plan_request', reason: string, toolName: string, commandSummary: string }}
+ */
+function guardProtectedHarnessWrite(policy, toolName, input, hasUiChannel) {
+  const protectedPaths = Array.isArray(policy?.protectedPaths) ? policy.protectedPaths : PROTECTED_HARNESS_PATHS
+  let hit = false
+  if (toolName === 'Bash') {
+    hit = bashWritesProtectedPath(input?.command)
+  } else if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
+    const raw = input?.file_path ?? input?.notebook_path
+    hit = isProtectedHarnessPath(resolveToolFilePath(raw, policy?.sandboxRoot), protectedPaths)
+  }
+  if (!hit) return null
+  const summary = summarizeToolInput(toolName, input)
+  if (hasUiChannel) return { kind: 'plan_request', reason: 'protected-path', toolName, commandSummary: summary }
+  return { kind: 'deny', reason: 'protected-path', toolName, commandSummary: summary }
+}
+
 /** file_path가 샌드박스 루트 하위인지 (경로 탈출 `..` 거부, 상대경로는 cwd=sandboxRoot 기준 내부). */
 export function isUnderSandbox(filePath, sandboxRoot) {
   const fp = String(filePath ?? '')
@@ -657,6 +711,8 @@ export const REASON_LABEL_KO = {
   'external-mcp-write': '연동한 외부 서비스에 기록을 남기는 일이라 진행 전 확인이 필요해요',
   'external-mcp-undeclared':
     '연동한 외부 서비스의 도구인데 읽기 전용인지 밝히지 않아, 기록을 남길 수 있다고 보고 확인을 받아요',
+  // 러너가 직접 판정(감사 A-601). 스킬·규칙·페르소나 파일은 정식 창구로만 바뀌어야 한다.
+  'protected-path': '스킬·규칙 파일을 직접 고치는 일이라 진행 전 확인이 필요해요',
 }
 
 /**
@@ -683,6 +739,8 @@ export const DENY_GUIDANCE_EN = {
     'The command was blocked as unsafe. A narrower command may be allowed, but do not retry this one as written.',
   'report-only':
     'This action is outside the delegated scope for this run. Do not retry. Summarize what you would have done instead.',
+  'protected-path':
+    'Skill, instruction and persona files can only be changed through the skill tools (skill_create, skill_patch) or remember, revise and forget. Do not retry with another shell command. Use those tools, or report the change you wanted to make.',
   'repeat-failure':
     'The same call already failed repeatedly, so retrying it will not help. Change the approach, or report that it cannot be done here.',
 }
@@ -803,6 +861,10 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel, toolMeta) 
   const ask = policy?.ask ?? 'on-miss'
   const askFallback = policy?.askFallback ?? 'deny'
   const allowlist = Array.isArray(policy?.allowlist) ? policy.allowlist : []
+
+  // 거버넌스 경로 쓰기 — 전권·샌드박스 자유 쓰기보다 먼저 본다(감사 A-601).
+  const protectedWrite = guardProtectedHarnessWrite(policy, toolName, input, hasUiChannel)
+  if (protectedWrite) return protectedWrite
 
   if (security === 'full') {
     return { kind: 'allow', reason: 'full' }
@@ -1298,6 +1360,7 @@ export async function handleChat(rawParams, res, req) {
       builtins: SDK_BUILTIN_TOOLS,
       userTools,
       toolAllowlist: params.policy?.toolAllowlist,
+      denyTools: params.policy?.toolOverrides?.deny,
     })
 
     // MCP 서버 설정 (HTTP transport)
