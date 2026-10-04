@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-10-05
+
+> **배포 순서**: 앱(daiops)을 먼저 배포한 뒤 이 이미지를 릴리스한다. 거절 안내 문구를 이제 앱이 채운다(아래 4-d).
+
 ### Security
 - **거버넌스 경로 쓰기를 전권·샌드박스 자유 쓰기보다 먼저 막는다** (`guardProtectedHarnessWrite`).
   종전에는 Write/Edit 의 절대경로만 보호 목록과 대조했고, `security:'full'` 은 그보다 먼저 통과했으며,
@@ -34,6 +38,17 @@
     언어 사전에서 고른다(앱 쪽이 먼저 배포돼 있어야 빈 답이 남지 않는다).
   - 3-b: `/v1/remember` 가 blocked 의 `reason`(unsafe_content)을 받아 「다시 시도하지 말라」고 안내하고, revise
     결과 어휘에 `blocked` 를 더했다.
+- **차단 통지에 막힌 호출의 `tool_use_id` 를 싣는다**(반복 실패·정책 차단·반려/시간 초과). 같은 이름 도구를
+  병렬로 부를 때 앱이 어느 호출이 막혔는지 가른다. id 가 없는 이전 이미지는 앱이 입력 원본으로 맞춘다.
+- **오류 이벤트에 `category` 를 싣는다**(context_overflow · max_turns · turn_budget_exhausted · response_deadline).
+  cloud 는 category 만 보므로 context_overflow 의 압축 복구 분기가 한 번도 돌지 않았다. ⚠️ 이제 그 복구가
+  같은 요청을 다시 실행하므로, 넘치기 전에 돈 외향 도구(Slack 발송 등)가 한 번 더 돌 수 있다(회귀 검토 R2 7-a).
+- **프록시 실패 응답을 차단 응답과 같은 JSON 형식으로**(`bad request target`·`unsupported scheme`·업스트림 실패).
+  `err.code` 만 cause 로 싣고 예외 원문은 담지 않는다.
+
+### Added
+- **거부 사유별 모델 안내**(`DENY_GUIDANCE_EN`). 코드 이름만 돌려주던 거부 통지에 「재시도가 의미 있는지」를
+  말하는 영문 문장을 붙인다. 모델이 읽는 자리라 사전을 타지 않는다.
 
 ## [0.28.1] — 2026-08-20
 
