@@ -504,18 +504,137 @@ export function resolveToolFilePath(filePath, sandboxRoot) {
   return path.posix.resolve(sandboxRoot || '/workspace', fp)
 }
 
-// Bash 가 보호 경로에 쓰는지 가르는 휴리스틱. 정본 판정은 아니다: 스크립트 파일을 만들어 실행하는
-// 우회는 명령 문자열로 못 막는다(ADR 42 가 같은 한계를 적고 있다). 여기서 닫는 것은 한 줄짜리
-// `cp`·`mv`·`>` 로 승인 원장을 건너뛰는 경로다. 읽기(`cat`·`ls`)는 막지 않는다.
-const PROTECTED_PATH_MENTION_RE =
-  /\.daiops\/+(skills|instructions|persona_overrides\.yaml)|schema\/+persona\.yaml|\.integrations\.env|\.daiops\b[\s\S]*\b(skills|instructions)\b/
-const SHELL_WRITE_RE =
-  /(^|[^0-9&<])>>?(?!&)|\b(cp|mv|rm|rmdir|ln|tee|touch|mkdir|install|rsync|truncate|dd|chmod|chown|unzip|patch)\b|\b(sed|perl)\b[^;&|\n]*\s-[a-zA-Z]*i|\btar\b[^;&|\n]*\s-?[a-zA-Z]*x/
+// Bash 가 보호 경로에 **쓰는지** 가르는 판정. 보는 것은 쓰기 목적지 하나다(회귀 R2 2-a: 종전에는 「경로 언급 +
+// 명령 어딘가의 쓰기 낱말」이라 스킬 스크립트를 실행해 결과를 밖으로 리다이렉트하거나, 이름에 install 이 든 스킬을
+// cat 하는 것까지 막았다). 정본 판정은 아니다: 스크립트 파일을 만들어 실행하는 우회는 명령 문자열로 못 막는다.
+//
+// 목적지로 보는 자리: 리다이렉트(`>`·`>>`·`&>`) 대상, `tee` 인자, `cp`·`install`·`rsync`·`ln` 의 마지막 인자(`-t DIR`
+// 포함), `mv` 의 모든 경로 인자(옮겨 나가는 것도 스킬을 끄는 쓰기다), `rm`·`touch`·`mkdir`·`truncate`·`chmod` 등의
+// 인자, `sed -i`·`perl -i` 의 파일 인자, `dd of=`, `tar -x … -C DIR`·`unzip -d DIR`. `cd` 는 따라가 상대경로를 푼다.
 
-/** Bash 명령이 거버넌스 경로를 언급하면서 쓰기 동작을 포함하는지. */
-export function bashWritesProtectedPath(command) {
-  const cmd = String(command ?? '')
-  return PROTECTED_PATH_MENTION_RE.test(cmd) && SHELL_WRITE_RE.test(cmd)
+/** 셸 단어로 쪼갠다. 따옴표는 벗기고, 분리자(`;` `&&` `||` `|` 개행)와 리다이렉트는 별도 토큰으로 남긴다. */
+function tokenizeShell(command) {
+  const tokens = []
+  let cur = ''
+  let has = false
+  let quote = null
+  const push = () => { if (has) tokens.push({ word: cur }); cur = ''; has = false }
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (quote) {
+      if (ch === quote) { quote = null; continue }
+      if (quote === '"' && ch === '\\' && i + 1 < command.length) { cur += command[++i]; continue }
+      cur += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') { quote = ch; has = true; continue }
+    if (ch === '\\' && i + 1 < command.length) { cur += command[++i]; has = true; continue }
+    if (ch === ' ' || ch === '\t') { push(); continue }
+    if (ch === '\n' || ch === ';') { push(); tokens.push({ op: ';' }); continue }
+    if (ch === '&' && command[i + 1] === '&') { push(); tokens.push({ op: ';' }); i++; continue }
+    if (ch === '|') { push(); tokens.push({ op: ';' }); if (command[i + 1] === '|') i++; continue }
+    if (ch === '>' || (ch === '&' && command[i + 1] === '>')) {
+      // 앞 글자가 숫자 하나뿐인 단어(2>)면 그 숫자는 fd 다.
+      const fd = /^\d$/.test(cur) ? cur : null
+      if (fd !== null) { cur = ''; has = false } else push()
+      let j = ch === '&' ? i + 1 : i
+      const append = command[j + 1] === '>'
+      if (append) j++
+      if (command[j + 1] === '&') { i = j + 1; continue } // 2>&1 · >&2 — fd 복제, 파일 아님
+      tokens.push({ op: append ? '>>' : '>' })
+      i = j
+      continue
+    }
+    if (ch === '&') { push(); tokens.push({ op: ';' }); continue }
+    cur += ch
+    has = true
+  }
+  push()
+  return tokens
+}
+
+const ARG_DEST_ALL = new Set(['rm', 'rmdir', 'touch', 'mkdir', 'truncate', 'chmod', 'chown', 'chgrp', 'unlink', 'shred', 'tee', 'mv'])
+const ARG_DEST_LAST = new Set(['cp', 'install', 'rsync', 'ln'])
+const COMMAND_PREFIXES = new Set(['sudo', 'nohup', 'time', 'env', 'command', 'exec', 'nice'])
+
+/** 한 단순 명령의 쓰기 목적지 후보(원문 그대로)를 뽑는다. */
+function writeTargetsOf(words) {
+  let k = 0
+  while (k < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]) || COMMAND_PREFIXES.has(words[k]))) k++
+  const cmd = (words[k] ?? '').split('/').pop()
+  const args = words.slice(k + 1)
+  const positional = args.filter((a) => !a.startsWith('-'))
+  const targets = []
+  const optValue = (names) => {
+    for (let i = 0; i < args.length; i++) {
+      for (const n of names) {
+        if (args[i] === n && args[i + 1]) targets.push(args[i + 1])
+        else if (n.startsWith('--') && args[i].startsWith(n + '=')) targets.push(args[i].slice(n.length + 1))
+        else if (!n.startsWith('--') && args[i].startsWith(n) && args[i].length > n.length && /^-[A-Za-z]$/.test(n)) targets.push(args[i].slice(n.length))
+      }
+    }
+  }
+  if (ARG_DEST_ALL.has(cmd)) targets.push(...positional)
+  else if (ARG_DEST_LAST.has(cmd)) {
+    optValue(['-t', '--target-directory'])
+    if (positional.length > 0) targets.push(positional[positional.length - 1])
+  } else if ((cmd === 'sed' || cmd === 'perl') && args.some((a) => /^-[A-Za-z]*i/.test(a) || a.startsWith('--in-place'))) {
+    // 첫 positional 은 스크립트(-e 가 없을 때). 나머지가 고칠 파일이다.
+    const hasExpr = args.some((a) => a === '-e' || a === '--expression')
+    targets.push(...(hasExpr ? positional : positional.slice(1)))
+  } else if (cmd === 'dd') {
+    for (const a of args) if (a.startsWith('of=')) targets.push(a.slice(3))
+  } else if (cmd === 'tar' && args.some((a) => /^-?[A-Za-z]*x/.test(a) || a === '--extract')) {
+    optValue(['-C', '--directory'])
+  } else if (cmd === 'unzip') {
+    optValue(['-d'])
+  } else if (cmd === 'patch') {
+    targets.push(...positional)
+  }
+  return targets
+}
+
+function resolveShellPath(word, cwd) {
+  if (word === '~' || word.startsWith('~/')) return path.posix.resolve('/workspace', word.slice(2))
+  return path.posix.resolve(cwd, word)
+}
+
+function isProtectedTarget(resolved, protectedPaths) {
+  // 디렉토리 항목은 그 디렉토리 자체로 쓰는 것(`cp x …/skills`)도 잡는다.
+  return isProtectedHarnessPath(resolved, protectedPaths) ||
+    protectedPaths.some((p) => p.endsWith('/') && resolved === p.slice(0, -1))
+}
+
+/** Bash 명령이 거버넌스 경로를 쓰기 목적지로 삼는지. */
+export function bashWritesProtectedPath(command, { cwd = '/workspace', protectedPaths = PROTECTED_HARNESS_PATHS } = {}) {
+  const tokens = tokenizeShell(String(command ?? ''))
+  let dir = cwd
+  let words = []
+  const targets = []
+  const flush = () => {
+    if (words[0] === 'cd') {
+      dir = words[1] ? resolveShellPath(words[1], dir) : '/workspace'
+    } else if (words.length > 0) {
+      for (const t of writeTargetsOf(words)) targets.push(resolveShellPath(t, dir))
+    }
+    words = []
+  }
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]
+    if (t.op === ';') { flush(); continue }
+    if (t.op === '>' || t.op === '>>') {
+      const next = tokens[i + 1]
+      if (next && next.word !== undefined) { targets.push(resolveShellPath(next.word, dir)); i++ }
+      continue
+    }
+    words.push(t.word)
+  }
+  flush()
+  // 변수·치환이 남은 목적지는 풀 수 없다. 보호 경로 이름이 보이면 막는 쪽으로 판정한다.
+  return targets.some((t) =>
+    /[$`]/.test(t)
+      ? /\.daiops\/+(skills|instructions|persona_overrides)|persona\.yaml|\.integrations\.env/.test(t)
+      : isProtectedTarget(t, protectedPaths))
 }
 
 /**
@@ -528,7 +647,7 @@ function guardProtectedHarnessWrite(policy, toolName, input, hasUiChannel) {
   const protectedPaths = Array.isArray(policy?.protectedPaths) ? policy.protectedPaths : PROTECTED_HARNESS_PATHS
   let hit = false
   if (toolName === 'Bash') {
-    hit = bashWritesProtectedPath(input?.command)
+    hit = bashWritesProtectedPath(input?.command, { cwd: policy?.sandboxRoot || '/workspace', protectedPaths })
   } else if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
     const raw = input?.file_path ?? input?.notebook_path
     hit = isProtectedHarnessPath(resolveToolFilePath(raw, policy?.sandboxRoot), protectedPaths)

@@ -11,6 +11,9 @@
   스킬을 활성화할 수 있었다. 이제 결재 채널이 있으면 묻고(`protected-path`), 없으면 askFallback 과
   무관하게 거부한다. 상대경로는 sandboxRoot 기준으로 풀어 대조한다. 한계: 스크립트 파일을 만들어
   실행하는 우회는 명령 문자열로 막지 못한다.
+  - 회귀 수정(검토 R2 2-a): 처음 판정은 「보호 경로 언급 + 명령 어딘가의 쓰기 낱말」이라 스킬 스크립트 실행
+    결과를 밖으로 리다이렉트하거나 이름에 install 이 든 스킬을 cat 하는 것까지 막았다. 이제 **쓰기 목적지**
+    (리다이렉트 대상, `tee`·`cp`·`mv`·`rm`·`sed -i`·`tar -C` 등의 목적지 인자, `cd` 를 따라 푼 상대경로)만 본다.
 - **channel deny 에 든 서버측 웹 도구를 요청 `tools[]` 에서 뺀다** (`resolveAllowedTools` 의 `denyTools`).
   WebSearch/WebFetch 는 canUseTool 을 거치지 않아, 미확인 발신자 턴의 deny 가 집행되지 않았다.
 - **큰따옴표 안의 명령 치환(`$(…)`·백틱)을 셸 메타문자로 판정**한다. allowlist 된 `git` 이라도
