@@ -55,9 +55,9 @@ describe('isValidRuleText', () => {
 })
 
 describe('action 어휘 — cloud MemoryEditAction과의 계약', () => {
-  it('6종을 정확히 담는다 — cloud harness/remember-instruction.ts MemoryEditAction과 짝', () => {
+  it('7종을 정확히 담는다 — cloud harness/remember-instruction.ts MemoryEditAction과 짝', () => {
     assert.deepEqual([...MEMORY_EDIT_ACTIONS], [
-      'removed', 'revised', 'protected', 'duplicate', 'not_found', 'failed',
+      'removed', 'revised', 'protected', 'duplicate', 'not_found', 'failed', 'blocked',
     ])
   })
 

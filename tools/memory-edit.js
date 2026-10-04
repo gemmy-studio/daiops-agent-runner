@@ -34,6 +34,8 @@ export const MEMORY_EDIT_ACTIONS = Object.freeze([
   'duplicate',
   'not_found',
   'failed',
+  // 저장 검사(키·지시 무시 명령·숨은 문자)에 걸림. 다시 시도해도 결과가 같다(회귀 R2 3-b).
+  'blocked',
 ])
 
 /** 실패류 — deny로 매핑되는 결과. protected·duplicate는 "정상 처리됐고 결과가 이것"이라 실패가 아니다. */

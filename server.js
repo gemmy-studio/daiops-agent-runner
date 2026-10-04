@@ -380,8 +380,10 @@ const server = createServer(async (req, res) => {
         return
       }
       // 실패류(failed·blocked) → kind:'deny', 나머지는 allow_once. rememberAction으로 onRemember가 분기.
+      // reason: blocked 의 사유(`unsafe_content` = 저장 검사). 없으면 종전 의미(채널 신뢰 거부)다.
+      const blockedReason = typeof body.reason === 'string' ? body.reason : null
       const decision = isRememberFailure(action)
-        ? { kind: 'deny', rememberAction: action }
+        ? { kind: 'deny', rememberAction: action, blockedReason }
         : { kind: 'allow_once', rememberAction: action }
       const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
       const ok = resolveApproval(rememberId, decision, resolvedBy)
