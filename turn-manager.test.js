@@ -2248,3 +2248,21 @@ describe('promptTokensOf — 프루닝 트리거 크기 (A-209)', () => {
   })
   it('usage 가 없으면 0', () => assert.equal(promptTokensOf(undefined), 0))
 })
+
+// 회귀 R2 4-a: 5세대는 effort 를 지정하지 않으면 보내지 않는다(API 기본: Opus 5 = high). 앱은 A/B 배정이 있을 때만
+// effort 를 보내므로, 러너가 'medium' 을 채우면 배정 없는 Opus 턴이 high → medium 으로 내려간다.
+describe('5세대 effort 기본값 (R2 4-a)', () => {
+  it('effort 미지정이면 output_config 를 싣지 않는다', () => {
+    const opts = buildThinkingOptions('claude-opus-5', undefined)
+    assert.equal(opts?.thinking?.type, 'adaptive')
+    assert.equal(opts?.output_config, undefined)
+    const req = buildAnthropicRequest({ model: 'claude-opus-5', messages: [{ role: 'user', content: 'hi' }], cacheControl: false })
+    assert.equal(req.output_config, undefined)
+  })
+  it('effort 를 지정하면 그대로 싣는다', () => {
+    assert.deepEqual(buildThinkingOptions('claude-opus-5', { effort: 'low' })?.output_config, { effort: 'low' })
+  })
+  it('4.x 세대는 종전대로 medium 을 채운다', () => {
+    assert.deepEqual(buildThinkingOptions('claude-sonnet-4-6', undefined)?.output_config, { effort: 'medium' })
+  })
+})

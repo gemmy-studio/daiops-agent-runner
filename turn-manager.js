@@ -300,6 +300,12 @@ export function promptTokensOf(usage) {
   return (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
 }
 
+/** 5세대 모델인지 (`GEN5_SUBSTRINGS`). */
+function isGen5Model(model) {
+  const m = normalizeModelName(model)
+  return GEN5_SUBSTRINGS.some((v) => m.includes(v))
+}
+
 /** pause_turn(서버 도구 루프 상한) 이어 붙이기 상한. 문서 권장대로 무한 반복을 막는다. */
 export const MAX_PAUSE_CONTINUATIONS = 5
 
@@ -601,11 +607,17 @@ function attachCacheMarker(msg, marker) {
  *
  * @param {string} model
  * @param {{ effort?: 'low'|'medium'|'high'|'xhigh'|'max'|'minimal' } | undefined | false} thinking
- * @returns {{ thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort: string } } | null}
+ * @returns {{ thinking: { type: 'adaptive', display: 'summarized' }, output_config?: { effort: string } } | null}
  */
 export function buildThinkingOptions(model, thinking) {
   if (thinking === false) return null
   if (!supportsAdaptiveThinking(model)) return null
+  // 5세대는 effort 를 지정하지 않으면 보내지 않는다 — API 기본값(Opus 5 = high)을 그대로 쓴다. 앱은 A/B 배정이
+  // 있을 때만 effort 를 보내므로, 여기서 'medium' 을 채우면 배정 없는 Opus 턴이 high 에서 medium 으로 내려간다
+  // (회귀 R2 4-a). 근거: Claude API 문서 Thinking & Effort 표. 4.x 는 종전대로 medium 을 채운다.
+  if (isGen5Model(model) && !(thinking && thinking.effort)) {
+    return { thinking: { type: 'adaptive', display: 'summarized' } }
+  }
   const effortRaw = (thinking && thinking.effort) ? String(thinking.effort).toLowerCase() : 'medium'
   let effort = ADAPTIVE_EFFORT_MAP[effortRaw] ?? 'medium'
   if (effort === 'xhigh' && !supportsXhighEffort(model)) effort = 'max'
@@ -1023,7 +1035,7 @@ export function buildAnthropicRequest(args) {
   const thinkingCfg = body.tool_choice ? null : buildThinkingOptions(args.model, args.thinking)
   if (thinkingCfg) {
     body.thinking = thinkingCfg.thinking
-    body.output_config = thinkingCfg.output_config
+    if (thinkingCfg.output_config) body.output_config = thinkingCfg.output_config
   }
 
   // ── sampling param 패스스루 + 4.7+ 자동 제거 ────────────────────────

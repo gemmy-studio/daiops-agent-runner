@@ -27,6 +27,13 @@
   done 에 `stop_reason: 'refusal'` 을 싣고 본문이 비면 안내 한 줄을 넣는다.
 - **프루닝 트리거**가 캐시 읽기·쓰기를 더한 실제 프롬프트 크기를 본다(`promptTokensOf`). `input_tokens`
   는 캐시 제외값이라 분기가 사실상 발동하지 않았다.
+- 회귀 수정(검토 R2):
+  - 4-a: 5세대는 effort 를 지정하지 않으면 `output_config` 를 보내지 않는다(API 기본 Opus 5 = high). 처음 판은
+    `medium` 을 채워 A/B 배정 없는 Opus 턴의 effort 를 내렸다.
+  - 4-d: 거절 안내 문구를 러너가 넣지 않는다. done 에 `stop_reason: 'refusal'` 만 싣고 문구는 앱이 워크스페이스
+    언어 사전에서 고른다(앱 쪽이 먼저 배포돼 있어야 빈 답이 남지 않는다).
+  - 3-b: `/v1/remember` 가 blocked 의 `reason`(unsafe_content)을 받아 「다시 시도하지 말라」고 안내하고, revise
+    결과 어휘에 `blocked` 를 더했다.
 
 ## [0.28.1] — 2026-08-20
 

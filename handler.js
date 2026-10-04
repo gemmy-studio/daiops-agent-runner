@@ -849,9 +849,6 @@ export const REASON_LABEL_KO = {
  * 다시 시도하는데, 정책 거부는 변형으로 풀리지 않는다.
  * (`saas/daiops/.claude/64-error-messages.md` 표면별 계약)
  */
-/** 모델이 거절해 본문이 비었을 때 사용자에게 보이는 안내. 같은 파일의 다른 안내 문구와 같은 해요체. */
-export const REFUSAL_NOTICE = '이 요청은 처리하지 못했어요. 요청 내용을 바꿔 다시 시도해주세요'
-
 /**
  * 규칙 저장·수정이 저장 검사에 걸렸을 때 모델에게 주는 안내(회귀 R2 3-b). 일시 장애가 아니므로 「다시 시도」를
  * 말하지 않는다. 그 문구를 받은 모델이 같은 문장으로 남은 턴을 태웠다.
@@ -2176,9 +2173,8 @@ export async function handleChat(rawParams, res, req) {
           })
         } else if (message.subtype === 'success' && message.stop_reason === 'refusal') {
           // 모델이 요청을 거절했다(감사 A-203, 제품 결정: 완료 + 거절 표시, 자동 복구 안 탐).
-          // 본문이 비면 사용자에게 빈 말풍선이 남으므로 안내 한 줄을 넣는다.
+          // 안내 문구는 앱이 워크스페이스 언어의 사전에서 고른다(회귀 R2 4-d). 러너는 사실만 싣는다.
           stopReasonForDone = 'refusal'
-          if (!String(finalContent ?? '').trim()) finalContent = REFUSAL_NOTICE
         } else if (message.subtype === 'error_context_overflow') {
           // 컨텍스트 한도 초과 — 응답이 잘렸다. success로 두면 절단을 완료로 오인하므로 error로 surface.
           // (REF-T1 압축의 트리거. 압축 도입 전까지는 새 세션 권장으로 안내.)
