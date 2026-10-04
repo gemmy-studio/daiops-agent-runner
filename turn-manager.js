@@ -371,7 +371,7 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
  * @property {AbortSignal} [signal]
  * @property {string} [apiKey] — 미지정 시 process.env.ANTHROPIC_API_KEY
  * @property {string} [apiUrl] — 미지정 시 https://api.anthropic.com/v1/messages
- * @property {(toolName: string, input: unknown, meta?: { serverName: string, originalName: string, annotations?: { readOnlyHint?: boolean, destructiveHint?: boolean, idempotentHint?: boolean, openWorldHint?: boolean } }) => Promise<CanUseToolResult> | CanUseToolResult} [canUseTool] — `meta` 는 MCP 도구일 때만 채워진다(mcpRegistry.getToolMeta). 게이트가 외부 서버의 쓰기 도구를 판정하는 유일한 근거다.
+ * @property {(toolName: string, input: unknown, meta?: { serverName: string, originalName: string, annotations?: { readOnlyHint?: boolean, destructiveHint?: boolean, idempotentHint?: boolean, openWorldHint?: boolean } }, toolUseId?: string) => Promise<CanUseToolResult> | CanUseToolResult} [canUseTool] — `meta` 는 MCP 도구일 때만 채워진다(mcpRegistry.getToolMeta). 게이트가 외부 서버의 쓰기 도구를 판정하는 유일한 근거다.
  * @property {(toolName: string, input: unknown, ctx: { signal?: AbortSignal }) => Promise<{ content: string | Array<{type:'text', text:string}>, is_error?: boolean }>} [runTool]
  * @property {typeof globalThis.fetch} [fetchFn] — Anthropic Messages API용 테스트 주입.
  * @property {typeof globalThis.fetch} [mcpFetchFn] — MCP HTTP 호출용 테스트 주입 (미지정 시 fetchFn 재사용).
@@ -1537,7 +1537,9 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
         // 3번째 인자 `meta` — MCP 도구일 때만 출처 서버·어노테이션을 실어 보낸다(QA #105 축1).
         // 게이트는 이것 없이는 "외부 서버의 쓰기 도구"를 알 수 없다. 선택적 인자라 meta를 읽지
         // 않는 호출자(테스트·구 배선)는 종전과 완전히 같이 동작한다.
-        const decision = await ctx.canUseTool(block.name, block.input, mcpRegistry?.getToolMeta?.(block.name))
+        // 4번째 인자 — 호출 id. 게이트가 차단 통지에 실어 앱이 같은 이름의 병렬 호출 중 어느 것이
+        // 막혔는지 가린다(이름만으로 붙이면 실행된 호출이 「차단」으로 보였다).
+        const decision = await ctx.canUseTool(block.name, block.input, mcpRegistry?.getToolMeta?.(block.name), block.id)
         if (decision?.behavior === 'deny') {
           denied = true
           denyMessage = decision.message ?? `Tool '${block.name}' denied`

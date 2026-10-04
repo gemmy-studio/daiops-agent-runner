@@ -1505,7 +1505,7 @@ export async function handleChat(rawParams, res, req) {
      *  - plan_request → ApprovalManager.waitForDecision으로 in-flight pause.
      *    cloud가 SSE plan_request 수신 → 사용자 결재 → POST /v1/approval/:id로 resolve.
      */
-    const canUseTool = async (toolName, input, toolMeta) => {
+    const canUseTool = async (toolName, input, toolMeta, toolUseId) => {
       // request_secret(Phase B)은 정책 게이트를 적용하지 않는다 — 도구 자체가 사용자 결재(secret_request)로
       // 안전성을 확보하고, 값은 LLM에 노출되지 않고 env로만 주입된다. 실행은 runTool→onRequestSecret이 담당.
       if (toolName === 'request_secret') {
@@ -1523,6 +1523,8 @@ export async function handleChat(rawParams, res, req) {
           input_summary: `[반복 실패로 차단됨] ${summarizeToolInput(toolName, input)}`,
           tool_index: toolIndex++,
           blocked_by_policy: 'repeat-failure',
+          // 막힌 호출의 id — 앱이 차단 표시를 이 호출 줄에 붙인다(이름만으로는 병렬 호출을 못 가린다).
+          ...(typeof toolUseId === 'string' && toolUseId ? { tool_use_id: toolUseId } : {}),
         })
         return { behavior: 'deny', message: repeatBlockReason }
       }
@@ -1547,6 +1549,8 @@ export async function handleChat(rawParams, res, req) {
           input_summary: `[차단됨: ${decision.reason}] ${summary}`,
           tool_index: toolIndex++,
           blocked_by_policy: decision.reason,
+          // 막힌 호출의 id — 앱이 차단 표시를 이 호출 줄에 붙인다(이름만으로는 병렬 호출을 못 가린다).
+          ...(typeof toolUseId === 'string' && toolUseId ? { tool_use_id: toolUseId } : {}),
         })
         // 코드(`decision.reason`)와 문장을 함께 준다 — 코드는 기계가 분기하는 안정 계약이고
         // 문장은 모델이 다음 행동을 정하는 근거다. 한쪽만 주면 둘 다 못 한다.
@@ -1590,6 +1594,8 @@ export async function handleChat(rawParams, res, req) {
           input_summary: `[${result ? '거부됨' : '시간 초과'}] ${summary}`,
           tool_index: toolIndex++,
           blocked_by_policy: blockedReason,
+          // 막힌 호출의 id — 앱이 차단 표시를 이 호출 줄에 붙인다(이름만으로는 병렬 호출을 못 가린다).
+          ...(typeof toolUseId === 'string' && toolUseId ? { tool_use_id: toolUseId } : {}),
         })
         return { behavior: 'deny', message: result?.feedback || 'Approval denied or timed out' }
       }

@@ -981,6 +981,22 @@ describe('runAnthropicTurnManager — multi-turn (tool_use)', () => {
     assert.equal(yielded[3].subtype, 'success')
   })
 
+  // 앱이 차단 표시를 호출 id 로 붙이도록(2026-10-04 회귀 2차 F-3). 같은 이름 도구를 병렬로 부르면
+  // 이름만으로는 어느 호출이 막혔는지 모른다. 게이트는 그 id 를 차단 통지 tool_use 에 싣는다.
+  it('canUseTool 은 넷째 인자로 tool_use 블록 id 를 받는다', async () => {
+    const seen = []
+    for await (const _ of runAnthropicTurnManager(
+      { prompt: 'read foo', options: { model: 'claude-sonnet-4-6' } },
+      {
+        fetchFn: mockFetch(buildToolUseConvo()),
+        apiKey: 'sk-test',
+        canUseTool: async (_name, _input, _meta, toolUseId) => { seen.push(toolUseId); return { behavior: 'allow' } },
+        runTool: async () => ({ content: 'ok' }),
+      },
+    )) { /* consume */ }
+    assert.deepEqual(seen, ['tu_1'])
+  })
+
   it('canUseTool deny → tool_result is_error (runTool 미호출), 다음 turn 계속', async () => {
     const calls = { run: 0 }
     const yielded = []
