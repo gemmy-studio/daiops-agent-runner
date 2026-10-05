@@ -28,11 +28,12 @@ describe('VCPU 파생', () => {
   })
 
   it('AGENT_RUNNER_VCPU가 os.cpus()보다 우선한다 (cloud 티어 배선 신뢰)', async () => {
-    // 모듈이 부팅 1회 계산하므로 별 프로세스에서 확인한다.
+    // 모듈이 부팅 1회 계산하므로 별 프로세스에서 확인한다. console.log(숫자)는 FORCE_COLOR 가
+    // 켜진 터미널에서 색상 코드가 붙어 비교가 깨지므로 문자열로 내보낸다.
     const { execFileSync } = await import('node:child_process')
     const out = execFileSync(
       process.execPath,
-      ['-e', "import('./tool-cpu-lane.js').then(m => console.log(m.VCPU))"],
+      ['-e', "import('./tool-cpu-lane.js').then(m => process.stdout.write(String(m.VCPU)))"],
       { env: { ...process.env, AGENT_RUNNER_VCPU: '3' }, encoding: 'utf-8' },
     )
     assert.equal(out.trim(), '3')
@@ -42,7 +43,7 @@ describe('VCPU 파생', () => {
     const { execFileSync } = await import('node:child_process')
     const out = execFileSync(
       process.execPath,
-      ['-e', "import('./tool-cpu-lane.js').then(m => console.log(m.VCPU))"],
+      ['-e', "import('./tool-cpu-lane.js').then(m => process.stdout.write(String(m.VCPU)))"],
       { env: { ...process.env, AGENT_RUNNER_VCPU: 'abc' }, encoding: 'utf-8' },
     )
     assert.ok(Number(out.trim()) >= 1)
