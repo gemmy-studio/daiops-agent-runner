@@ -36,10 +36,14 @@ export const MEMORY_EDIT_ACTIONS = Object.freeze([
   'failed',
   // 저장 검사(키·지시 무시 명령·숨은 문자)에 걸림. 다시 시도해도 결과가 같다(회귀 R2 3-b).
   'blocked',
+  // 「승인 뒤 수정」이라 바꾸지 않고 매니저 승인함에 올렸다(0.30.0, daiops T1 QA 1회차 보완).
+  'queued',
+  // 번호로 짚었는데 그 사이 규칙 목록이 바뀌었다. 새 목록으로 다시 짚는다(0.30.0).
+  'stale',
 ])
 
 /** 실패류 — deny로 매핑되는 결과. protected·duplicate는 "정상 처리됐고 결과가 이것"이라 실패가 아니다. */
-export const MEMORY_EDIT_FAILURES = Object.freeze(['failed', 'not_found'])
+export const MEMORY_EDIT_FAILURES = Object.freeze(['failed', 'not_found', 'stale'])
 
 /** cloud가 보낸 action이 계약상 유효한가. */
 export function isMemoryEditAction(action) {
@@ -58,6 +62,56 @@ export function isValidRuleText(text) {
   return trimmed.length > 0 && trimmed.length <= MEMORY_RULE_MAX
 }
 
+/** cloud 가 결과와 함께 싣는 재료의 목록 상한(cloud `rule-edit-target.ts` RULE_LIST_LIMIT 과 같다). */
+export const MEMORY_DETAIL_RULES_MAX = 100
+
+const clip = (v, n = MEMORY_RULE_MAX) => (typeof v === 'string' ? v.slice(0, n) : undefined)
+
+/**
+ * cloud 가 `/v1/memory/:id` 로 보낸 `detail` 을 믿을 수 있는 모양으로 깎는다(0.30.0). 옛 cloud 는 보내지 않는다.
+ * rules: 지금 규칙 목록(1부터 번호) · listVersion: 그 목록 판 표시 · closest: 가장 비슷한 번호 ·
+ * removed / before / after: 지운 줄 · 고치기 전후.
+ */
+export function sanitizeMemoryDetail(raw) {
+  if (!raw || typeof raw !== 'object') return {}
+  const out = {}
+  if (Array.isArray(raw.rules)) out.rules = raw.rules.filter((r) => typeof r === 'string').slice(0, MEMORY_DETAIL_RULES_MAX).map((r) => r.slice(0, MEMORY_RULE_MAX))
+  const lv = clip(raw.listVersion, 40)
+  if (lv) out.listVersion = lv
+  if (Number.isInteger(raw.closest) && raw.closest > 0) out.closest = raw.closest
+  if (raw.stale === true) out.stale = true
+  if (raw.queued === true) out.queued = true
+  for (const k of ['removed', 'before', 'after']) {
+    const v = clip(raw[k])
+    if (v) out[k] = v
+  }
+  return out
+}
+
+/**
+ * 실패 응답에 붙일 지금 규칙 목록. 직원이 「없다」고 단정하지 말고 이 목록에서 골라 번호로 다시 부르게 한다
+ * (레퍼런스: Cline replace_in_file 은 실패 때 파일 전문을, mem0 는 임시 번호를 준다).
+ */
+export function formatRuleList(detail) {
+  if (!detail?.rules || detail.rules.length === 0) return '지금 저장된 규칙이 없어요.'
+  const lines = detail.rules.map((r, i) => `${i + 1}. ${r}`)
+  const head = `지금 저장된 규칙(번호 · list_version="${detail.listVersion ?? ''}"):`
+  const hint = detail.closest ? `\n가장 비슷한 것은 ${detail.closest}번이에요.` : ''
+  return `${head}\n${lines.join('\n')}${hint}\n지울(고칠) 규칙을 이 목록에서 골라 number 와 list_version 으로 다시 부르세요. 「그런 규칙이 없다」고 답하기 전에 이 목록을 확인하세요.`
+}
+
+/**
+ * 도구 입력에서 짚을 대상을 읽는다. 번호(number + list_version)가 있으면 그것, 없으면 본문(content).
+ * @returns {{ content: string } | { number: number, list_version: string } | null}
+ */
+export function readRuleTarget(input) {
+  const number = input?.number
+  const listVersion = typeof input?.list_version === 'string' ? input.list_version.trim() : ''
+  if (Number.isInteger(number) && number > 0 && listVersion) return { number, list_version: listVersion.slice(0, 40) }
+  const content = typeof input?.content === 'string' ? input.content.trim() : ''
+  return isValidRuleText(content) ? { content } : null
+}
+
 /** Anthropic 호환 tool 정의 — llm-wrapper가 options.tools로 머지해 LLM에 노출. */
 export const FORGET_TOOL = Object.freeze({
   name: 'forget',
@@ -65,16 +119,26 @@ export const FORGET_TOOL = Object.freeze({
     '영구 기억에 저장된 규칙 하나를 지웁니다. 더 이상 맞지 않게 된 규칙, 일회성 작업 메모가 규칙으로 ' +
     '잘못 저장된 것, 같은 내용이 여러 번 중복 저장된 것을 정리할 때 사용하세요. ' +
     '사용자가 직접 지정한 규칙은 보호되어 지워지지 않습니다(그 경우 그대로 두고 사용자에게 알리세요). ' +
-    '규칙 본문을 시스템 프롬프트에 보이는 그대로 정확히 넘겨야 합니다.',
+    '규칙 본문을 시스템 프롬프트에 보이는 그대로 넘기거나, 앞선 forget · revise 응답의 목록 번호(number)와 list_version 으로 짚으세요. ' +
+    '맞는 규칙을 못 찾았다는 응답에는 지금 규칙 목록이 붙어 있습니다. 「그런 규칙이 없다」고 답하기 전에 그 목록을 확인하세요. ' +
+    '요청이 여러 규칙을 가리키면(「고객 문의 관련 규칙 모두」) 해당하는 규칙마다 한 번씩 부르세요.',
   input_schema: {
     type: 'object',
     properties: {
       content: {
         type: 'string',
-        description: '지울 규칙 한 줄. 시스템 프롬프트에 표시된 본문과 정확히 일치해야 합니다(날짜·태그는 제외).',
+        description: '지울 규칙 한 줄. 시스템 프롬프트에 표시된 본문과 정확히 일치해야 합니다(날짜·태그는 제외). number 를 쓰면 생략합니다.',
+      },
+      number: {
+        type: 'integer',
+        description: '앞선 응답의 규칙 목록 번호(1부터). list_version 과 함께 씁니다.',
+      },
+      list_version: {
+        type: 'string',
+        description: '그 번호를 받은 목록의 list_version. 그 사이 목록이 바뀌었으면 새 목록이 돌아옵니다.',
       },
     },
-    required: ['content'],
+    required: [],
   },
 })
 
@@ -90,14 +154,22 @@ export const REVISE_TOOL = Object.freeze({
     properties: {
       content: {
         type: 'string',
-        description: '고칠 대상 규칙 한 줄. 시스템 프롬프트에 표시된 본문과 정확히 일치해야 합니다.',
+        description: '고칠 대상 규칙 한 줄. 시스템 프롬프트에 표시된 본문과 정확히 일치해야 합니다. number 를 쓰면 생략합니다.',
+      },
+      number: {
+        type: 'integer',
+        description: '앞선 응답의 규칙 목록 번호(1부터). list_version 과 함께 씁니다.',
+      },
+      list_version: {
+        type: 'string',
+        description: '그 번호를 받은 목록의 list_version.',
       },
       new_content: {
         type: 'string',
         description: '바꿀 새 내용 한 줄. 명령형·구체적으로 작성하세요.',
       },
     },
-    required: ['content', 'new_content'],
+    required: ['new_content'],
   },
 })
 

@@ -14,6 +14,9 @@ import {
   MEMORY_EDIT_ACTIONS,
   isMemoryEditAction,
   isMemoryEditFailure,
+  readRuleTarget,
+  sanitizeMemoryDetail,
+  formatRuleList,
 } from './memory-edit.js'
 
 describe('resolveMemoryOps — 하위호환 게이트', () => {
@@ -55,9 +58,9 @@ describe('isValidRuleText', () => {
 })
 
 describe('action 어휘 — cloud MemoryEditAction과의 계약', () => {
-  it('7종을 정확히 담는다 — cloud harness/remember-instruction.ts MemoryEditAction과 짝', () => {
+  it('9종을 정확히 담는다 — cloud harness/remember-instruction.ts MemoryEditAction과 짝', () => {
     assert.deepEqual([...MEMORY_EDIT_ACTIONS], [
-      'removed', 'revised', 'protected', 'duplicate', 'not_found', 'failed', 'blocked',
+      'removed', 'revised', 'protected', 'duplicate', 'not_found', 'failed', 'blocked', 'queued', 'stale',
     ])
   })
 
@@ -76,9 +79,11 @@ describe('action 어휘 — cloud MemoryEditAction과의 계약', () => {
     assert.equal(isMemoryEditFailure('revised'), false)
   })
 
-  it('failed·not_found만 실패로 다룬다', () => {
+  it('failed·not_found·stale 만 실패로 다룬다. queued 는 정상 처리(승인함에 올림)다', () => {
     assert.equal(isMemoryEditFailure('failed'), true)
     assert.equal(isMemoryEditFailure('not_found'), true)
+    assert.equal(isMemoryEditFailure('stale'), true)
+    assert.equal(isMemoryEditFailure('queued'), false)
   })
 
   it('어휘 목록은 동결돼 있다', () => {
@@ -87,14 +92,22 @@ describe('action 어휘 — cloud MemoryEditAction과의 계약', () => {
 })
 
 describe('도구 정의', () => {
-  it('forget은 content 하나를 필수로 받는다', () => {
+  it('forget 은 본문(content)이나 목록 번호(number + list_version)로 짚는다(0.30.0)', () => {
     assert.equal(FORGET_TOOL.name, 'forget')
-    assert.deepEqual(FORGET_TOOL.input_schema.required, ['content'])
+    assert.deepEqual(FORGET_TOOL.input_schema.required, [])
+    assert.ok(FORGET_TOOL.input_schema.properties.number)
+    assert.ok(FORGET_TOOL.input_schema.properties.list_version)
   })
 
-  it('revise는 content + new_content를 필수로 받는다', () => {
+  it('revise 는 new_content 를 필수로, 대상은 content 나 번호로 짚는다', () => {
     assert.equal(REVISE_TOOL.name, 'revise')
-    assert.deepEqual(REVISE_TOOL.input_schema.required, ['content', 'new_content'])
+    assert.deepEqual(REVISE_TOOL.input_schema.required, ['new_content'])
+    assert.ok(REVISE_TOOL.input_schema.properties.number)
+  })
+
+  it('설명이 「없다」고 답하기 전에 목록을 보라고 한다(daiops 10/20 세션 839ae5be)', () => {
+    assert.match(FORGET_TOOL.description, /그런 규칙이 없다/)
+    assert.match(FORGET_TOOL.description, /규칙마다 한 번씩/)
   })
 
   it('설명에 보호 규칙 안내가 있다 — LLM이 거부를 오류로 오해하지 않도록', () => {
@@ -105,5 +118,32 @@ describe('도구 정의', () => {
   it('정의는 동결돼 있다 — 런타임 변조 방지', () => {
     assert.equal(Object.isFrozen(FORGET_TOOL), true)
     assert.equal(Object.isFrozen(REVISE_TOOL), true)
+  })
+})
+
+describe('짚기 · 재료(0.30.0)', () => {
+  it('번호와 판 표시가 함께 있으면 번호로, 아니면 본문으로 짚는다', () => {
+    assert.deepEqual(readRuleTarget({ number: 2, list_version: 'ab' }), { number: 2, list_version: 'ab' })
+    assert.deepEqual(readRuleTarget({ content: ' 출처를 단다 ' }), { content: '출처를 단다' })
+    assert.deepEqual(readRuleTarget({ number: 2 }), null)
+    assert.equal(readRuleTarget({ number: 0, list_version: 'ab' }), null)
+    assert.equal(readRuleTarget({}), null)
+  })
+
+  it('cloud 재료를 믿을 모양으로 깎는다(모르는 칸 · 잘못된 타입은 버린다)', () => {
+    const d = sanitizeMemoryDetail({ rules: ['a', 3, 'b'], listVersion: 'v1', closest: 2, queued: true, removed: 'x', evil: 'y' })
+    assert.deepEqual(d, { rules: ['a', 'b'], listVersion: 'v1', closest: 2, queued: true, removed: 'x' })
+    assert.deepEqual(sanitizeMemoryDetail(undefined), {})
+    assert.deepEqual(sanitizeMemoryDetail({ closest: -1, stale: 'yes' }), {})
+  })
+
+  it('실패 응답 목록은 번호 · 판 표시 · 후보 · 「없다」 전에 확인하라는 말을 담는다', () => {
+    const text = formatRuleList({ rules: ['출처를 단다', '고객 문의는 한 줄로'], listVersion: 'v1', closest: 2 })
+    assert.match(text, /1\. 출처를 단다/)
+    assert.match(text, /2\. 고객 문의는 한 줄로/)
+    assert.match(text, /list_version="v1"/)
+    assert.match(text, /2번/)
+    assert.match(text, /그런 규칙이 없다/)
+    assert.match(formatRuleList({}), /규칙이 없어요/)
   })
 })

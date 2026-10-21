@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path'
 import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
 import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
 import { EgressObserver, setActiveEgressObserver } from './proxy/egress-observer.js'
-import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure } from './tools/memory-edit.js'
+import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure, sanitizeMemoryDetail } from './tools/memory-edit.js'
 import { REMEMBER_ACTIONS, isRememberAction, isRememberFailure } from './tools/remember.js'
 import { collectRuntimeProbe } from './runtime-probe.js'
 import { sweepOrphanedBuffers } from './event-buffer.js'
@@ -419,9 +419,11 @@ const server = createServer(async (req, res) => {
       }
       // 실패류(failed·not_found)만 deny로 매핑 — 나머지(protected·duplicate 포함)는 "정상 처리됐고
       // 결과가 이것"이라 allow_once다. 문구 분기는 memoryAction으로 onForget/onRevise가 담당한다.
+      // detail(0.30.0): 지금 규칙 목록 · 후보 · 지운 줄 등. 옛 cloud 는 보내지 않는다 → 빈 객체
+      const memoryDetail = sanitizeMemoryDetail(body.detail)
       const decision = isMemoryEditFailure(action)
-        ? { kind: 'deny', memoryAction: action }
-        : { kind: 'allow_once', memoryAction: action }
+        ? { kind: 'deny', memoryAction: action, memoryDetail }
+        : { kind: 'allow_once', memoryAction: action, memoryDetail }
       const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
       const ok = resolveApproval(memoryId, decision, resolvedBy)
       if (!ok) {

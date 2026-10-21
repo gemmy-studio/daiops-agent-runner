@@ -12,7 +12,7 @@ import path from 'node:path'
 import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './tools/request-secret.js'
 import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX, isRememberFailure } from './tools/remember.js'
-import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps } from './tools/memory-edit.js'
+import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps, readRuleTarget, formatRuleList } from './tools/memory-edit.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { postTerminalIngest } from './ingest-client.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
@@ -1749,7 +1749,7 @@ export async function handleChat(rawParams, res, req) {
      * @param {'forget'|'revise'} op
      * @param {Record<string, unknown>} payload SSE data에 실을 연산별 인자
      * @param {string} summary 로그·대기 레코드용 요약
-     * @param {(action: string) => { content: string, is_error?: boolean }} render 결과 문구 생성
+     * @param {(action: string, detail: Record<string, unknown>) => { content: string, is_error?: boolean }} render 결과 문구 생성(detail: cloud 가 실은 목록 · 후보 · 지운 줄, 0.30.0)
      */
     const runMemoryEdit = async (op, payload, summary, render) => {
       const record = approvalManager.create(
@@ -1774,64 +1774,77 @@ export async function handleChat(rawParams, res, req) {
           is_error: true,
         }
       }
-      return render(String(result.memoryAction ?? 'failed'))
+      // detail(0.30.0): cloud 가 실은 지금 규칙 목록 · 후보 · 지운 줄. 옛 cloud 면 빈 객체
+      return render(String(result.memoryAction ?? 'failed'), result.memoryDetail ?? {})
     }
 
-    /** forget 도구 — 규칙 1건 삭제. 보호된 규칙(사용자 지정)은 cloud가 거부한다. */
+    /**
+     * forget 도구 — 규칙 1건 삭제. 본문(content)이나 앞선 응답의 목록 번호(number + list_version)로 짚는다(0.30.0).
+     * 못 찾으면 cloud 가 지금 규칙 목록을 실어 보내고, 그 목록을 응답에 붙여 직원이 「없다」고 단정하지 않게 한다
+     * (daiops 10/20 세션 839ae5be: 바꿔 말한 문장으로 한 번 부르고 실패 → 「등록돼 있지 않다」).
+     */
     const onForget = async (input) => {
-      const content = typeof input?.content === 'string' ? input.content.trim() : ''
-      if (!isValidRuleText(content)) {
+      const target = readRuleTarget(input)
+      if (!target) {
         return {
-          content: `forget: 지울 규칙이 비어있거나 너무 길어요 (1~${MEMORY_RULE_MAX}자). 시스템 프롬프트에 보이는 규칙 본문을 그대로 넘기세요.`,
+          content: `forget: 지울 규칙을 본문(content, 1~${MEMORY_RULE_MAX}자)이나 목록 번호(number + list_version)로 넘기세요.`,
           is_error: true,
         }
       }
-
-      return runMemoryEdit('forget', { content }, content, (action) => {
-        if (action === 'removed') return { content: `규칙을 지웠어요: "${content}"` }
-        if (action === 'protected') {
+      const label = 'content' in target ? target.content : `${target.number}번`
+      return runMemoryEdit('forget', target, label, (action, detail) => {
+        if (action === 'removed') return { content: `규칙을 지웠어요: "${detail.removed ?? label}"` }
+        if (action === 'queued') {
           return {
-            content: `그 규칙은 사용자가 지정한 것이라 지울 수 없어요: "${content}". 그대로 두고, 필요하면 사용자에게 설정 > 항상 지키는 규칙에서 직접 처리하도록 안내하세요.`,
+            content: `기본 규칙이 「승인 뒤 수정」이라 바로 지우지 않고 매니저 승인함에 올렸어요: "${detail.removed ?? label}". 승인되면 지워진다고 사용자에게 알리세요.`,
           }
         }
-        if (action === 'not_found') {
+        if (action === 'protected') {
           return {
-            content: `그 규칙을 찾지 못했어요: "${content}". 본문이 정확히 일치해야 해요(날짜·태그는 제외). 시스템 프롬프트의 규칙 목록을 다시 확인하세요.`,
-            is_error: true,
+            content: `지금은 이 규칙을 지울 수 없어요: "${label}". 그대로 두고, 필요하면 사용자에게 업무 방식 화면의 기본 규칙에서 직접 처리하도록 안내하세요.`,
           }
+        }
+        if (action === 'stale') {
+          return { content: `그 사이 규칙 목록이 바뀌었어요. 새 목록에서 다시 고르세요.\n${formatRuleList(detail)}`, is_error: true }
+        }
+        if (action === 'not_found') {
+          return { content: `"${label}"와 같은 규칙을 찾지 못했어요.\n${formatRuleList(detail)}`, is_error: true }
         }
         return { content: '규칙 삭제에 실패했어요. 잠시 후 다시 시도하세요.', is_error: true }
       })
     }
 
-    /** revise 도구 — 규칙 1건의 본문 교체(원자적). 날짜·출처 태그는 cloud가 보존한다. */
+    /** revise 도구 — 규칙 1건의 본문 교체(원자적). 짚는 방법은 forget 과 같다(0.30.0). 날짜·출처 태그는 cloud가 보존한다. */
     const onRevise = async (input) => {
-      const content = typeof input?.content === 'string' ? input.content.trim() : ''
+      const target = readRuleTarget(input)
       const newContent = typeof input?.new_content === 'string' ? input.new_content.trim() : ''
-      if (!isValidRuleText(content) || !isValidRuleText(newContent)) {
+      if (!target || !isValidRuleText(newContent)) {
         return {
-          content: `revise: 대상 규칙과 새 내용이 모두 필요해요 (각 1~${MEMORY_RULE_MAX}자).`,
+          content: `revise: 고칠 규칙(content 또는 number + list_version)과 새 내용(new_content, 1~${MEMORY_RULE_MAX}자)이 모두 필요해요.`,
           is_error: true,
         }
       }
-
-      return runMemoryEdit('revise', { content, new_content: newContent }, content, (action) => {
-        if (action === 'revised') return { content: `규칙을 고쳤어요: "${newContent}"` }
-        if (action === 'protected') {
+      const label = 'content' in target ? target.content : `${target.number}번`
+      return runMemoryEdit('revise', { ...target, new_content: newContent }, label, (action, detail) => {
+        if (action === 'revised') return { content: `규칙을 고쳤어요: "${detail.before ?? label}" → "${newContent}"` }
+        if (action === 'queued') {
           return {
-            content: `그 규칙은 사용자가 지정한 것이라 고칠 수 없어요: "${content}". 그대로 두세요.`,
+            content: `기본 규칙이 「승인 뒤 수정」이라 바로 고치지 않고 매니저 승인함에 올렸어요: "${detail.before ?? label}" → "${newContent}". 승인되면 바뀐다고 사용자에게 알리세요.`,
           }
+        }
+        if (action === 'protected') {
+          return { content: `지금은 이 규칙을 고칠 수 없어요: "${label}". 그대로 두세요.` }
         }
         if (action === 'duplicate') {
           return {
-            content: `새 내용이 이미 있는 다른 규칙과 겹쳐서 바꾸지 않았어요: "${newContent}". 중복을 없내려면 한쪽을 forget하세요.`,
+            content: `새 내용이 이미 있는 다른 규칙과 겹쳐서 바꾸지 않았어요: "${newContent}". 중복을 없애려면 한쪽을 forget하세요.`,
           }
         }
+        if (action === 'stale') {
+          return { content: `그 사이 규칙 목록이 바뀌었어요. 새 목록에서 다시 고르세요.\n${formatRuleList(detail)}`, is_error: true }
+        }
         if (action === 'not_found') {
-          return {
-            content: `고칠 규칙을 찾지 못했어요: "${content}". 본문이 정확히 일치해야 해요(날짜·태그는 제외).`,
-            is_error: true,
-          }
+          return { content: `"${label}"와 같은 규칙을 찾지 못했어요.\n${formatRuleList(detail)}`, is_error: true }
         }
         if (action === 'blocked') return { content: UNSAFE_MEMORY_CONTENT_GUIDANCE, is_error: true }
         return { content: '규칙 수정에 실패했어요. 잠시 후 다시 시도하세요.', is_error: true }

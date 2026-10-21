@@ -33,10 +33,16 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
 | 도구 | SSE 이벤트 | resolve | action 어휘 |
 |---|---|---|---|
 `remember` (추가) | `remember_request` | `POST /v1/remember/{id}` | `saved`·`duplicate`·`failed` |
-`forget` (삭제) | `memory_request` (`op:'forget'`) | `POST /v1/memory/{id}` | `removed`·`protected`·`not_found`·`failed` |
-`revise` (수정) | `memory_request` (`op:'revise'`) | `POST /v1/memory/{id}` | `revised`·`protected`·`duplicate`·`not_found`·`failed` |
+`forget` (삭제) | `memory_request` (`op:'forget'`) | `POST /v1/memory/{id}` | `removed`·`queued`·`protected`·`not_found`·`stale`·`failed` |
+`revise` (수정) | `memory_request` (`op:'revise'`) | `POST /v1/memory/{id}` | `revised`·`queued`·`protected`·`duplicate`·`not_found`·`stale`·`failed`·`blocked` |
 
 `forget`·`revise`는 **`/v1/chat`이 `memory_ops: ['forget','revise']`를 선언할 때만** LLM에 노출된다. 미선언이면 `remember`만 노출 — 구버전 cloud에서 도구를 노출하면 요청이 결재 타임아웃까지 매달리기 때문. action 어휘의 단일 소스는 cloud `harness/remember-instruction.ts`의 `MemoryEditAction`이다.
+
+**짚기와 재료(0.30.0)**: `memory_request` 는 `content`(규칙 본문) 대신 `number`(1부터) + `list_version` 으로 대상을 짚을 수 있다.
+`POST /v1/memory/{id}` 본문에 선택 칸 `detail` 이 붙는다: `rules`(지금 규칙 목록, 최대 100) · `listVersion` · `closest`(가장 비슷한 번호) ·
+`stale` · `queued` · `removed` · `before` · `after`. 러너는 `not_found` · `stale` 응답에 목록을 붙여 직원이 번호로 다시 짚게 한다.
+`queued` 는 기본 규칙이 「승인 뒤 수정」이라 매니저 승인함에 올렸다는 뜻이고, `stale` 은 그 사이 목록이 바뀌었다는 뜻이다.
+하위호환: 옛 러너(0.29 이하)는 `detail` 을 무시하고 `queued` · `stale` 을 400 으로 거절한다. cloud 는 그때 `failed` · `not_found` 로 한 번 더 보낸다.
 
 ### 2-1. `GET /health` (인증 불필요)
 
