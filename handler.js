@@ -223,7 +223,7 @@ This call is a follow-up turn in an ongoing conversation, not the first turn of 
 
 /** Tool 호출 정책 평가. 호출자가 보낸 policy(security/ask/allowlist)와 동일 스키마 —
  *  policy 미전달 시 아래 DEFAULT_POLICY(deny-on-miss)로 보수적 fallback. */
-const RISKY_TOOL_NAMES = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit'])
+const RISKY_TOOL_NAMES = new Set(['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 /** Anthropic 서버측 도구 — 실행이 API 안에서 일어나 canUseTool 을 거치지 않는다. */
 const SERVER_SIDE_TOOL_NAMES = new Set(['WebSearch', 'WebFetch'])
 const SAFE_BINS = new Set(['jq', 'grep', 'cut', 'sort', 'uniq', 'head', 'tail', 'tr', 'wc'])
@@ -482,6 +482,8 @@ export function isSandboxSafeCommand(command) {
  */
 export const PROTECTED_HARNESS_PATHS = [
   '/workspace/.daiops/skills/',
+  // 인재 스킬은 이 아래 레포 사본을 가리키는 링크로 심긴다. 위 줄은 링크 쪽만 막는다(cloud R25, v7)
+  '/workspace/.daiops/harness/',
   '/workspace/.daiops/instructions/',
   '/workspace/.daiops/persona_overrides.yaml',
   '/workspace/schema/persona.yaml',
@@ -640,22 +642,27 @@ export function bashWritesProtectedPath(command, { cwd = '/workspace', protected
 /**
  * 거버넌스 경로 쓰기는 전권(`security:'full'`)·샌드박스 자유 쓰기보다 먼저 막는다(감사 A-601).
  * 정식 창구(skill_manage·/remember)는 승인 원장을 지나는데, 파일 도구로 직접 쓰면 그걸 건너뛴다
- * (`active/` 폴더에 있으면 곧 활성이다). 결재 채널이 있으면 묻고, 없으면 askFallback 과 무관하게 거부한다.
- * @returns {null | { kind: 'deny' | 'plan_request', reason: string, toolName: string, commandSummary: string }}
+ * (`active/` 폴더에 있으면 곧 활성이다).
+ *
+ * **결재 없이 거절한다**(2026-10-22 사용자 결정, cloud 21번 문서 §3.4 「권한 계층」). 종전에는 결재 채널이 있으면
+ * 카드를 띄웠는데, 대화 중 멤버가 그 카드를 승인하면 매니저가 「수정 안 함」으로 둔 항목도 바뀌었다. 업무 방식은
+ * 정식 도구로만 고쳐 세 칸 판정을 반드시 거친다(GitHub 보호 브랜치 · Claude Code 보호 파일과 같은 「자원에서 지킨다」).
+ * @returns {null | { kind: 'deny', reason: 'protected-path', toolName: string, commandSummary: string }}
  */
-function guardProtectedHarnessWrite(policy, toolName, input, hasUiChannel) {
+/** 파일을 쓰는 내장 도구. MultiEdit 도 같은 `file_path` 를 받는다 */
+const FILE_WRITE_TOOL_NAMES = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
+
+function guardProtectedHarnessWrite(policy, toolName, input) {
   const protectedPaths = Array.isArray(policy?.protectedPaths) ? policy.protectedPaths : PROTECTED_HARNESS_PATHS
   let hit = false
   if (toolName === 'Bash') {
     hit = bashWritesProtectedPath(input?.command, { cwd: policy?.sandboxRoot || '/workspace', protectedPaths })
-  } else if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
+  } else if (FILE_WRITE_TOOL_NAMES.has(toolName)) {
     const raw = input?.file_path ?? input?.notebook_path
     hit = isProtectedHarnessPath(resolveToolFilePath(raw, policy?.sandboxRoot), protectedPaths)
   }
   if (!hit) return null
-  const summary = summarizeToolInput(toolName, input)
-  if (hasUiChannel) return { kind: 'plan_request', reason: 'protected-path', toolName, commandSummary: summary }
-  return { kind: 'deny', reason: 'protected-path', toolName, commandSummary: summary }
+  return { kind: 'deny', reason: 'protected-path', toolName, commandSummary: summarizeToolInput(toolName, input) }
 }
 
 /** file_path가 샌드박스 루트 하위인지 (경로 탈출 `..` 거부, 상대경로는 cwd=sandboxRoot 기준 내부). */
@@ -832,8 +839,6 @@ export const REASON_LABEL_KO = {
   'external-mcp-write': '연동한 외부 서비스에 기록을 남기는 일이라 진행 전 확인이 필요해요',
   'external-mcp-undeclared':
     '연동한 외부 서비스의 도구인데 읽기 전용인지 밝히지 않아, 기록을 남길 수 있다고 보고 확인을 받아요',
-  // 러너가 직접 판정(감사 A-601). 스킬·규칙·페르소나 파일은 정식 창구로만 바뀌어야 한다.
-  'protected-path': '스킬·규칙 파일을 직접 고치는 일이라 진행 전 확인이 필요해요',
 }
 
 /**
@@ -991,7 +996,7 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel, toolMeta) 
   const allowlist = Array.isArray(policy?.allowlist) ? policy.allowlist : []
 
   // 거버넌스 경로 쓰기 — 전권·샌드박스 자유 쓰기보다 먼저 본다(감사 A-601).
-  const protectedWrite = guardProtectedHarnessWrite(policy, toolName, input, hasUiChannel)
+  const protectedWrite = guardProtectedHarnessWrite(policy, toolName, input)
   if (protectedWrite) return protectedWrite
 
   if (security === 'full') {

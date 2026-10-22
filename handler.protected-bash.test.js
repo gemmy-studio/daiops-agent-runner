@@ -55,7 +55,8 @@ describe('보호 경로가 쓰기 목적지면 막는다', () => {
     it(command, () => {
       assert.equal(bashWritesProtectedPath(command), true)
       assert.deepEqual([decide(command).kind, decide(command).reason], ['deny', 'protected-path'])
-      assert.equal(decide(command, true).kind, 'plan_request')
+      // 결재 채널이 있어도 카드 없이 거절한다(2026-10-22 사용자 결정)
+      assert.equal(decide(command, true).kind, 'deny')
     })
   }
 })

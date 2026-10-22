@@ -710,9 +710,19 @@ describe('evaluatePolicy: 거버넌스 경로 보호 (A-601)', () => {
     assert.equal(d.kind, 'deny')
     assert.equal(d.reason, 'protected-path')
   })
-  it('샌드박스 자유 쓰기에서도 리다이렉트로 규칙 파일을 덮을 수 없다', () => {
+  it('샌드박스 자유 쓰기에서도 리다이렉트로 규칙 파일을 덮을 수 없다(결재 채널이 있어도 거절, 10/22)', () => {
     const d = evaluatePolicy(sandboxed, 'Bash', { command: 'echo hi > .daiops/instructions/core.md' }, true)
-    assert.equal(d.kind, 'plan_request')
+    assert.equal(d.kind, 'deny')
+    assert.equal(d.reason, 'protected-path')
+  })
+  it('결재 채널이 있어도 Write · MultiEdit 로 스킬 파일을 고칠 수 없다(카드를 띄우지 않는다, 10/22)', () => {
+    for (const tool of ['Write', 'MultiEdit']) {
+      const d = evaluatePolicy(full, tool, { file_path: '/workspace/.daiops/skills/active/x/SKILL.md', content: 'x', edits: [] }, true)
+      assert.deepEqual([d.kind, d.reason], ['deny', 'protected-path'], tool)
+    }
+  })
+  it('인재 스킬 사본(harness/)도 내장 폴백으로 막는다', () => {
+    const d = evaluatePolicy(full, 'Write', { file_path: '/workspace/.daiops/harness/talent/x/SKILL.md', content: 'x' }, true)
     assert.equal(d.reason, 'protected-path')
   })
   it('cd 뒤 상대 이동도 잡는다', () => {
