@@ -126,6 +126,25 @@ Request body 핵심 필드:
 
 Response: SSE stream. event 종류는 `event-buffer.js` / cloud `sdk-event-mapper.ts` 참조.
 
+#### 외부 MCP 도구 지문 (0.32.0, 외부 MCP 신뢰 경계)
+
+`mcp_servers[]` 의 상시 등록 서버에는 `toolPins` 가 실린다(요청 봉투 서버 · 내장 서버에는 없다).
+
+- `toolPins.fingerprints`(도구 이름 → sha256 hex)가 있으면 `tools/list` 결과와 대조한다. 도구가 늘거나 정의가 바뀐 서버는 그 턴에
+  도구를 하나도 싣지 않는다. 빠지기만 하면 그대로 싣는다
+- `toolPins` 가 `{}` 면 지문 없이 승인된 옛 서버다. 이번 목록의 지문을 보고해 클라우드가 고정한다
+- 결과는 SSE `mcp_tools_check` 한 건으로 보낸다(대조가 맞은 서버는 싣지 않는다):
+  ```json
+  { "servers": [ { "server": "partner", "result": "changed" | "baseline",
+                   "fingerprints": { "<tool>": "<sha256>" },
+                   "added": ["..."], "changed": ["..."], "removed": ["..."] } ] }
+  ```
+  `added` · `changed` · `removed` 는 `changed` 일 때만. 클라우드가 승인 원장(`harness_change_log`)에 남기고 화면에는 내보내지 않는다
+- **지문 계산은 양쪽이 같아야 한다.** 러너 `mcp-tool-text.js` · 클라우드 `src/lib/security/mcp-tool-text.ts`. 정화(숨은 문자 제거 ·
+  설명 2048자 · 스키마 16KB · 이름 `[A-Za-z0-9_-]{1,64}`) 뒤 `{ name, description(없으면 ''), inputSchema, annotations(불리언 힌트 넷, 없으면 {}) }`
+  를 키 정렬 JSON 으로 적어 sha256. 공용 시험 자료 `test-fixtures/mcp-tool-fingerprint-vectors.json` 은 클라우드
+  `src/lib/security/__tests__/fixtures/` 의 같은 파일을 복사한 것이다. **한쪽을 고치면 다른 쪽도 같은 판에서 고치고 자료를 다시 복사한다**
+
 ### 2-3. `POST /v1/approval/{id}` (Bearer auth)
 
 Request:

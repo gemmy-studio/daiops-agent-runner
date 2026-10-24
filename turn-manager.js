@@ -375,6 +375,7 @@ const ADAPTIVE_EFFORT_MAP = Object.freeze({
  * @property {(toolName: string, input: unknown, ctx: { signal?: AbortSignal }) => Promise<{ content: string | Array<{type:'text', text:string}>, is_error?: boolean }>} [runTool]
  * @property {typeof globalThis.fetch} [fetchFn] — Anthropic Messages API용 테스트 주입.
  * @property {typeof globalThis.fetch} [mcpFetchFn] — MCP HTTP 호출용 테스트 주입 (미지정 시 fetchFn 재사용).
+ * @property {(checks: Array<{ server: string, result: 'baseline' | 'changed', fingerprints: Record<string, string>, added?: string[], changed?: string[], removed?: string[] }>) => void} [onMcpToolCheck] — 외부 MCP 승인 지문 대조 결과(0.32.0). handler 가 `mcp_tools_check` SSE 로 클라우드에 보낸다.
  * @property {{ tools: Array<any>, runTool: Function, getToolMeta?: Function, close: () => Promise<void> }} [mcpRegistry] — 외부 관리 registry. 주입 시 mcpServers 자동 생성 스킵. `getToolMeta` 미구현 registry(구 테스트 더블)면 meta 없이 진행한다.
  * @property {(info: { attempt: number, delayMs: number, reason: string, status?: number }) => void} [onRetry] — turn 1+ per-turn 재시도 및 thinking 서명 복구 시 호출 (handler가 retry SSE로 가시화).
  * @property {{ baseMs?: number, maxMs?: number, jitterRatio?: number, maxAttempts?: number }} [retryOpts] — turn 1+ per-turn 재시도 backoff 파라미터 (미지정 시 retry-utils DEFAULT_BACKOFF). 주로 테스트용.
@@ -1259,6 +1260,8 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       signal,
     })
     mcpRegistryOwned = true
+    // 승인 지문 대조 결과(외부 MCP 신뢰 경계, 0.32.0). 클라우드가 원장에 남기도록 handler 가 SSE 로 보낸다
+    if (mcpRegistry.toolChecks?.length) ctx.onMcpToolCheck?.(mcpRegistry.toolChecks)
   }
   const merged = mergeTools(input.options.tools, mcpRegistry?.tools)
   const exposed = applyToolExposure(merged, input.options.toolExposure)

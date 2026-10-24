@@ -1979,6 +1979,10 @@ export async function handleChat(rawParams, res, req) {
           onPrune: ({ pruned }) => {
             emitSseEvent(sessionId, 'context_managed', { kind: 'prune', pruned })
           },
+          // 외부 MCP 승인 지문 대조(0.32.0). 클라우드가 받아 승인 원장에 남긴다(처음 고정 · 바뀌어 막음). 화면 이벤트가 아니다
+          onMcpToolCheck: (servers) => {
+            emitSseEvent(sessionId, 'mcp_tools_check', { servers })
+          },
         },
       ),
       {

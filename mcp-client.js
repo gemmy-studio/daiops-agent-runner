@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { getActiveEgressObserver } from './proxy/egress-observer.js'
+import { diffMcpToolFingerprints, fingerprintMcpTool, normalizeMcpTools } from './mcp-tool-text.js'
 
 const MCP_PROTOCOL_VERSION = '2025-06-18'
 
@@ -50,16 +51,8 @@ const MAX_RESPONSE_BYTES = (() => {
   return Number.isFinite(v) && v > 0 ? v : 16 * 1024 * 1024
 })()
 
-/**
- * 외부 서버가 준 도구 설명의 상한(chars). 넘으면 자르고 표시를 남긴다.
- *
- * 도구 설명은 **모델 프롬프트에 그대로 들어간다** — 크기를 상대가 정하는 텍스트가 매 턴 실린다는
- * 뜻이라 토큰 비용이자 인젝션 표면이다. openclaude `MAX_MCP_DESCRIPTION_LENGTH = 2048`과 같은 값.
- *
- * daiops 는 A-1 `defer_loading` 덕에 노출 자체가 이미 좁다(진입점 지정 도구만 상시 로드).
- * 그래도 그 진입점들과 `tool_search` 가 꺼내는 것은 남으므로 상한을 둔다.
- */
-const MAX_TOOL_DESCRIPTION_CHARS = 2048
+// 도구 설명 상한 · 숨은 문자 정화 · 이름 · 스키마 상한은 `mcp-tool-text.js` 가 한다(클라우드와 같은 규칙, 0.32.0).
+// 설명은 모델 프롬프트에 그대로 들어가 토큰 비용이자 인젝션 표면이다. 상한은 openclaude `MAX_MCP_DESCRIPTION_LENGTH` 와 같은 2048.
 
 /**
  * @typedef {Object} McpServerSpec
@@ -70,6 +63,9 @@ const MAX_TOOL_DESCRIPTION_CHARS = 2048
  * @property {boolean} [allowLoopback] — true면 loopback(127.0.0.0/8·localhost·::1) URL을 예외 허용.
  *   샌드박스 로컬 MCP 서버(127.0.0.1:PORT) 도달용. 신뢰된 호출자(cloud)만 설정한다.
  *   메타데이터/내부 엔드포인트는 이 값과 무관하게 항상 차단된다.
+ * @property {{ fingerprints?: Record<string, string> }} [toolPins] — 승인한 도구 지문 대조(0.32.0, 외부 MCP 신뢰 경계).
+ *   `fingerprints` 가 있으면 대조해 도구가 늘거나 바뀐 서버의 도구를 싣지 않는다. `{}` 면 이번에 본 목록을 고정하라는 뜻.
+ *   없으면 대조하지 않는다(요청 봉투 서버 · 내장 서버). 결과는 registry `toolChecks` 로 나간다(CONTRACT.md).
  *
  * @typedef {Object} McpToolAnnotations
  * @property {boolean} [readOnlyHint] — 규격 기본값 **false**(= 상태를 바꿀 수 있음). 없으면 없는 대로
@@ -84,6 +80,7 @@ const MAX_TOOL_DESCRIPTION_CHARS = 2048
  * @property {string} name — 원본 도구 이름 (프리픽스 전)
  * @property {string} [description]
  * @property {object} [inputSchema] — JSON Schema (Anthropic input_schema로 변환됨)
+ * @property {string} fingerprint — 정화한 정의의 지문(`mcp-tool-text.js`). 승인 지문과 대조한다
  * @property {McpToolAnnotations} [annotations] — MCP 표준 `tools/list` 어노테이션.
  *   **버리지 않는다** — 이것이 외부 서버 도구의 쓰기 여부를 아는 유일한 경로다(QA #105 축1).
  *
@@ -650,29 +647,35 @@ export function createMcpHttpClient(spec, ctx = {}) {
 
   async function listTools() {
     await ensureInitialized()
-    /** @type {McpTool[]} */
-    const all = []
+    /** @type {unknown[]} */
+    const raw = []
     /** @type {string | undefined} */
     let cursor
     // nextCursor pagination — 도구가 많은 서버 대응. 무한루프 가드(최대 페이지 수).
     for (let page = 0; page < MAX_LIST_PAGES; page++) {
       const result = await rpc('tools/list', cursor ? { cursor } : {})
-      const tools = Array.isArray(result?.tools) ? result.tools : []
-      for (const t of tools) {
-        const name = String(t?.name ?? '')
-        if (!name) continue
-        const annotations = normalizeAnnotations(t?.annotations)
-        all.push({
-          name,
-          description: capDescription(t?.description),
-          inputSchema: t?.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : { type: 'object' },
-          ...(annotations ? { annotations } : {}),
-        })
-      }
+      if (Array.isArray(result?.tools)) raw.push(...result.tools)
       cursor = typeof result?.nextCursor === 'string' && result.nextCursor ? result.nextCursor : undefined
       if (!cursor) break
     }
-    return all
+    // 숨은 문자를 지우고 규칙 밖 도구를 뺀다(클라우드 승인 지문과 같은 계산, `mcp-tool-text.js`)
+    const { tools, dropped } = normalizeMcpTools(raw)
+    if (dropped.length > 0) {
+      console.warn(`[mcp-client] ${spec.name}: 규칙 밖 도구 제외 ${dropped.map((d) => `${d.name}(${d.reason})`).join(', ')}`)
+    }
+    const rawByName = new Map(raw.map((t) => [String(t?.name ?? ''), t]))
+    /** @type {McpTool[]} */
+    return tools.map((t) => {
+      // 결재 판정용 어노테이션은 제목까지 담는 원래 정규화를 쓴다. 지문은 `t.annotations`(불리언 힌트)로 만든다
+      const annotations = normalizeAnnotations(rawByName.get(t.name)?.annotations)
+      return {
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+        fingerprint: fingerprintMcpTool(t),
+        ...(annotations ? { annotations } : {}),
+      }
+    })
   }
 
   async function callTool(toolName, args) {
@@ -761,6 +764,13 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
   /** @type {Map<string, { serverName: string, originalName: string }>} */
   const toolIndex = new Map()
 
+  /**
+   * 승인 지문 대조 결과 — 서버마다 「처음 고정(baseline)」 · 「바뀌어 막음(changed)」. 대조가 맞으면 남기지 않는다.
+   * turn-manager 가 `mcp_tools_check` SSE 로 클라우드에 보내고, 클라우드가 승인 원장에 남긴다(CONTRACT.md).
+   * @type {Array<{ server: string, result: 'baseline' | 'changed', fingerprints: Record<string, string>, added?: string[], changed?: string[], removed?: string[] }>}
+   */
+  const toolChecks = []
+
   for (const spec of (servers ?? [])) {
     if (!spec || !spec.name) continue
     if (clients.has(spec.name)) {
@@ -777,6 +787,23 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
       // (호출자는 도구가 없는 것을 보고 자체 판단). 단, 에러는 stderr로 표면화.
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`[mcp-client] listTools failed for server '${spec.name}': ${maskTokensInText(msg)}`)
+    }
+
+    // 승인 지문 대조. 목록을 못 받았으면(위 catch) 도구가 없으니 대조할 것도 없다
+    if (spec.toolPins && serverTools.length > 0) {
+      const observed = Object.fromEntries(serverTools.map((t) => [t.name, t.fingerprint]))
+      const pinned = spec.toolPins.fingerprints
+      if (!pinned) {
+        toolChecks.push({ server: spec.name, result: 'baseline', fingerprints: observed })
+      } else {
+        const diff = diffMcpToolFingerprints(pinned, observed)
+        if (diff.blocked) {
+          // 승인 뒤 도구가 늘거나 설명 · 스키마 · 결재 힌트가 바뀌었다. 이 서버 도구는 이번 턴에 하나도 싣지 않는다
+          console.warn(`[mcp-client] ${spec.name}: 승인 뒤 도구가 바뀌어 막음 (추가 ${diff.added.length} · 바뀜 ${diff.changed.length})`)
+          toolChecks.push({ server: spec.name, result: 'changed', fingerprints: observed, added: diff.added, changed: diff.changed, removed: diff.removed })
+          continue
+        }
+      }
     }
 
     for (const t of serverTools) {
@@ -829,6 +856,7 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
     getToolMeta,
     close,
     getClient: (name) => clients.get(name),
+    toolChecks,
   }
 }
 
@@ -847,18 +875,6 @@ async function safeReadText(res) {
   } catch {
     return ''
   }
-}
-
-/**
- * 외부 서버가 준 도구 설명을 상한까지만 남긴다. 잘렸다는 표시를 붙이는 이유: 설명이 도중에
- * 끊기면 모델이 그 도구의 계약을 잘못 읽을 수 있는데, **잘렸다는 사실을 알면 조심해서 쓴다.**
- * @param {unknown} raw
- * @returns {string | undefined}
- */
-function capDescription(raw) {
-  if (typeof raw !== 'string') return undefined
-  if (raw.length <= MAX_TOOL_DESCRIPTION_CHARS) return raw
-  return `${raw.slice(0, MAX_TOOL_DESCRIPTION_CHARS)}… [truncated]`
 }
 
 /**
