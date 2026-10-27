@@ -23,6 +23,7 @@
 
 import { createMcpToolRegistry, isMcpToolName } from './mcp-client.js'
 import { withJitteredRetry } from './retry-utils.js'
+import { MIN_DEFERRED_TOOLS, appendToolIndex, toolIndexText } from './tool-index.js'
 import { enforceTurnResultBudget, evictImagesForBudget, enforceMcpResultCap } from './offload.js'
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
@@ -1266,6 +1267,7 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   const merged = mergeTools(input.options.tools, mcpRegistry?.tools)
   const exposed = applyToolExposure(merged, input.options.toolExposure)
   const effectiveTools = exposed.tools
+  const effectiveSystemPrompt = withToolIndex(input.options.systemPrompt, effectiveTools, input.options.toolExposure)
   const effectiveRunTool = mcpRegistry
     ? async (name, args, runCtx) => {
         if (isMcpToolName(name)) {
@@ -1301,7 +1303,7 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   const runTurnRequest = async () => {
     const buildBody = () => buildAnthropicRequest({
       model: input.options.model,
-      systemPrompt: input.options.systemPrompt,
+      systemPrompt: effectiveSystemPrompt,
       messages,
       tools: effectiveTools,
       maxTokens,
@@ -1724,7 +1726,7 @@ function bareToolName(name) {
  * 주며 곧바로 부르게 되어 있어 지연시키면 매 턴 검색이 붙는다.
  *
  * @param {Array<any>} tools 머지된 전체 도구
- * @param {{alwaysLoadTools?: string[]}|undefined} exposure
+ * @param {{alwaysLoadTools?: string[], toolRules?: Record<string, string>}|undefined} exposure
  * @returns {{tools: Array<any>, deferred: number}}
  */
 export function applyToolExposure(tools, exposure) {
@@ -1743,8 +1745,25 @@ export function applyToolExposure(tools, exposure) {
   // cloud 에도 같은 가드가 있지만 여기서도 막는다 — 목록이 갈리는 경우(외부 MCP 서버가
   // 이름을 바꿨다든지)에도 턴이 죽지 않아야 한다. 표시를 걷어내면 현행 동작(전량 로드)이다.
   if (deferred === marked.length) return { tools, deferred: 0 }
+  // 미룰 것이 적으면 미루지 않는다(tool-index.js MIN_DEFERRED_TOOLS, Anthropic 「fewer than 10 tools」).
+  // 찾기 왕복만 늘고 줄어드는 입력은 작다
+  if (deferred < MIN_DEFERRED_TOOLS) return { tools, deferred: 0 }
 
   return { tools: marked, deferred }
+}
+
+/**
+ * 미룬 도구가 있으면 시스템 끝에 목차를 붙인다(T1-5). 두 판이 같은 글을 받고, 찾기 실행만 판마다 다르다.
+ * 미룬 도구 전부로 만들어 대화 안에서 글이 바뀌지 않는다(`tools` 는 매 요청 같다).
+ *
+ * @param {string | Array<any> | undefined} systemPrompt
+ * @param {Array<any>} tools `applyToolExposure` 결과
+ * @param {{ toolRules?: Record<string, string> } | undefined} exposure
+ */
+export function withToolIndex(systemPrompt, tools, exposure) {
+  const deferred = (tools ?? []).filter((t) => t?.defer_loading)
+  if (deferred.length === 0) return systemPrompt
+  return appendToolIndex(systemPrompt, toolIndexText(deferred, exposure?.toolRules))
 }
 
 /** @param {Response} res */

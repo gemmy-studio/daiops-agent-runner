@@ -4,6 +4,7 @@ import fs from 'node:fs'
 
 import { parseToolExposureParam } from './handler.js'
 import { buildAnthropicRequest, applyToolExposure } from './turn-manager.js'
+import { MIN_DEFERRED_TOOLS } from './tool-index.js'
 
 // A-1 도구 노출 정책 — cloud가 준 "항상 로드" 목록 외의 MCP 도구를 defer_loading으로 내린다.
 //
@@ -47,6 +48,8 @@ describe('applyToolExposure', () => {
     { name: 'mcp__lattice-mcp__get_bluecard', input_schema: {} },
     { name: 'mcp__daiops-mcp__skill_view', input_schema: {} },
     { name: 'mcp__daiops-mcp__skill_manage', input_schema: {} },
+    // 미룰 것이 MIN_DEFERRED_TOOLS(10) 이상이어야 정책이 걸린다
+    ...Array.from({ length: MIN_DEFERRED_TOOLS }, (_, i) => ({ name: `mcp__lattice-mcp__extra_${i}`, input_schema: {} })),
   ]
 
   it('정책이 없으면 아무것도 바꾸지 않는다 (현행 동작)', () => {
@@ -66,7 +69,14 @@ describe('applyToolExposure', () => {
     assert.equal(by['mcp__daiops-mcp__skill_view'], false)
     assert.equal(by['mcp__lattice-mcp__get_bluecard'], true)
     assert.equal(by['mcp__daiops-mcp__skill_manage'], true)
-    assert.equal(out.deferred, 2)
+    assert.equal(out.deferred, 2 + MIN_DEFERRED_TOOLS)
+  })
+
+  it('미룰 MCP 도구가 10개 미만이면 미루지 않는다(찾기 왕복만 는다)', () => {
+    const few = tools().filter((t) => !t.name.includes('extra_'))
+    const out = applyToolExposure(few, { alwaysLoadTools: ['search_companies'] })
+    assert.equal(out.deferred, 0)
+    assert.equal(out.tools.some((t) => t.defer_loading), false)
   })
 
   it('빌트인은 목록에 없어도 절대 내리지 않는다', () => {

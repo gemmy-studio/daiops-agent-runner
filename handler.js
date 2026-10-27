@@ -1267,15 +1267,25 @@ export function parseThinkingParam(raw) {
  * 되고, `applyToolExposure`의 전량-지연 가드가 표시를 걷어내 결국 현행 동작으로 돌아오긴 하지만
  * 의도가 불분명해진다. "끄려면 필드를 빼거나 빈 목록을 보낸다"를 한 자리에서 확정한다.
  *
+ * `toolRules` 는 목차에 덧붙일 「사람에게 알릴 규칙」(정식 도구 이름 → 한 문장, T1-5). 클라우드가 자기 도구에
+ * 대해서만 보낸다. 문자열 값만 남기고, 없으면 칸을 싣지 않는다(구버전 cloud 와 같은 꼴).
+ *
  * @param {unknown} raw
- * @returns {{ alwaysLoadTools: string[] } | undefined}
+ * @returns {{ alwaysLoadTools: string[], toolRules?: Record<string, string> } | undefined}
  */
 export function parseToolExposureParam(raw) {
   if (!raw || typeof raw !== 'object') return undefined
   const list = /** @type {{ alwaysLoadTools?: unknown }} */ (raw).alwaysLoadTools
   if (!Array.isArray(list)) return undefined
   const names = list.filter((n) => typeof n === 'string' && n.length > 0)
-  return names.length > 0 ? { alwaysLoadTools: names } : undefined
+  if (names.length === 0) return undefined
+  const rawRules = /** @type {{ toolRules?: unknown }} */ (raw).toolRules
+  /** @type {Record<string, string>} */
+  const toolRules = {}
+  if (rawRules && typeof rawRules === 'object' && !Array.isArray(rawRules)) {
+    for (const [k, v] of Object.entries(rawRules)) if (typeof v === 'string' && v.length > 0) toolRules[k] = v
+  }
+  return Object.keys(toolRules).length > 0 ? { alwaysLoadTools: names, toolRules } : { alwaysLoadTools: names }
 }
 
 /**
@@ -1334,7 +1344,7 @@ export async function handleChat(rawParams, res, req) {
      * `defer_loading`으로 내린다. **미지정이면 undefined = 전량 로드(현행 동작)** 이라
      * 구버전 cloud와의 배포 순서에 의존하지 않는다.
      *
-     * 이름 목록 외에는 아무것도 받지 않는다 — 판정은 cloud 한 곳이다(ADR21).
+     * 이름 목록과 목차에 덧붙일 규칙(`toolRules`) 외에는 받지 않는다. 판정은 cloud 한 곳이다(ADR21).
      */
     tool_exposure: parseToolExposureParam(rawParams.tool_exposure),
     /** 사용자가 명시적으로 plan을 요구한 경우만 true. 메시지 텍스트 분류는 더 이상 사용하지 않음. */
