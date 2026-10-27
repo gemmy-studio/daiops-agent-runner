@@ -152,10 +152,16 @@ Request:
 { "decision": "allow_once" | "allow_always" | "deny",
   "allowlist_entry": "string?",
   "feedback": "string?",
-  "resolved_by": "string?" }
+  "resolved_by": "string?",
+  "updated_input": "object?" }
 ```
 
 Response: `{ ok: true, approval_id }` (200) | `{ error, approval_id }` (409 — 이미 resolved).
+
+**결재 카드에서 고쳐 승인(0.34.0).** `plan_request` SSE 는 원래 인자를 `tool_input` 으로 함께 싣는다(직렬화 120KB 를 넘거나
+객체가 아니면 싣지 않는다). 허용 결정에 `updated_input` 이 오면 러너는 그 안의 **문자열 칸만** 원래 인자에 얹어 실행한다.
+어떤 칸을 고칠 수 있는지와 값 검사는 클라우드가 한다(`src/lib/integrations/approvals/editable-input.ts`). `deny` 에 실린 값은 쓰지 않는다.
+옛 러너는 `tool_input` 을 싣지 않으므로 클라우드는 그때 고치기 칸을 보이지 않는다.
 
 ### 2-4. `POST /v1/cancel/{sessionId}` (Bearer auth)
 
