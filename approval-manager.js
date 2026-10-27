@@ -28,6 +28,7 @@ import { randomUUID } from 'node:crypto'
  * @property {ApprovalDecisionKind} kind
  * @property {string} [allowlistEntry]  - allow_always 시 추가할 패턴 (Bash bin 또는 file_path)
  * @property {string} [feedback]        - deny 시 수정 지시(선택)
+ * @property {Record<string, unknown>} [updatedInput] - 허용 시 결재자가 카드에서 고친 도구 인자(0.34.0)
  * @property {'provide'|'skip'} [secretAction] - secret_request(Phase B) 해소 종류: 값 제공 또는 건너뛰기
  * @property {string} [value]           - secretAction='provide' 시 사용자가 입력한 secret 평문.
  *                                        agent-runner 내부 전용(process.env 주입). LLM/SSE에 절대 노출하지 않음.
@@ -43,6 +44,19 @@ import { randomUUID } from 'node:crypto'
  * @property {ApprovalDecision} [decision]
  * @property {string|null} [resolvedBy]
  */
+
+/**
+ * `/v1/approval/:id` 본문의 `updated_input`(0.34.0, 결재 카드에서 고친 도구 인자). 허용일 때만, 평범한 객체일 때만 받는다.
+ * 고칠 수 있는 칸과 값 검사는 cloud 가 했고, handler 의 `mergeEditedInput` 이 문자열 칸만 얹는다
+ * @param {Record<string, unknown>} body
+ * @param {string} kind
+ * @returns {Record<string, unknown> | undefined}
+ */
+export function readUpdatedInput(body, kind) {
+  if (kind === 'deny') return undefined
+  const v = body?.updated_input
+  return v && typeof v === 'object' && !Array.isArray(v) ? /** @type {Record<string, unknown>} */ (v) : undefined
+}
 
 export class ApprovalManager {
   constructor() {

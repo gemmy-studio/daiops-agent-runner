@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { handleChat, resolveApproval, cancelSession, abortAllSessions, isSafeAllowlistPattern } from './handler.js'
+import { readUpdatedInput } from './approval-manager.js'
 import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
 import { EgressObserver, setActiveEgressObserver } from './proxy/egress-observer.js'
 import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure, sanitizeMemoryDetail } from './tools/memory-edit.js'
@@ -297,10 +298,12 @@ const server = createServer(async (req, res) => {
       // 무시 → sticky 없이 일회성 allow로 처리(방어심화, cloud 파생 검증과 이중화).
       const rawEntry = typeof body.allowlist_entry === 'string' ? body.allowlist_entry : undefined
       const allowlistEntry = rawEntry && isSafeAllowlistPattern(rawEntry) ? rawEntry : undefined
+      const updatedInput = readUpdatedInput(body, kind)
       const decision = {
         kind,
         allowlistEntry,
         feedback: typeof body.feedback === 'string' ? body.feedback : undefined,
+        ...(updatedInput ? { updatedInput } : {}),
       }
       const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
       const ok = resolveApproval(approvalId, decision, resolvedBy)

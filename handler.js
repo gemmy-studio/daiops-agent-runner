@@ -805,6 +805,34 @@ function summarizeToolInput(toolName, input) {
   }
 }
 
+/** 결재 요청에 싣는 원래 인자 상한(직렬화 바이트). 넘으면 싣지 않는다 */
+export const PLAN_TOOL_INPUT_MAX_BYTES = 120_000
+
+/** 결재 요청 SSE 에 실을 `tool_input` 칸. 객체가 아니거나 너무 크면 빈 객체(칸 없음) */
+export function toolInputField(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {}
+  try {
+    const json = JSON.stringify(input)
+    return Buffer.byteLength(json, 'utf8') <= PLAN_TOOL_INPUT_MAX_BYTES ? { tool_input: input } : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 결재자가 고친 칸을 원래 인자에 얹는다(0.34.0). 고칠 수 있는 칸과 값 검사는 cloud 가 한다(`editable-input.ts`).
+ * 여기서는 방어만 한다: 문자열 값만 얹고, 객체가 아니면 원래 인자 그대로
+ */
+export function mergeEditedInput(input, edited) {
+  if (!edited || typeof edited !== 'object' || Array.isArray(edited)) return input
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input
+  const merged = { ...input }
+  for (const [key, value] of Object.entries(edited)) {
+    if (typeof value === 'string') merged[key] = value
+  }
+  return merged
+}
+
 /** UI/외부 채널 카드 본문에서 도구·이유를 사람이 읽을 한국어로 변환. */
 const TOOL_LABEL_KO = {
   Bash: '터미널 명령 실행',
@@ -1614,6 +1642,9 @@ export async function handleChat(rawParams, res, req) {
         tool_name: toolName,
         command_summary: summary,
         reason: decision.reason,
+        // 원래 인자(0.34.0). 결재 카드가 받는 사람 · 본문 같은 칸을 고칠 수 있게 보인다(cloud 가 도구별로 고칠 칸을 정한다).
+        // 요약(command_summary)은 200자에서 잘려 카드가 본문을 다 못 보였다. 너무 크면 싣지 않는다(카드는 고치기 칸 없이 요약만)
+        ...toolInputField(input),
       })
 
       const result = await approvalManager.waitForDecision(record, approvalTimeoutMs)
@@ -1635,7 +1666,9 @@ export async function handleChat(rawParams, res, req) {
 
       // allow_once / allow_always — proceed.
       // allowlist 누적은 cloud 측에서 workspace.policy.allowlist에 기록(T10).
-      return { behavior: 'allow', updatedInput: applyCacheRedirectCorrection(toolName, input) }
+      // 결재자가 카드에서 고친 칸이 있으면 그 값으로 실행한다(0.34.0). turn-manager 가 이 인자를 대화 이력의 도구 호출에 적으므로
+      // 모델도 고친 값으로 보낸 것을 안다
+      return { behavior: 'allow', updatedInput: applyCacheRedirectCorrection(toolName, mergeEditedInput(input, result.updatedInput)) }
     }
 
     /**
