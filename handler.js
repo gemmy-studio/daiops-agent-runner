@@ -20,6 +20,7 @@ import { asyncIteratorWithFirstYieldRetry, classifyLlmError, sanitizeErrorDetail
 import { maskTokensInText, maskSecretValues } from './mcp-client.js'
 import { maskPlaceholders } from './proxy/injection-core.js'
 import { RepeatFailureGuard } from './repeat-failure-guard.js'
+import { WikiBudget } from './wiki-budget.js'
 import { logError } from './logger.js'
 
 /**
@@ -1398,6 +1399,9 @@ export async function handleChat(rawParams, res, req) {
   // 반복 실패 회로 차단기 — 같은 (도구,입력) 누적 실패 / 무진전 연속 실패를 canUseTool에서
   // 사전 차단한다. 요청(턴)마다 새 인스턴스. (openhuman tool_loop.rs 이식)
   const repeatGuard = new RepeatFailureGuard()
+  // 위키 탐색 한도(T3-9): 한 턴의 위키 읽기 호출을 세다가 넘는 호출을 막고 「읽은 것으로 답하라」를 돌려준다.
+  // 턴 한도와 달리 턴을 끊지 않는다(wiki-budget.js). 요청(턴)마다 새 인스턴스.
+  const wikiBudget = new WikiBudget()
   // 도구 실행 중 idle progress emit — tool_use ~ tool_result 사이 30초 간격으로 SSE event 발생.
   // 효과: (a) SSE 트래픽 유지로 proxy idle 단절 방지, (b) EventBuffer에 누적되어 자동 resume 시
   // 누락 신호 없음, (c) (후속 이슈에서 cloud가 lastActivityAt 갱신에 활용 가능).
@@ -1542,6 +1546,20 @@ export async function handleChat(rawParams, res, req) {
           ...(typeof toolUseId === 'string' && toolUseId ? { tool_use_id: toolUseId } : {}),
         })
         return { behavior: 'deny', message: repeatBlockReason }
+      }
+
+      // 위키 탐색 한도는 정책 평가 전에 본다. 막힌 호출은 세지 않으며, 모델은 도구 없이 답으로 넘어간다.
+      const wikiBudgetReason = wikiBudget.check(toolName)
+      if (wikiBudgetReason) {
+        emitSseEvent(sessionId, 'tool_use', {
+          name: toolName,
+          input,
+          input_summary: `[위키 탐색 한도로 멈춤] ${summarizeToolInput(toolName, input)}`,
+          tool_index: toolIndex++,
+          blocked_by_policy: 'wiki-budget',
+          ...(typeof toolUseId === 'string' && toolUseId ? { tool_use_id: toolUseId } : {}),
+        })
+        return { behavior: 'deny', message: wikiBudgetReason }
       }
 
       // 샌드박스 격리 예외(ADR 21 §2.4): 러너는 자기 cwd(=샌드박스 루트)를 알고 있으므로 여기서 주입한다.
