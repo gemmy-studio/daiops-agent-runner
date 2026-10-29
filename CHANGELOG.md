@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-30
+
+> **배포 순서**: 어느 쪽이 먼저여도 깨지지 않는다. 옛 앱(브릿지에 `instructions` · `_meta` 가 없음)과 돌면 묶음 안내 · 예시가
+> 없을 뿐 목차와 도구 정의는 0.34.0 과 같다. 옛 러너는 새 앱의 `instructions` · `_meta` 를 읽지 않고 버린다. 없는 도구 오류는
+> 첫머리(`mcp-client: tool '…' not found in registry`)를 지켜, 그 문자열로 판정하는 곳이 있어도 그대로 걸린다.
+
+### Added
+- **묶음 안내**(T1-5). MCP 서버 initialize `instructions` 의 첫 문장을 미룬 도구 목차의 묶음 이름 옆에 붙인다(`serverNotes`).
+  레퍼런스: MCP 규격 instructions, Anthropic tool search 「describing available tool categories」, Claude Code server instructions
+- **없는 도구 안내**. 등록 안 된 이름을 부르면 같은 서버의 가까운 도구(동작 · 대상 낱말)를 오류에 함께 싣고 찾아 열게 한다.
+  근거: 10/29 블루 대시보드가 없는 도구에서 「not found」만 받고 지시문의 대체 도구를 찾지 않아 비교 단계를 건너뜀
+- **쓰는 예시 전달**. 믿는 서버(`daiops-mcp` · `daiops-wiki-local`)가 도구 `_meta["anthropic/inputExamples"]` 로 준 예시를
+  Anthropic `input_examples` 로 옮긴다. 하나라도 입력 형식에 어긋나면 그 도구 예시를 버린다(요청 전체 400 방지).
+  바깥 서버 예시는 받지 않는다. 새 모듈 `tool-guidance.js`
+
 ## [0.34.0] - 2026-10-27
 
 > **배포 순서**: 이 이미지를 먼저 릴리스하고 앱의 이미지 핀(`AGENT_RUNNER_IMAGE`)을 올린다. 옛 앱은 `updated_input` 을 보내지
