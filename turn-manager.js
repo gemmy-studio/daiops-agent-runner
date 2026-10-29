@@ -1267,7 +1267,7 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   const merged = mergeTools(input.options.tools, mcpRegistry?.tools)
   const exposed = applyToolExposure(merged, input.options.toolExposure)
   const effectiveTools = exposed.tools
-  const effectiveSystemPrompt = withToolIndex(input.options.systemPrompt, effectiveTools, input.options.toolExposure)
+  const effectiveSystemPrompt = withToolIndex(input.options.systemPrompt, effectiveTools, input.options.toolExposure, mcpRegistry?.serverNotes)
   const effectiveRunTool = mcpRegistry
     ? async (name, args, runCtx) => {
         if (isMcpToolName(name)) {
@@ -1759,11 +1759,12 @@ export function applyToolExposure(tools, exposure) {
  * @param {string | Array<any> | undefined} systemPrompt
  * @param {Array<any>} tools `applyToolExposure` 결과
  * @param {{ toolRules?: Record<string, string> } | undefined} exposure
+ * @param {Record<string, string>} [serverNotes] 등록부 `serverNotes`(묶음 안내)
  */
-export function withToolIndex(systemPrompt, tools, exposure) {
+export function withToolIndex(systemPrompt, tools, exposure, serverNotes = {}) {
   const deferred = (tools ?? []).filter((t) => t?.defer_loading)
   if (deferred.length === 0) return systemPrompt
-  return appendToolIndex(systemPrompt, toolIndexText(deferred, exposure?.toolRules))
+  return appendToolIndex(systemPrompt, toolIndexText(deferred, exposure?.toolRules, serverNotes))
 }
 
 /** @param {Response} res */

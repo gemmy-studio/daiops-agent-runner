@@ -76,8 +76,9 @@ export function toolIndexLine(tool, rules = {}) {
  *
  * @param {Array<{ name: string, description?: string }>} deferred
  * @param {Readonly<Record<string, string>>} [rules]
+ * @param {Readonly<Record<string, string>>} [notes] 묶음(서버) 이름 → 하는 일 한 줄
  */
-export function toolIndexText(deferred, rules = {}) {
+export function toolIndexText(deferred, rules = {}, notes = {}) {
   /** @type {Map<string, Array<{ name: string, description?: string }>>} */
   const groups = new Map()
   for (const t of [...deferred].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -85,8 +86,11 @@ export function toolIndexText(deferred, rules = {}) {
     groups.set(g, [...(groups.get(g) ?? []), t])
   }
   const order = [...groups.keys()].sort()
+  // 묶음 이름 옆에 그 묶음이 하는 일(서버 안내문 첫 문장, tool-guidance.js `serverNote`). 레퍼런스가 모두 권하는
+  // 「범주 · 묶음 단위 안내」다(Anthropic 「describing available tool categories」, MCP `instructions`)
+  const head = (g) => `[${g}] ${groups.get(g)?.length}개${Object.hasOwn(notes, g) ? ` — ${notes[g]}` : ''}`
   const full = order
-    .map((g) => `[${g}] ${groups.get(g)?.length}개\n${(groups.get(g) ?? []).map((t) => toolIndexLine(t, rules)).join('\n')}`)
+    .map((g) => `${head(g)}\n${(groups.get(g) ?? []).map((t) => toolIndexLine(t, rules)).join('\n')}`)
     .join('\n')
   if (full.length <= TOOL_INDEX_MAX_CHARS) {
     return (
@@ -94,7 +98,7 @@ export function toolIndexText(deferred, rules = {}) {
       `불러온 뒤 부르십시오. ${TOOL_INDEX_RULE_NOTE}\n${full}`
     )
   }
-  const groupsLine = order.map((g) => `- ${g}: ${groups.get(g)?.length}개`).join('\n')
+  const groupsLine = order.map((g) => `- ${head(g).slice(1).replace('] ', ': ')}`).join('\n')
   return (
     `${TOOL_INDEX_GUIDE}\n도구 묶음 목록입니다(도구가 많아 설명서와 이름을 빼 두었습니다). 쓰려면 도구 찾기에 ` +
     `묶음 이름과 하려는 일을 낱말로 넣어 찾은 뒤 부르십시오.\n${groupsLine}`

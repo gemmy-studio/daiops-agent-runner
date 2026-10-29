@@ -878,3 +878,33 @@ describe('turn-manager → canUseTool meta 전달 (QA #105 축1)', () => {
     assert.equal(builtinCall[1], undefined, '빌트인은 meta가 없어야 한다')
   })
 })
+
+describe('createMcpToolRegistry — 묶음 안내 · 쓰는 예시(T1-5 10/29)', () => {
+  const routes = (instructions) => ({
+    initialize: () => ({ protocolVersion: '2025-06-18', capabilities: {}, instructions }),
+    'tools/list': () => ({
+      tools: [
+        {
+          name: 'wiki_read',
+          description: 'read',
+          inputSchema: { type: 'object', properties: { page_name: { type: 'string' } }, required: ['page_name'] },
+          _meta: { 'anthropic/inputExamples': [{ page_name: '회의록-1027.md' }] },
+        },
+      ],
+    }),
+  })
+
+  it('우리 서버: 안내문이 묶음 안내가 되고 예시가 input_examples 로 실린다', async () => {
+    const { fetchFn } = mockMcpServer({ routes: routes('위키 문서를 읽고 쓰는 묶음입니다. 자세한 설명.') })
+    const reg = await createMcpToolRegistry([{ name: 'daiops-mcp', url: 'http://mock' }], { fetchFn, lookupFn: stubLookup })
+    assert.equal(reg.serverNotes['daiops-mcp'], '위키 문서를 읽고 쓰는 묶음입니다.')
+    assert.deepEqual(reg.tools[0].input_examples, [{ page_name: '회의록-1027.md' }])
+  })
+
+  it('바깥 서버: 안내문은 쓰되 예시는 싣지 않는다', async () => {
+    const { fetchFn } = mockMcpServer({ routes: routes('바깥 서버 안내.') })
+    const reg = await createMcpToolRegistry([{ name: 'lattice', url: 'http://mock' }], { fetchFn, lookupFn: stubLookup })
+    assert.equal(reg.serverNotes.lattice, '바깥 서버 안내.')
+    assert.equal('input_examples' in reg.tools[0], false)
+  })
+})

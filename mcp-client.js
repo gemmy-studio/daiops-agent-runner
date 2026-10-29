@@ -23,7 +23,8 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { getActiveEgressObserver } from './proxy/egress-observer.js'
-import { diffMcpToolFingerprints, fingerprintMcpTool, normalizeMcpTools } from './mcp-tool-text.js'
+import { diffMcpToolFingerprints, fingerprintMcpTool, normalizeMcpTools, sanitizeMcpToolText } from './mcp-tool-text.js'
+import { pickInputExamples, serverNote, similarToolNames, unknownToolMessage } from './tool-guidance.js'
 
 const MCP_PROTOCOL_VERSION = '2025-06-18'
 
@@ -629,6 +630,8 @@ export function createMcpHttpClient(spec, ctx = {}) {
         clientInfo: { name: 'daiops-agent-runner', version: CLIENT_VERSION },
         capabilities: { tools: {} },
       })
+      // 서버 안내문(MCP initialize `instructions`). 목차의 묶음 안내로 쓴다(tool-guidance.js). 숨은 문자는 도구 설명과 같이 지운다
+      if (typeof result?.instructions === 'string') instructions = sanitizeMcpToolText(result.instructions)
       // notifications/initialized — 일부 서버는 필수. 실패해도 list_tools가 동작하면 무시.
       try {
         const notifyBody = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
@@ -644,6 +647,9 @@ export function createMcpHttpClient(spec, ctx = {}) {
     })()
     return initPromise
   }
+
+  /** @type {string | undefined} */
+  let instructions
 
   async function listTools() {
     await ensureInitialized()
@@ -674,6 +680,8 @@ export function createMcpHttpClient(spec, ctx = {}) {
         inputSchema: t.inputSchema,
         fingerprint: fingerprintMcpTool(t),
         ...(annotations ? { annotations } : {}),
+        // 쓰는 예시 후보(`_meta["anthropic/inputExamples"]`). 믿는 서버 것만 등록부가 골라 싣는다(tool-guidance.js)
+        ...(rawByName.get(t.name)?._meta ? { meta: rawByName.get(t.name)._meta } : {}),
       }
     })
   }
@@ -693,6 +701,7 @@ export function createMcpHttpClient(spec, ctx = {}) {
   return {
     listTools,
     callTool,
+    getInstructions: () => instructions,
     close,
     getServerName: () => spec.name,
   }
@@ -771,6 +780,10 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
    */
   const toolChecks = []
 
+  /** 서버 이름 → 묶음 안내 한 줄(서버 안내문 첫 문장). 목차가 쓴다(turn-manager `withToolIndex`) */
+  /** @type {Record<string, string>} */
+  const serverNotes = {}
+
   for (const spec of (servers ?? [])) {
     if (!spec || !spec.name) continue
     if (clients.has(spec.name)) {
@@ -806,12 +819,17 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
       }
     }
 
+    const note = serverNote(client.getInstructions?.())
+    if (note && serverTools.length > 0) serverNotes[spec.name] = note
+
     for (const t of serverTools) {
       const prefixed = `mcp__${spec.name}__${t.name}`
+      const examples = pickInputExamples(spec.name, t.meta, t.inputSchema)
       tools.push({
         name: prefixed,
         ...(t.description ? { description: t.description } : {}),
         input_schema: t.inputSchema ?? { type: 'object' },
+        ...(examples ? { input_examples: examples } : {}),
       })
       // annotations 는 **모델에게 주는 도구 정의(`tools`)에는 싣지 않고** 색인에만 둔다.
       // 모델이 읽을 이유가 없고(도구 선택 근거가 아니다), 게이트 판정의 입력이므로 모델이
@@ -827,8 +845,8 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
   async function runTool(prefixedName, args, _callCtx) {
     const entry = toolIndex.get(prefixedName)
     if (!entry) {
-      // 프리픽스가 아니거나 등록 안 됨 — caller가 별도로 처리해야 함.
-      throw new Error(`mcp-client: tool '${prefixedName}' not found in registry`)
+      // 프리픽스가 아니거나 등록 안 됨 — caller가 별도로 처리해야 함. 모델이 다음에 무엇을 할지 알게 가까운 도구를 함께 준다
+      throw new Error(unknownToolMessage(prefixedName, similarToolNames(prefixedName, toolIndex.keys())))
     }
     const client = clients.get(entry.serverName)
     if (!client) throw new Error(`mcp-client: server '${entry.serverName}' not found`)
@@ -857,6 +875,7 @@ export async function createMcpToolRegistry(servers, ctx = {}) {
     close,
     getClient: (name) => clients.get(name),
     toolChecks,
+    serverNotes,
   }
 }
 

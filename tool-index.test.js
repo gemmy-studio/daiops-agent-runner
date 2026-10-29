@@ -90,7 +90,7 @@ describe('withToolIndex: 시스템 끝에 붙인다', () => {
 
   it('turn-manager 가 요청 지시문으로 목차 붙인 것을 쓴다(배선)', () => {
     const src = readFileSync(new URL('./turn-manager.js', import.meta.url), 'utf8')
-    assert.match(src, /withToolIndex\(input\.options\.systemPrompt, effectiveTools, input\.options\.toolExposure\)/)
+    assert.match(src, /withToolIndex\(input\.options\.systemPrompt, effectiveTools, input\.options\.toolExposure, mcpRegistry\?\.serverNotes\)/)
     assert.match(src, /systemPrompt: effectiveSystemPrompt,/)
   })
 })
