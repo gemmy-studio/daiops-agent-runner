@@ -147,3 +147,143 @@ describe('InjectionProxy — CONNECT MITM + 치환 (실제 TLS)', () => {
     assert.equal(res.json.auth, 'Bearer some-normal-token')
   })
 })
+
+/**
+ * 프록시를 통해 CONNECT MITM으로 WebSocket 업그레이드를 보낸다. 101 이면 `ping` 을 보내 업스트림 echo 를 받는다.
+ * 응답 머리(상태 · 헤더)와 101 뒤에 받은 바이트를 돌려준다.
+ */
+function upgradeThroughProxy({ proxyPort, upstreamPort, caPem, path: reqPath, authHeader }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: '127.0.0.1', port: proxyPort, method: 'CONNECT',
+      path: `localhost:${upstreamPort}`,
+    })
+    req.on('error', reject)
+    req.on('connect', (_res, socket) => {
+      const t = tls.connect({ socket, servername: 'localhost', ca: caPem }, () => {
+        t.write(
+          `GET ${reqPath} HTTP/1.1\r\nHost: localhost:${upstreamPort}\r\n` +
+          (authHeader ? `Authorization: ${authHeader}\r\n` : '') +
+          'Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n' +
+          'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+        )
+      })
+      let buf = ''
+      let headText = null
+      const finish = () => {
+        const text = headText ?? buf
+        const status = Number(text.match(/^HTTP\/\d\.\d (\d+)/)?.[1] ?? 0)
+        const headers = {}
+        for (const line of text.split('\r\n').slice(1)) {
+          const i = line.indexOf(':')
+          if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim()
+        }
+        const after = headText ? buf.slice(headText.length) : buf.slice(buf.indexOf('\r\n\r\n') + 4)
+        t.destroy()
+        resolve({ status, headers, after })
+      }
+      t.on('data', (d) => {
+        buf += d
+        if (headText === null && buf.includes('\r\n\r\n')) {
+          headText = buf.slice(0, buf.indexOf('\r\n\r\n') + 4)
+          if (/^HTTP\/\d\.\d 101/.test(headText)) t.write('ping')
+        }
+        if (headText && /^HTTP\/\d\.\d 101/.test(headText) && buf.slice(headText.length).includes('echo:ping')) finish()
+      })
+      t.on('end', finish)
+      t.on('error', reject)
+    })
+    req.end()
+  })
+}
+
+describe('InjectionProxy — WebSocket 업그레이드(wss://)', () => {
+  let dir, cm, upstream, upstreamPort, proxy, proxyPort, upCa
+  const seen = []
+
+  before(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'proxy-ws-test-'))
+    cm = new CertManager({ baseDir: dir })
+    await cm.init()
+    const { key, cert } = await makeSelfSigned(dir)
+    upCa = cert
+    upstream = https.createServer({ key, cert }, (_r, s) => {
+      // 업그레이드 없이 온 요청은 404 — 종전 프록시가 upgrade 를 지워 일반 GET 으로 보내던 것과 같은 결과를 낸다
+      s.writeHead(404, { 'content-type': 'text/plain' })
+      s.end('not a websocket')
+    })
+    upstream.on('upgrade', (r, socket) => {
+      seen.push({ url: r.url, auth: r.headers.authorization, upgrade: r.headers.upgrade })
+      if (r.url.startsWith('/nope')) {
+        socket.end('HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nnope')
+        return
+      }
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+        `X-Seen-Url: ${r.url}\r\n\r\n`,
+      )
+      socket.on('data', (d) => socket.write(`echo:${d}`))
+    })
+    await new Promise((res) => upstream.listen(0, '127.0.0.1', res))
+    upstreamPort = upstream.address().port
+  })
+
+  after(async () => {
+    await proxy?.stop()
+    upstream.closeAllConnections?.()
+    await new Promise((r) => upstream.close(r))
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('허용 호스트 → 경로 쿼리 · 헤더의 placeholder 를 치환하고 101 뒤 양방향으로 잇는다', async () => {
+    const { placeholderByKey, injectionMap } = buildInjectionMap([
+      { key: 'GEMINI_API_KEY', realValue: 'REAL+KEY/1', allowedHosts: ['localhost'] },
+    ])
+    proxy = new InjectionProxy({ injectionMap, certManager: cm, upstreamCa: upCa })
+    proxyPort = (await proxy.start(0)).port
+
+    const ph = placeholderByKey.get('GEMINI_API_KEY')
+    const res = await upgradeThroughProxy({
+      proxyPort, upstreamPort, caPem: cm.caCertPem,
+      path: `/ws/live?key=${ph}`, authHeader: `Bearer ${ph}`,
+    })
+    assert.equal(res.status, 101)
+    assert.equal(res.headers.upgrade, 'websocket')
+    assert.ok(res.after.includes('echo:ping'))
+    const last = seen.at(-1)
+    assert.equal(last.upgrade, 'websocket')
+    assert.equal(last.auth, 'Bearer REAL+KEY/1')
+    // URL 에 들어가는 값은 percent-encoding 한다(`+` 가 공백으로 읽히지 않게)
+    assert.equal(last.url, `/ws/live?key=${encodeURIComponent('REAL+KEY/1')}`)
+  })
+
+  it('비허용 호스트 → 403 차단(업스트림 미도달 · 진짜 값 유출 없음)', async () => {
+    const { placeholderByKey, injectionMap } = buildInjectionMap([
+      { key: 'GEMINI_API_KEY', realValue: 'REAL+KEY/1', allowedHosts: ['api.other.com'] },
+    ])
+    proxy.updateMap(injectionMap)
+    const before = seen.length
+
+    const ph = placeholderByKey.get('GEMINI_API_KEY')
+    const res = await upgradeThroughProxy({
+      proxyPort, upstreamPort, caPem: cm.caCertPem, path: `/ws/live?key=${ph}`,
+    })
+    assert.equal(res.status, 403)
+    const json = JSON.parse(res.after)
+    assert.equal(json.error, 'secret_host_not_allowed')
+    assert.equal(json.secret, 'GEMINI_API_KEY')
+    assert.ok(!res.after.includes('REAL+KEY'))
+    assert.equal(seen.length, before)
+  })
+
+  it('업스트림이 업그레이드를 거절하면 그 응답을 그대로 돌려준다', async () => {
+    const { injectionMap } = buildInjectionMap([])
+    proxy.updateMap(injectionMap)
+
+    const res = await upgradeThroughProxy({
+      proxyPort, upstreamPort, caPem: cm.caCertPem, path: '/nope',
+    })
+    assert.equal(res.status, 404)
+    assert.equal(res.after, 'nope')
+  })
+})

@@ -17,6 +17,7 @@
  *
  * - plain http:// : absolute-form 요청을 그대로 파싱해 치환·전달.
  * - https:// : CONNECT를 MITM한다(cert-manager가 호스트별 인증서 발급, 샌드박스는 CA를 신뢰).
+ * - WebSocket(ws:// · wss://) : 'upgrade' 이벤트로 받아 같은 규칙으로 치환 · 차단한 뒤, 101 이면 양쪽 소켓을 잇는다(0.37.0).
  *
  * 응답 본문은 치환하지 않는다(진짜 값을 응답에 넣지 않으므로). 의존성 0(node 내장만).
  */
@@ -45,6 +46,23 @@ function hostOnly(hostHeader) {
   if (h.startsWith('[')) return h.slice(1, h.indexOf(']')).toLowerCase()
   const c = h.indexOf(':')
   return (c >= 0 ? h.slice(0, c) : h).toLowerCase()
+}
+
+/** 응답 상태 줄 + 헤더(rawHeaders 꼴 [name, value, …])를 날 소켓에 쓸 문자열로. */
+function rawHead(statusCode, statusMessage, rawHeaders) {
+  let out = `HTTP/1.1 ${statusCode} ${statusMessage || http.STATUS_CODES[statusCode] || ''}\r\n`
+  for (let i = 0; i < rawHeaders.length; i += 2) out += `${rawHeaders[i]}: ${rawHeaders[i + 1]}\r\n`
+  return out + '\r\n'
+}
+
+/** 업그레이드 소켓에 JSON 오류 응답을 쓰고 닫는다(일반 요청의 `_sendJsonError` 와 같은 본문). */
+function writeRawJson(socket, status, body) {
+  if (!socket.writable) return socket.destroy()
+  socket.end(rawHead(status, '', [
+    'content-type', 'application/json; charset=utf-8',
+    'content-length', String(Buffer.byteLength(body)),
+    'connection', 'close',
+  ]) + body)
 }
 
 export class InjectionProxy {
@@ -96,9 +114,11 @@ export class InjectionProxy {
       (creq, cres) => this._handleDecrypted(creq, cres, 'https'),
     )
     this.mitm.on('clientError', (_e, sock) => sock.destroy())
+    this.mitm.on('upgrade', (creq, socket, head) => this._handleDecryptedUpgrade(creq, socket, head))
 
     this.server = http.createServer((req, res) => this._handleAbsolute(req, res))
     this.server.on('connect', (req, socket) => this._handleConnect(req, socket))
+    this.server.on('upgrade', (req, socket, head) => this._handleAbsoluteUpgrade(req, socket, head))
     this.server.on('clientError', (_e, sock) => sock.destroy())
 
     await new Promise((resolve) => this.server.listen(port, host, resolve))
@@ -184,6 +204,106 @@ export class InjectionProxy {
     })
   }
 
+  /**
+   * WebSocket 업그레이드(wss:// = CONNECT 뒤 복호화된 요청). 종전에는 'upgrade' 리스너가 없고 `_forward` 가
+   * `upgrade` · `connection` 을 hop-by-hop 으로 지워 일반 GET 으로 보냈다. 그래서 허용 호스트가 맞아도
+   * 업스트림이 그 경로를 일반 요청으로 받아 404 를 냈다(11/04 Lyria RealTime 실측). 치환 · 차단 규칙은 일반 요청과 같다.
+   */
+  _handleDecryptedUpgrade(creq, socket, head) {
+    const hostHeader = creq.headers.host || ''
+    this._forwardUpgrade({
+      scheme: 'https',
+      host: hostOnly(hostHeader),
+      port: (hostHeader.match(/:(\d+)$/)?.[1]) || 443,
+      path: creq.url,
+      method: creq.method,
+      headers: creq.headers,
+      socket,
+      head,
+    })
+  }
+
+  /** WebSocket 업그레이드(ws:// absolute-form). */
+  _handleAbsoluteUpgrade(req, socket, head) {
+    let target
+    try {
+      target = new URL(req.url)
+    } catch {
+      writeRawJson(socket, 400, JSON.stringify({
+        error: 'bad_request_target',
+        message: '요청 대상 URL을 해석하지 못했습니다. 프록시로 보낸 요청의 URL 형식을 확인해 주세요',
+      }))
+      return
+    }
+    this._forwardUpgrade({
+      scheme: 'http',
+      host: target.hostname,
+      port: target.port || 80,
+      path: target.pathname + target.search,
+      method: req.method,
+      headers: req.headers,
+      socket,
+      head,
+    })
+  }
+
+  /**
+   * 치환 후 업스트림에 업그레이드를 요청하고, 101 이면 두 소켓을 양방향으로 잇는다.
+   * 업스트림이 업그레이드를 거절하면(404 · 401 등) 그 응답을 그대로 돌려주고 닫는다.
+   * 101 뒤의 프레임은 치환하지 않는다(응답 본문과 같은 이유: 진짜 값은 요청 줄 · 헤더로만 나간다).
+   */
+  _forwardUpgrade({ scheme, host, port, path, method, headers, socket, head }) {
+    socket.on('error', () => socket.destroy())
+    const prepared = this._prepareOutbound({ host, path, headers, bodyBuf: null })
+    const { dest } = prepared
+    if (prepared.blocked) {
+      writeRawJson(socket, 403, prepared.blocked)
+      return
+    }
+    const { subHeaders, subPath } = prepared
+    // hop-by-hop 이지만 업그레이드에는 필요한 두 헤더를 되살린다. sec-websocket-* 은 처음부터 지우지 않는다.
+    subHeaders.connection = 'Upgrade'
+    subHeaders.upgrade = headers.upgrade
+
+    const mod = scheme === 'https' ? https : http
+    const opts = { host: dest, port: Number(port), path: subPath, method, headers: subHeaders }
+    if (scheme === 'https' && this.upstreamCa) opts.ca = this.upstreamCa
+
+    const upstream = mod.request(opts)
+    upstream.on('upgrade', (ures, usocket, uhead) => {
+      usocket.on('error', () => socket.destroy())
+      socket.on('close', () => usocket.destroy())
+      usocket.on('close', () => socket.destroy())
+      socket.write(rawHead(ures.statusCode, ures.statusMessage, ures.rawHeaders))
+      if (uhead?.length) socket.write(uhead)
+      if (head?.length) usocket.write(head)
+      usocket.pipe(socket)
+      socket.pipe(usocket)
+    })
+    upstream.on('response', (ures) => {
+      // 업그레이드 거절 — 상태 · 헤더 · 본문을 돌려주고 닫는다. 길이는 연결 종료로 알린다.
+      const raw = []
+      for (let i = 0; i < ures.rawHeaders.length; i += 2) {
+        const name = ures.rawHeaders[i].toLowerCase()
+        if (HOP_BY_HOP.includes(name) || name === 'content-length') continue
+        raw.push(ures.rawHeaders[i], ures.rawHeaders[i + 1])
+      }
+      raw.push('Connection', 'close')
+      socket.write(rawHead(ures.statusCode || 502, ures.statusMessage, raw))
+      ures.pipe(socket)
+    })
+    upstream.on('error', (err) => {
+      this.log.warn('[injection-proxy] upstream 오류(upgrade)', { host: dest, error: err.message })
+      writeRawJson(socket, 502, JSON.stringify({
+        error: 'upstream_unreachable',
+        host: dest,
+        cause: err.code || 'unknown',
+        message: `${dest}에 연결하지 못했습니다. 호스트 이름과 네트워크 상태를 확인한 뒤 다시 시도해 주세요. 반복되면 이 호스트가 도달 가능한지부터 확인해 주세요`,
+      }))
+    })
+    upstream.end()
+  }
+
   _collectBody(req, done) {
     const chunks = []
     req.on('data', (c) => chunks.push(c))
@@ -191,8 +311,11 @@ export class InjectionProxy {
     req.on('error', () => done(Buffer.concat(chunks)))
   }
 
-  /** 치환 후 업스트림으로 전달하고 응답을 그대로 파이프. */
-  _forward({ scheme, host, port, path, method, headers, bodyBuf, res }) {
+  /**
+   * 차단 검사 + 헤더 · URL · 바디 치환. 일반 요청(`_forward`)과 WebSocket 업그레이드(`_forwardUpgrade`)가
+   * 같은 규칙을 쓰도록 한 곳에 둔다. 차단이면 `{ blocked: payload }` 를 돌려주고 업스트림에 아무것도 보내지 않는다.
+   */
+  _prepareOutbound({ host, path, headers, bodyBuf }) {
     const dest = hostOnly(host)
 
     // 헤더 치환 (원본 복사 — hop-by-hop 헤더 제거)
@@ -215,19 +338,16 @@ export class InjectionProxy {
     if (blocked.length > 0) {
       const keys = blocked.map((b) => b.key)
       this.log.warn('[injection-proxy] 시크릿 차단(호스트 미허용)', { host: dest, keys })
-      const payload = JSON.stringify({
-        error: SECRET_HOST_NOT_ALLOWED,
-        secret: keys[0],
-        secrets: keys,
-        host: dest,
-        message: `이 시크릿(${keys.join(', ')})은 ${dest}에 대해 허용되지 않았습니다. 워크스페이스 오너가 설정 → 시크릿의 허용 호스트에 ${dest}을(를) 추가해 주세요`,
-      })
-      res.writeHead(403, {
-        'content-type': 'application/json; charset=utf-8',
-        'content-length': Buffer.byteLength(payload),
-      })
-      res.end(payload)
-      return
+      return {
+        dest,
+        blocked: JSON.stringify({
+          error: SECRET_HOST_NOT_ALLOWED,
+          secret: keys[0],
+          secrets: keys,
+          host: dest,
+          message: `이 시크릿(${keys.join(', ')})은 ${dest}에 대해 허용되지 않았습니다. 워크스페이스 오너가 설정 → 시크릿의 허용 호스트에 ${dest}을(를) 추가해 주세요`,
+        }),
+      }
     }
 
     // 치환된 키를 모아 관측기로 넘긴다. 종전에는 세 호출 모두 `substituted`를 버려서
@@ -269,6 +389,22 @@ export class InjectionProxy {
       delete subHeaders['content-length']
     }
     subHeaders.host = host
+    return { dest, subHeaders, subPath, outBody }
+  }
+
+  /** 치환 후 업스트림으로 전달하고 응답을 그대로 파이프. */
+  _forward({ scheme, host, port, path, method, headers, bodyBuf, res }) {
+    const prepared = this._prepareOutbound({ host, path, headers, bodyBuf })
+    const { dest } = prepared
+    if (prepared.blocked) {
+      res.writeHead(403, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(prepared.blocked),
+      })
+      res.end(prepared.blocked)
+      return
+    }
+    const { subHeaders, subPath, outBody } = prepared
 
     const mod = scheme === 'https' ? https : http
     const opts = {
