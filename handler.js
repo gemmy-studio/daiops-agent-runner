@@ -355,6 +355,93 @@ export function hasUnquotedShellMetachar(command) {
   return false
 }
 
+/**
+ * 엮인 명령을 부분 명령으로 쪼갠다(11/04). cloud `policy.ts splitSimpleCommandChain` 과 같은 구현, 드리프트 금지.
+ *
+ * 쪼개는 것은 인용 밖의 `&&` · `||` · `;` · `|` · 줄바꿈뿐이다. 그 밖의 메타문자(리다이렉트 · `&` · `|&` · 서브셸 ·
+ * 백틱 · `$(`)가 하나라도 있으면 null(결재). 빈 조각도 null.
+ */
+export function splitSimpleCommandChain(command) {
+  const str = String(command ?? '')
+  const segments = []
+  let current = ''
+  let quote = null
+  const push = () => {
+    const seg = current.trim()
+    current = ''
+    if (!seg) return false
+    segments.push(seg)
+    return true
+  }
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i]
+    if (quote) {
+      if (quote === '"' && ch === '\\') {
+        current += ch + (str[i + 1] ?? '')
+        i++
+        continue
+      }
+      if (quote === '"' && (ch === '`' || (ch === '$' && str[i + 1] === '('))) return null
+      if (ch === quote) quote = null
+      current += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      current += ch
+      continue
+    }
+    if (ch === '\\') {
+      current += ch + (str[i + 1] ?? '')
+      i++
+      continue
+    }
+    const next = str[i + 1]
+    if ((ch === '&' && next === '&') || (ch === '|' && next === '|')) {
+      if (!push()) return null
+      i++
+      continue
+    }
+    if (ch === '|' && next === '&') return null
+    if (ch === ';' || ch === '|' || ch === '\n') {
+      if (!push()) return null
+      continue
+    }
+    if (SHELL_METACHARS.has(ch)) return null
+    current += ch
+  }
+  if (quote) return null
+  if (!push()) return null
+  return segments
+}
+
+/** 혼자서는 하는 일이 없는 셸 내장 명령. 엮인 명령 안에서는 통과시킨다. cloud `NO_OP_SHELL_BUILTINS` 와 같다 */
+const NO_OP_SHELL_BUILTINS = new Set(['cd', 'pushd', 'popd', 'chdir', 'true', ':'])
+
+/**
+ * Bash 명령의 allowlist 자동 통과 판정(11/04). 단독 명령은 종전과 같고, 엮인 명령은 쪼갠 조각이 전부 통과해야 한다.
+ * cloud `policy.ts bashAllowlistReason` 과 같은 구현, 드리프트 금지.
+ */
+export function bashAllowlistReason(command, allowlist) {
+  if (isDangerousCommand(command)) return null
+  const chained = hasUnquotedShellMetachar(command)
+  const segments = chained ? splitSimpleCommandChain(command) : [String(command ?? '')]
+  if (!segments) return null
+  let viaAllowlist = false
+  for (const seg of segments) {
+    const head = extractBashHead(seg)
+    if (!head) return null
+    if (chained && NO_OP_SHELL_BUILTINS.has(head.bin)) continue
+    if (isSafeBinCall(head)) continue
+    if (matchesAllowlist(head.bin, allowlist)) {
+      viaAllowlist = true
+      continue
+    }
+    return null
+  }
+  return viaAllowlist ? 'allowlist' : 'safe-bin'
+}
+
 // ── SEC-T3: sticky allowlist 안전성 (hermes approval.py 패턴 이식). cloud policy.ts와 동일 ──
 
 const ANSI_REGEX = new RegExp(
@@ -1059,13 +1146,10 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel, toolMeta) 
   // security === 'allowlist'
   if (toolName === 'Bash') {
     const command = String(input.command ?? '')
-    // 셸 메타문자(SEC-T7) 또는 위험 명령(인터프리터 -c/heredoc·curl|sh·find -exec 등, SEC-T3)이면
-    // 자동 통과를 건너뛰고 결재로 강등한다. allowlist에 든 bin도 위험 호출이면 강등.
-    if (!hasUnquotedShellMetachar(command) && !isDangerousCommand(command)) {
-      const head = extractBashHead(command)
-      if (head && isSafeBinCall(head)) return { kind: 'allow', reason: 'safe-bin' }
-      if (head && matchesAllowlist(head.bin, allowlist)) return { kind: 'allow', reason: 'allowlist' }
-    }
+    // 위험 명령(인터프리터 -c/heredoc·curl|sh·find -exec 등, SEC-T3)은 allowlist 에 든 bin 이어도 결재로 강등한다.
+    // 셸 메타문자(SEC-T7)는 쪼갤 수 있는 꼴(&& || ; |)만 조각마다 보고(11/04), 나머지는 결재로 강등한다.
+    const passed = bashAllowlistReason(command, allowlist)
+    if (passed) return { kind: 'allow', reason: passed }
   } else {
     const filePath = String(input.file_path ?? '')
     if (filePath && matchesAllowlist(filePath, allowlist)) return { kind: 'allow', reason: 'allowlist' }

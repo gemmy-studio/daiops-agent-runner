@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+> **배포 순서**: 이 러너를 먼저 릴리스하고 앱(결재 「항상 허용」 조각 저장)을 올린다. 새 러너 + 옛 앱은 깨지지 않는다
+> (옛 앱은 첫 낱말 하나만 저장해 엮인 명령이 통과할 일이 거의 없다). 옛 러너 + 새 앱이면 앱이 조각마다 저장한 꼴이
+> 엮인 명령에 아직 맞지 않아 결재가 계속 온다(위험하지는 않고 효과가 늦게 난다).
+
+### Changed
+- **엮인 명령을 조각마다 판정**(11/04 대표 결정). 인용 밖 `&&` · `||` · `;` · `|` · 줄바꿈으로 쪼개 조각이 전부 안전 bin
+  이거나 허용 목록에 들면 결재 없이 실행한다. 엮인 명령 안의 `cd` · `pushd` · `popd` 등은 통과시킨다. 리다이렉트 · `&` ·
+  `|&` · 서브셸 · 명령 치환이 있거나 빈 조각이 있으면 종전처럼 결재로 보낸다. 위험 명령(SEC-T3)은 명령 전체로 먼저 본다.
+  레퍼런스: Claude Code 권한 문서 「Every subcommand must be allowed for a compound command to run without a prompt」,
+  Codex `exec_policy.rs`(같은 구분자 범위). 새 함수 `splitSimpleCommandChain` · `bashAllowlistReason`(cloud `policy.ts` 와 같은 구현)
+
 ## [0.35.0] - 2026-10-30
 
 > **배포 순서**: 어느 쪽이 먼저여도 깨지지 않는다. 옛 앱(브릿지에 `instructions` · `_meta` 가 없음)과 돌면 묶음 안내 · 예시가
