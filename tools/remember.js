@@ -71,3 +71,28 @@ export function isValidRememberContent(content) {
   const trimmed = content.trim()
   return trimmed.length > 0 && trimmed.length <= REMEMBER_CONTENT_MAX
 }
+
+/** blocked 의 종전 안내(cloud 가 안내를 보내지 않을 때). 옛 cloud 와 함께 돌 때 쓰인다 */
+export const DEFAULT_BLOCKED_GUIDANCE =
+  '이 대화 경로에서는 규칙을 영구 저장할 수 없어요. 사람이 직접 대화하는 채널에서 저장하거나, 사용자에게 설정 메뉴에서 등록하도록 안내하세요.'
+
+/** cloud 가 보낸 안내의 상한(자). 도구 결과 한 문단이면 충분하고, 이상한 값이 와도 턴을 채우지 않게 자른다 */
+export const GUIDANCE_MAX = 600
+
+/**
+ * POST /v1/remember/:id 본문 → 결정. 실패류(failed · blocked)는 kind 'deny', 나머지는 allow_once.
+ * reason 은 blocked 의 사유(`unsafe_content` 등), guidance 는 cloud 가 사유에 맞춰 정한 안내다(11/05).
+ * 안내를 cloud 가 들고 있어 문구를 바꿀 때 러너 릴리스가 필요 없다.
+ */
+export function rememberDecisionFromBody(action, body) {
+  const blockedReason = typeof body?.reason === 'string' ? body.reason : null
+  const guidance = typeof body?.guidance === 'string' && body.guidance.trim() ? body.guidance.trim().slice(0, GUIDANCE_MAX) : null
+  return isRememberFailure(action)
+    ? { kind: 'deny', rememberAction: action, blockedReason, guidance }
+    : { kind: 'allow_once', rememberAction: action }
+}
+
+/** blocked 결과에 모델에게 돌려줄 안내. cloud 안내가 있으면 그것, 없으면 종전 문구 */
+export function blockedRememberGuidance(result) {
+  return typeof result?.guidance === 'string' && result.guidance ? result.guidance : DEFAULT_BLOCKED_GUIDANCE
+}

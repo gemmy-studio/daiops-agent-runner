@@ -8,6 +8,10 @@ import {
   REMEMBER_FAILURES,
   isRememberAction,
   isRememberFailure,
+  rememberDecisionFromBody,
+  blockedRememberGuidance,
+  DEFAULT_BLOCKED_GUIDANCE,
+  GUIDANCE_MAX,
 } from './remember.js'
 
 test('REMEMBER_TOOL: Anthropic 호환 스키마', () => {
@@ -49,4 +53,24 @@ test('isRememberFailure: blocked는 실패류, duplicate는 아니다', () => {
   // 정상 처리됐고 결과가 "이미 있음"인 것 — 실패가 아니다.
   assert.equal(isRememberFailure('duplicate'), false)
   assert.equal(isRememberFailure('saved'), false)
+})
+
+// 11/05: blocked 안내는 cloud 가 사유에 맞춰 보낸다(숙달 꺼짐 · 기본 규칙 고정 · 승인함에 올림). 옛 cloud 면 종전 문구
+test('rememberDecisionFromBody: blocked 는 사유와 cloud 안내를 싣고, 성공류는 싣지 않는다', () => {
+  assert.deepEqual(rememberDecisionFromBody('blocked', { reason: 'learning_off', guidance: '  저장하지 않았습니다  ' }), {
+    kind: 'deny',
+    rememberAction: 'blocked',
+    blockedReason: 'learning_off',
+    guidance: '저장하지 않았습니다',
+  })
+  assert.deepEqual(rememberDecisionFromBody('saved', { guidance: 'x' }), { kind: 'allow_once', rememberAction: 'saved' })
+  assert.equal(rememberDecisionFromBody('blocked', { guidance: '   ' }).guidance, null)
+  assert.equal(rememberDecisionFromBody('blocked', {}).guidance, null)
+  assert.equal(rememberDecisionFromBody('blocked', { guidance: 'a'.repeat(GUIDANCE_MAX + 50) }).guidance.length, GUIDANCE_MAX)
+})
+
+test('blockedRememberGuidance: cloud 안내가 있으면 그것, 없으면 종전 문구', () => {
+  assert.equal(blockedRememberGuidance({ guidance: '승인함에 올렸습니다' }), '승인함에 올렸습니다')
+  assert.equal(blockedRememberGuidance({ guidance: null }), DEFAULT_BLOCKED_GUIDANCE)
+  assert.equal(blockedRememberGuidance(undefined), DEFAULT_BLOCKED_GUIDANCE)
 })

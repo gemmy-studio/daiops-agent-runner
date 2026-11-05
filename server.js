@@ -17,7 +17,7 @@ import { readUpdatedInput } from './approval-manager.js'
 import { fetchMaterializedSecrets, startInjectionBroker, writePlaceholderEnvFile } from './proxy/bootstrap.js'
 import { EgressObserver, setActiveEgressObserver } from './proxy/egress-observer.js'
 import { MEMORY_EDIT_ACTIONS, isMemoryEditAction, isMemoryEditFailure, sanitizeMemoryDetail } from './tools/memory-edit.js'
-import { REMEMBER_ACTIONS, isRememberAction, isRememberFailure } from './tools/remember.js'
+import { REMEMBER_ACTIONS, isRememberAction, rememberDecisionFromBody } from './tools/remember.js'
 import { collectRuntimeProbe } from './runtime-probe.js'
 import { sweepOrphanedBuffers } from './event-buffer.js'
 import { admissionStats } from './tool-cpu-lane.js'
@@ -384,10 +384,8 @@ const server = createServer(async (req, res) => {
       }
       // 실패류(failed·blocked) → kind:'deny', 나머지는 allow_once. rememberAction으로 onRemember가 분기.
       // reason: blocked 의 사유(`unsafe_content` = 저장 검사). 없으면 종전 의미(채널 신뢰 거부)다.
-      const blockedReason = typeof body.reason === 'string' ? body.reason : null
-      const decision = isRememberFailure(action)
-        ? { kind: 'deny', rememberAction: action, blockedReason }
-        : { kind: 'allow_once', rememberAction: action }
+      // guidance: blocked 일 때 cloud 가 정한 안내(11/05, tools/remember.js rememberDecisionFromBody)
+      const decision = rememberDecisionFromBody(action, body)
       const resolvedBy = typeof body.resolved_by === 'string' ? body.resolved_by : null
       const ok = resolveApproval(rememberId, decision, resolvedBy)
       if (!ok) {

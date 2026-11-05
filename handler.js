@@ -11,7 +11,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './tools/request-secret.js'
-import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX, isRememberFailure } from './tools/remember.js'
+import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX, isRememberFailure, blockedRememberGuidance } from './tools/remember.js'
 import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps, readRuleTarget, formatRuleList } from './tools/memory-edit.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { postTerminalIngest } from './ingest-client.js'
@@ -1873,11 +1873,9 @@ export async function handleChat(rawParams, res, req) {
         return { content: UNSAFE_MEMORY_CONTENT_GUIDANCE, is_error: true }
       }
       if (result.rememberAction === 'blocked') {
-        return {
-          content:
-            '이 대화 경로에서는 규칙을 영구 저장할 수 없어요. 사람이 직접 대화하는 채널에서 저장하거나, 사용자에게 설정 메뉴에서 등록하도록 안내하세요.',
-          is_error: true,
-        }
+        // cloud 가 사유에 맞는 안내를 보냈으면 그것을 쓴다(숙달 꺼짐 · 기본 규칙 고정 · 승인함에 올림, 11/05).
+        // 옛 cloud 는 보내지 않으므로 종전 문구가 남는다
+        return { content: blockedRememberGuidance(result), is_error: true }
       }
       if (result.kind === 'deny' || isRememberFailure(result.rememberAction)) {
         return { content: '기억 저장에 실패했어요. 잠시 후 다시 시도하세요.', is_error: true }
