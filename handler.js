@@ -30,13 +30,8 @@ import { logError } from './logger.js'
  */
 const DEFAULT_CWD = '/workspace'
 
-/**
- * 격리 샌드박스 신뢰 플래그 (ADR 21 §2.4). 격리 클라우드/venv 배포에서는 에이전트가 자기 샌드박스
- * 안 파일작업을 결재 없이 수행하도록 허용한다("샌드박스 안 에이전트는 자기 파일에 전권"). 블래스트
- * 반경이 샌드박스에 갇히므로 게이트 불필요 — 결재는 외향 발신·config.write·원격실행/네트워크에만 남긴다.
- * 로컬 호스트 등 파일작업까지 게이트하려면 DAIOPS_SANDBOX_WRITE_FREE=false. 기본 on.
- */
-const SANDBOX_WRITE_FREE = process.env.DAIOPS_SANDBOX_WRITE_FREE !== 'false'
+/** 이 실행기 프로세스가 뜬 시각. 결재 · 차단 판정 로그에 함께 남겨 「그때 떠 있던 프로세스」를 가린다(2026-11-05). */
+const RUNNER_STARTED_AT = new Date().toISOString()
 
 /**
  * Phase B — 워크스페이스 secret store. 모듈 레벨(= agent-runner 프로세스 = 샌드박스/워크스페이스 1개
@@ -1675,10 +1670,12 @@ export async function handleChat(rawParams, res, req) {
       }
 
       // 샌드박스 격리 예외(ADR 21 §2.4): 러너는 자기 cwd(=샌드박스 루트)를 알고 있으므로 여기서 주입한다.
-      // cloud가 명시 sandboxRoot를 보냈으면 존중, 아니면 실행 cwd 사용. env로 배포별 on/off.
-      const effectivePolicy = SANDBOX_WRITE_FREE
-        ? { ...params.policy, sandboxRoot: params.policy?.sandboxRoot ?? (params.context_dir ?? DEFAULT_CWD) }
-        : params.policy
+      // cloud가 명시 sandboxRoot를 보냈으면 존중, 아니면 실행 cwd 사용. 끄는 스위치(DAIOPS_SANDBOX_WRITE_FREE)는
+      // 어느 배포에서도 끄지 않아 없앴다(2026-11-05). 보호 경로는 그대로 막히고, 외향 발신 · 원격 실행 · 네트워크는 결재로 간다.
+      const effectivePolicy = {
+        ...params.policy,
+        sandboxRoot: params.policy?.sandboxRoot ?? (params.context_dir ?? DEFAULT_CWD),
+      }
       const decision = evaluatePolicy(effectivePolicy, toolName, input, params.has_approval_channel, toolMeta)
 
       if (decision.kind === 'allow') {
@@ -1686,6 +1683,16 @@ export async function handleChat(rawParams, res, req) {
       }
 
       const summary = decision.commandSummary ?? summarizeToolInput(toolName, input)
+
+      // 결재 · 차단이 생긴 이유를 한 줄 남긴다. 명령 원문은 비밀이 섞일 수 있어 남기지 않는다.
+      // 11/04~05 작업 공간 안 단순 명령에 결재가 걸렸는데 판정 이유가 로그에 없어 원인을 못 잡았다(2026-11-05).
+      console.log('[agent-runner] 도구 판정', JSON.stringify({
+        tool: toolName,
+        kind: decision.kind,
+        reason: decision.reason,
+        hasSandboxRoot: Boolean(effectivePolicy.sandboxRoot),
+        runnerStartedAt: RUNNER_STARTED_AT,
+      }))
 
       if (decision.kind === 'deny') {
         emitSseEvent(sessionId, 'tool_use', {
