@@ -691,7 +691,12 @@ function isProtectedTarget(resolved, protectedPaths) {
 }
 
 /** Bash 명령이 거버넌스 경로를 쓰기 목적지로 삼는지. */
-export function bashWritesProtectedPath(command, { cwd = '/workspace', protectedPaths = PROTECTED_HARNESS_PATHS } = {}) {
+export function bashWritesProtectedPath(command, opts = {}) {
+  return bashProtectedWriteTarget(command, opts) !== null
+}
+
+/** Bash 명령의 쓰기 목적지 중 처음 걸린 보호 경로(없으면 null). 거절 안내를 경로에 맞추는 데 쓴다. */
+function bashProtectedWriteTarget(command, { cwd = '/workspace', protectedPaths = PROTECTED_HARNESS_PATHS } = {}) {
   const tokens = tokenizeShell(String(command ?? ''))
   let dir = cwd
   let words = []
@@ -716,10 +721,10 @@ export function bashWritesProtectedPath(command, { cwd = '/workspace', protected
   }
   flush()
   // 변수·치환이 남은 목적지는 풀 수 없다. 보호 경로 이름이 보이면 막는 쪽으로 판정한다.
-  return targets.some((t) =>
+  return targets.find((t) =>
     /[$`]/.test(t)
       ? /\.daiops\/+(skills|instructions|persona_overrides)|persona\.yaml|\.integrations\.env/.test(t)
-      : isProtectedTarget(t, protectedPaths))
+      : isProtectedTarget(t, protectedPaths)) ?? null
 }
 
 /**
@@ -737,15 +742,29 @@ const FILE_WRITE_TOOL_NAMES = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEd
 
 function guardProtectedHarnessWrite(policy, toolName, input) {
   const protectedPaths = Array.isArray(policy?.protectedPaths) ? policy.protectedPaths : PROTECTED_HARNESS_PATHS
-  let hit = false
+  let hit = null
   if (toolName === 'Bash') {
-    hit = bashWritesProtectedPath(input?.command, { cwd: policy?.sandboxRoot || '/workspace', protectedPaths })
+    hit = bashProtectedWriteTarget(input?.command, { cwd: policy?.sandboxRoot || '/workspace', protectedPaths })
   } else if (FILE_WRITE_TOOL_NAMES.has(toolName)) {
-    const raw = input?.file_path ?? input?.notebook_path
-    hit = isProtectedHarnessPath(resolveToolFilePath(raw, policy?.sandboxRoot), protectedPaths)
+    const resolved = resolveToolFilePath(input?.file_path ?? input?.notebook_path, policy?.sandboxRoot)
+    if (isProtectedHarnessPath(resolved, protectedPaths)) hit = resolved
   }
-  if (!hit) return null
-  return { kind: 'deny', reason: 'protected-path', toolName, commandSummary: summarizeToolInput(toolName, input) }
+  if (hit === null) return null
+  const pathKind = protectedPathKind(hit)
+  return { kind: 'deny', reason: 'protected-path', toolName, commandSummary: summarizeToolInput(toolName, input), ...(pathKind ? { pathKind } : {}) }
+}
+
+/**
+ * 막힌 경로의 종류. 위키 폴더 · 기억 파일 · 표기 기준 파일은 앱이 메신저 턴에만 보호 경로에 더한다
+ * (앱 `messenger-file-paths.ts`). 그 셋을 스킬 · 성격 파일과 같은 안내로 거절하면 직원이 엉뚱한 도구를 고른다
+ * (11/06 3번 러너 0.39.1: 위키 Write 가 막혔는데 skill_patch · remember 를 안내받았다).
+ */
+function protectedPathKind(target) {
+  const t = String(target)
+  if (t === '/workspace/knowledge' || t.startsWith('/workspace/knowledge/')) return 'wiki'
+  if (t === '/workspace/.daiops/MEMORY.md') return 'memory'
+  if (t === '/workspace/schema/knowledge.md') return 'schema'
+  return null
 }
 
 /** file_path가 샌드박스 루트 하위인지 (경로 탈출 `..` 거부, 상대경로는 cwd=sandboxRoot 기준 내부). */
@@ -987,6 +1006,16 @@ export const DENY_GUIDANCE_EN = {
     'Skill, instruction and persona files can only be changed through the skill tools (skill_create, skill_patch) or remember, revise and forget. Do not retry with another shell command. Use those tools, or report the change you wanted to make.',
   'repeat-failure':
     'The same call already failed repeatedly, so retrying it will not help. Change the approach, or report that it cannot be done here.',
+}
+
+/** `protected-path` 중 경로 종류별 안내. 없으면 위 기본 문구(스킬 · 지시문 · 성격 파일)를 쓴다. */
+export const PROTECTED_PATH_GUIDANCE_EN = {
+  wiki:
+    'Wiki files cannot be written in this conversation, and the wiki tools are not available here either. Do not retry with another tool or shell command. Tell the user that this change can be made from the web chat.',
+  memory:
+    'The memory file cannot be written in this conversation. Do not retry with another tool or shell command. To keep a work rule, use the remember tool (it may go to the manager for approval).',
+  schema:
+    'The naming and classification file cannot be written in this conversation. Do not retry with another tool or shell command. Tell the user that this change can be made from the web chat.',
 }
 
 /**
@@ -1706,7 +1735,7 @@ export async function handleChat(rawParams, res, req) {
         })
         // 코드(`decision.reason`)와 문장을 함께 준다 — 코드는 기계가 분기하는 안정 계약이고
         // 문장은 모델이 다음 행동을 정하는 근거다. 한쪽만 주면 둘 다 못 한다.
-        const guidance = DENY_GUIDANCE_EN[decision.reason] ?? 'Retrying the same call is unlikely to help. Report what you could not do.'
+        const guidance = (decision.pathKind && PROTECTED_PATH_GUIDANCE_EN[decision.pathKind]) ?? DENY_GUIDANCE_EN[decision.reason] ?? 'Retrying the same call is unlikely to help. Report what you could not do.'
         return {
           behavior: 'deny',
           message: `Tool '${toolName}' was not run (policy: ${decision.reason}). ${guidance}`,

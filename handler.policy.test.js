@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { hasUnquotedShellMetachar, splitSimpleCommandChain, bashAllowlistReason, evaluatePolicy, isDangerousCommand, isSafeAllowlistPattern, isSandboxSafeCommand, isUnderSandbox, resolveAllowedTools, DENY_GUIDANCE_EN } from './handler.js'
+import { hasUnquotedShellMetachar, splitSimpleCommandChain, bashAllowlistReason, evaluatePolicy, isDangerousCommand, isSafeAllowlistPattern, isSandboxSafeCommand, isUnderSandbox, resolveAllowedTools, DENY_GUIDANCE_EN, PROTECTED_PATH_GUIDANCE_EN } from './handler.js'
 
 const SDK_BUILTINS = ['Read', 'Edit', 'Glob', 'Grep', 'Bash', 'Write', 'BashOutput', 'KillShell', 'WebSearch', 'WebFetch']
 
@@ -802,5 +802,32 @@ describe('evaluatePolicy: 거버넌스 경로 보호 (A-601)', () => {
   })
   it('거부 사유에 모델 안내 문구가 있다', () => {
     assert.ok(DENY_GUIDANCE_EN['protected-path'])
+  })
+})
+
+// 11/06 3번 러너 0.39.1: 메신저 턴의 위키 Write 가 막혔는데 skill_patch · remember 를 안내받았다(018a7284 발견).
+describe('evaluatePolicy: 보호 경로 종류별 거절 안내', () => {
+  const messenger = {
+    security: 'full', ask: 'off', askFallback: 'full', allowlist: [], sandboxRoot: '/workspace',
+    protectedPaths: ['/workspace/.daiops/skills/', '/workspace/knowledge/', '/workspace/.daiops/MEMORY.md', '/workspace/schema/knowledge.md'],
+  }
+  it('#위키# 위키 파일 쓰기는 wiki 로 가르고, 그 안내는 스킬 도구가 아니라 웹 대화를 말한다', () => {
+    const d = evaluatePolicy(messenger, 'Write', { file_path: '/workspace/knowledge/wiki/a.md', content: 'x' }, false)
+    assert.deepEqual([d.reason, d.pathKind], ['protected-path', 'wiki'])
+    assert.match(PROTECTED_PATH_GUIDANCE_EN.wiki, /web chat/)
+    assert.doesNotMatch(PROTECTED_PATH_GUIDANCE_EN.wiki, /skill_patch|remember/)
+  })
+  it('셸 리다이렉트 · 상대 경로도 같은 종류로 가른다', () => {
+    assert.equal(evaluatePolicy(messenger, 'Bash', { command: 'cd /workspace && echo x > knowledge/wiki/a.md' }, false).pathKind, 'wiki')
+    assert.equal(evaluatePolicy(messenger, 'Edit', { file_path: '.daiops/MEMORY.md', old_string: 'a', new_string: 'b' }, false).pathKind, 'memory')
+    assert.equal(evaluatePolicy(messenger, 'Write', { file_path: '/workspace/schema/knowledge.md', content: 'x' }, false).pathKind, 'schema')
+  })
+  it('스킬 · 성격 파일은 종류 없이 종전 안내를 쓴다', () => {
+    const d = evaluatePolicy(messenger, 'Write', { file_path: '/workspace/.daiops/skills/active/x/SKILL.md', content: 'x' }, false)
+    assert.equal(d.reason, 'protected-path')
+    assert.equal(d.pathKind, undefined)
+  })
+  it('종류별 안내도 재시도가 의미 없음을 말한다', () => {
+    for (const [kind, text] of Object.entries(PROTECTED_PATH_GUIDANCE_EN)) assert.match(text, /retry/i, kind)
   })
 })
