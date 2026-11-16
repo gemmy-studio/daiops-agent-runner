@@ -103,7 +103,8 @@ const PRUNED_MARKER = '…[이전 도구 결과 생략]'
 // ── 구조화 출력 최종턴 전환 (AGENT-API-5) ──────────────────────────────────
 /**
  * final_turn 모드에서 open phase(도구 자유 사용)가 자연 종료(end_turn)한 뒤, 모델에 구조화 제출을
- * 지시하는 user 메시지. 이 메시지 다음 turn은 tool_choice로 submit_structured_response를 강제한다.
+ * 지시하는 user 메시지. 첫 번째는 설정을 그대로 둔 채 지시만 하고(캐시 유지), 그래도 자연 종료하면 두 번째
+ * 메시지 다음 turn에서 tool_choice로 submit_structured_response를 강제한다.
  */
 const STRUCTURED_FINALIZE_PROMPT =
   '이제 지금까지의 결과를 submit_structured_response 도구로 제출하세요. ' +
@@ -1238,7 +1239,8 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
 
   // 구조화 출력(AGENT-API-2/5): 설정 시 submit_structured_response로 최종 응답을 강제·검증한다.
   //  - structuredMode 'final_turn'(기본): open phase에서 도구를 자유롭게 쓰다가(thinking 활성) 모델이
-  //    자연 종료(end_turn)하면 그때만 tool_choice를 1회 강제한다 → 도구 선사용 후 구조화가 가능.
+  //    자연 종료(end_turn)하면 먼저 제출을 지시하고, 또 자연 종료하면 그때만 tool_choice를 1회 강제한다
+  //    → 도구 선사용 후 구조화가 가능.
   //  - structuredMode 'immediate': turn 0부터 강제(단발 변환 — 하위호환).
   //  검증 실패는 tool_result(is_error)로 돌려 자기수정 재시도하되 STRUCTURED_MAX_RETRIES로 캡.
   const structuredToolName = input.options.structuredToolName
@@ -1248,6 +1250,12 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
   // forcing phase 진입 여부. immediate면 처음부터, final_turn이면 end_turn 감지 후 전환한다.
   // runTurnRequest가 이 값을 읽어 tool_choice 강제 여부를 매 turn 결정한다(closure 캡처).
   let structuredForcing = Boolean(structuredToolName) && structuredMode === 'immediate'
+  // final_turn 모드에서 강제 전에 한 번은 말로만 제출을 지시한다(설정 그대로, tool_choice 없음).
+  // 강제 턴은 thinking 을 꺼야 해서 thinking 설정이 바뀌고, 그러면 도구 · system 캐시까지 통째로 깨진다
+  // (Anthropic 「Thinking and prompt caching」: thinking 설정 변경은 캐시 전체 무효로 볼 것). 11/07~14 블루
+  // 웹훅 실측: 강제 턴 30건이 매번 1시간 · 5분 캐시를 처음부터 다시 써 주 약 7.4달러. 지시만으로 제출하면
+  // 앞 호출과 요청 설정이 같아 캐시를 그대로 읽는다. 그래도 제출하지 않으면 그때 강제한다.
+  let structuredNudged = false
 
   // ── MCP 서버 자동 wiring (3.3) ────────────────────────────────────────
   // input.options.mcpServers가 있으면 registry 생성 → tools 머지 + runTool routing wrapper.
@@ -1498,8 +1506,10 @@ export async function* runAnthropicTurnManager(input, ctx = {}) {
       // 방금 답변을 history에 넣고 구조화 제출을 지시한 뒤 forcing phase로 1회 전환한다. max_tokens/
       // context_overflow(비-success)는 절단이므로 전환하지 않고 그대로 error로 surface한다.
       // (open phase는 thinking 활성 + 도구 자유. forcing turn만 tool_choice 강제 → thinking 자동 off.)
+      // 첫 자연 종료에는 지시만 하고(structuredNudged, 캐시 유지) 두 번째 자연 종료에서 강제로 넘어간다.
       if (structuredToolName && !structuredForcing && stopReasonToResultSubtype(stop) === 'success') {
-        structuredForcing = true
+        if (structuredNudged) structuredForcing = true
+        else structuredNudged = true
         // 빈 content(예: refusal)면 placeholder로 대체 — 빈 assistant content는 API가 거부하고,
         // 연속 user 메시지가 되면 role 교대 위반이 된다.
         messages.push({

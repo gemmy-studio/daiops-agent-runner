@@ -464,22 +464,50 @@ describe('runAnthropicTurnManager — 최종턴만 강제(final_turn)', () => {
     },
   })
 
-  it('도구 선사용 → end_turn → forcing 1회 전환 후 구조화', async () => {
+  it('도구 선사용 → end_turn → 지시만으로 제출하면 강제하지 않는다(캐시 유지)', async () => {
     const fetchFn = mockFetchCapturing([
       regularToolTurn('search', { q: 'x' }, 'r1'), // turn0: 도구 자유 사용(open)
-      textEndTurn('검색을 마쳤습니다. 결론은…'),     // turn1: 자연 종료 → forcing 전환
-      structuredToolTurn({ answer: '결론' }, 'tu2'), // turn2: 강제 구조화
+      textEndTurn('검색을 마쳤습니다. 결론은…'),     // turn1: 자연 종료 → 제출 지시
+      structuredToolTurn({ answer: '결론' }, 'tu2'), // turn2: 지시를 받고 스스로 제출
     ])
     const msgs = await collectTurnManager(baseInput(), { fetchFn, runTool })
 
-    // per-turn tool_choice: open(0,1)은 미강제, forcing(2)만 강제.
+    assert.equal(fetchFn.bodies.length, 3)
+    // 지시 턴(2)은 앞 턴과 요청 설정이 같다: tool_choice 없음, thinking · 도구 · system 그대로.
+    // thinking 설정이 바뀌면 도구 · system 캐시까지 깨진다(11/07~14 블루 웹훅 실측 30건).
+    for (const b of fetchFn.bodies) assert.equal('tool_choice' in b, false)
+    assert.deepEqual(fetchFn.bodies[2].thinking, fetchFn.bodies[1].thinking)
+    assert.deepEqual(fetchFn.bodies[2].output_config, fetchFn.bodies[1].output_config)
+    assert.deepEqual(fetchFn.bodies[2].tools, fetchFn.bodies[1].tools)
+    assert.deepEqual(fetchFn.bodies[2].system, fetchFn.bodies[1].system)
+    // 지시 문구가 마지막 user 메시지로 붙는다.
+    const last = fetchFn.bodies[2].messages.at(-1)
+    assert.equal(last.role, 'user')
+    assert.match(JSON.stringify(last.content), /submit_structured_response/)
+    const structured = msgs.find((m) => m.type === 'assistant' && m.structuredResult !== undefined)
+    assert.deepEqual(structured.structuredResult, { answer: '결론' })
+    assert.equal(msgs.at(-1).subtype, 'success')
+  })
+
+  it('지시 뒤에도 자연 종료하면 그때 forcing 1회 전환 후 구조화', async () => {
+    const fetchFn = mockFetchCapturing([
+      regularToolTurn('search', { q: 'x' }, 'r1'), // turn0: 도구 자유 사용(open)
+      textEndTurn('검색을 마쳤습니다. 결론은…'),     // turn1: 자연 종료 → 제출 지시
+      textEndTurn('결론은 이렇습니다.'),             // turn2: 또 자연 종료 → forcing 전환
+      structuredToolTurn({ answer: '결론' }, 'tu3'), // turn3: 강제 구조화
+    ])
+    const msgs = await collectTurnManager(baseInput(), { fetchFn, runTool })
+
+    // per-turn tool_choice: open(0,1)과 지시(2)는 미강제, forcing(3)만 강제.
     assert.equal('tool_choice' in fetchFn.bodies[0], false)
     assert.equal('tool_choice' in fetchFn.bodies[1], false)
-    assert.deepEqual(fetchFn.bodies[2].tool_choice, { type: 'tool', name: structuredToolName })
-    // thinking: open(0,1) 활성, forcing(2) 비활성(400 회피).
+    assert.equal('tool_choice' in fetchFn.bodies[2], false)
+    assert.deepEqual(fetchFn.bodies[3].tool_choice, { type: 'tool', name: structuredToolName })
+    // thinking: open · 지시(0~2) 활성, forcing(3) 비활성(400 회피).
     assert.equal('thinking' in fetchFn.bodies[0], true)
     assert.equal('thinking' in fetchFn.bodies[1], true)
-    assert.equal('thinking' in fetchFn.bodies[2], false)
+    assert.equal('thinking' in fetchFn.bodies[2], true)
+    assert.equal('thinking' in fetchFn.bodies[3], false)
     // typed structuredResult가 최종 assistant 메시지에 실린다.
     const structured = msgs.find((m) => m.type === 'assistant' && m.structuredResult !== undefined)
     assert.deepEqual(structured.structuredResult, { answer: '결론' })
