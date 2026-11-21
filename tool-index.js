@@ -57,29 +57,50 @@ function firstSentence(text) {
 }
 
 /**
- * 목차 한 줄: 부를 때 쓰는 이름과 설명서 첫 문장. `rules` 에 그 도구의 규칙이 있으면 덧붙인다.
- * 규칙은 클라우드가 자기 도구에 대해서만 보낸다(정식 이름 키). 바깥 서버는 스스로 규칙을 정할 수 없다.
+ * 설명서의 필수 칸 이름. 없거나 꼴이 틀리면 빈 배열.
  *
- * @param {{ name: string, description?: string }} tool
- * @param {Readonly<Record<string, string>>} [rules]
+ * @param {{ input_schema?: any }} tool
+ * @returns {string[]}
  */
-export function toolIndexLine(tool, rules = {}) {
-  const summary = firstSentence(tool.description ?? '')
-  const rule = Object.hasOwn(rules, tool.name) ? rules[tool.name] : undefined
-  const tail = rule && !summary.includes(rule) ? ` 규칙: ${rule}` : ''
-  return `- ${tool.name}: ${summary}${tail}`
+export function requiredArgNames(tool) {
+  const schema = tool.input_schema
+  const required = schema && typeof schema === 'object' ? schema.required : undefined
+  return Array.isArray(required) ? required.filter((k) => typeof k === 'string' && k.length > 0) : []
 }
 
 /**
- * 시스템 끝에 붙이는 목차. 1층 = 묶음(MCP 서버) 이름 · 개수, 2층 = 도구 이름 + 한 줄. 2층이 상한을 넘으면 1층만.
+ * 목차 한 줄: 부를 때 쓰는 이름, 필수 칸 이름, 설명서 첫 문장. `rules` 에 그 도구의 규칙이 있으면 덧붙인다.
+ * 규칙은 클라우드가 자기 도구에 대해서만 보낸다(정식 이름 키). 바깥 서버는 스스로 규칙을 정할 수 없다.
+ *
+ * 필수 칸 이름(T5-2, 11/21 대표 「권장안대로」): 사무실판 Gemma 는 목차의 「찾아서 연 뒤 부르십시오」를 따르지 않고
+ * 찾기 없이 바로 부른다(11/18 3번 부스 19회 모두 찾기 0). 칸 이름을 짐작해 결재 전 검사에 6회 돌려보내졌다
+ * (calendar_create 를 description 만으로, mail_send 를 to 없이). 설명서 전체 대신 필수 칸 이름만 둔다.
+ * Anthropic 목차는 이름만 두지만, 찾기를 건너뛰는 모델을 받아야 해서 다르게 간다
+ *
+ * @param {{ name: string, description?: string, input_schema?: any }} tool
+ * @param {Readonly<Record<string, string>>} [rules]
+ * @param {{ args?: boolean }} [opts] args=false 면 칸 이름을 뺀다(목차가 상한을 넘을 때)
+ */
+export function toolIndexLine(tool, rules = {}, { args = true } = {}) {
+  const summary = firstSentence(tool.description ?? '')
+  const rule = Object.hasOwn(rules, tool.name) ? rules[tool.name] : undefined
+  const tail = rule && !summary.includes(rule) ? ` 규칙: ${rule}` : ''
+  const required = args ? requiredArgNames(tool) : []
+  const sig = required.length > 0 ? `(${required.join(', ')})` : ''
+  return `- ${tool.name}${sig}: ${summary}${tail}`
+}
+
+/**
+ * 시스템 끝에 붙이는 목차. 1층 = 묶음(MCP 서버) 이름 · 개수, 2층 = 도구 이름 + 필수 칸 + 한 줄. 2층이 상한을 넘으면
+ * 필수 칸을 빼고, 그래도 넘으면 1층만.
  * 대화 안에서 글이 바뀌면 캐시 앞부분이 깨지므로, 미룬 도구 **전부**(이미 찾은 것 포함)로 이름순으로 만든다.
  *
- * @param {Array<{ name: string, description?: string }>} deferred
+ * @param {Array<{ name: string, description?: string, input_schema?: any }>} deferred
  * @param {Readonly<Record<string, string>>} [rules]
  * @param {Readonly<Record<string, string>>} [notes] 묶음(서버) 이름 → 하는 일 한 줄
  */
 export function toolIndexText(deferred, rules = {}, notes = {}) {
-  /** @type {Map<string, Array<{ name: string, description?: string }>>} */
+  /** @type {Map<string, Array<{ name: string, description?: string, input_schema?: any }>>} */
   const groups = new Map()
   for (const t of [...deferred].sort((a, b) => a.name.localeCompare(b.name))) {
     const g = serverOf(t.name) ?? '기타'
@@ -89,9 +110,11 @@ export function toolIndexText(deferred, rules = {}, notes = {}) {
   // 묶음 이름 옆에 그 묶음이 하는 일(서버 안내문 첫 문장, tool-guidance.js `serverNote`). 레퍼런스가 모두 권하는
   // 「범주 · 묶음 단위 안내」다(Anthropic 「describing available tool categories」, MCP `instructions`)
   const head = (g) => `[${g}] ${groups.get(g)?.length}개${Object.hasOwn(notes, g) ? ` — ${notes[g]}` : ''}`
-  const full = order
-    .map((g) => `${head(g)}\n${(groups.get(g) ?? []).map((t) => toolIndexLine(t, rules)).join('\n')}`)
-    .join('\n')
+  const render = (args) =>
+    order.map((g) => `${head(g)}\n${(groups.get(g) ?? []).map((t) => toolIndexLine(t, rules, { args })).join('\n')}`).join('\n')
+  // 칸 이름을 붙여 넘치면 칸 이름부터 뺀다. 도구 이름 줄(2층)이 묶음만 남기는 1층보다 낫다
+  let full = render(true)
+  if (full.length > TOOL_INDEX_MAX_CHARS) full = render(false)
   if (full.length <= TOOL_INDEX_MAX_CHARS) {
     return (
       `${TOOL_INDEX_GUIDE}\n아래 도구는 설명서를 빼 두었습니다. 쓰려면 먼저 도구 찾기에 그 도구 이름을 그대로 넣어 ` +

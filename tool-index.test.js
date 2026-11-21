@@ -51,6 +51,44 @@ describe('toolIndexText', () => {
   })
 })
 
+describe('필수 칸 이름(T5-2)', () => {
+  const withSchema = (name, required, props = {}) => ({
+    name,
+    description: `${name} 를 합니다.`,
+    input_schema: { type: 'object', properties: props, required },
+    defer_loading: true,
+  })
+
+  it('필수 칸을 이름 뒤 괄호에 규격 순서대로 적는다', () => {
+    const line = toolIndexLine(withSchema('mcp__daiops-mcp__mail_send', ['to', 'subject', 'body'], { cc: { type: 'string' } }))
+    assert.ok(line.startsWith('- mcp__daiops-mcp__mail_send(to, subject, body): '))
+    assert.ok(!line.includes('cc'), '선택 칸은 싣지 않는다')
+  })
+
+  it('필수 칸이 없거나 스키마 꼴이 틀리면 괄호를 붙이지 않는다', () => {
+    assert.ok(toolIndexLine(withSchema('mcp__a__b', [])).startsWith('- mcp__a__b: '))
+    assert.ok(toolIndexLine(def('mcp__a__c')).startsWith('- mcp__a__c: '))
+    assert.ok(toolIndexLine({ name: 'mcp__a__d', input_schema: { required: 'to' } }).startsWith('- mcp__a__d: '))
+    assert.ok(toolIndexLine({ name: 'mcp__a__e', input_schema: { required: ['', 3, 'q'] } }).startsWith('- mcp__a__e(q): '))
+  })
+
+  it('바깥 서버 도구도 같은 줄을 받는다', () => {
+    const text = toolIndexText([withSchema('mcp__lattice-mcp__company_get', ['company_id'])])
+    assert.ok(text.includes('- mcp__lattice-mcp__company_get(company_id): '))
+  })
+
+  it('칸 이름 때문에 넘치면 칸 이름만 빼고 도구 줄은 남긴다', () => {
+    const args = Array.from({ length: 6 }, (_, i) => `argument_name_${i}`)
+    const tools = Array.from({ length: 120 }, (_, i) => withSchema(`mcp__mid__tool_${i}`, args))
+    const bare = tools.map((t) => toolIndexLine(t, {}, { args: false })).join('\n')
+    const full = tools.map((t) => toolIndexLine(t)).join('\n')
+    assert.ok(bare.length < TOOL_INDEX_MAX_CHARS && full.length > TOOL_INDEX_MAX_CHARS, '시험 전제')
+    const text = toolIndexText(tools)
+    assert.ok(text.includes('- mcp__mid__tool_0: '))
+    assert.ok(!text.includes('argument_name_0'))
+  })
+})
+
 describe('규칙 줄(toolRules)', () => {
   it('클라우드가 보낸 규칙을 그 도구 줄에만 덧붙인다', () => {
     const rules = { [ROUTINE]: RULE }
