@@ -10,7 +10,7 @@
 
 | agent-runner | daiops 메인 앱 | 값 |
 |---|---|---|
-| `handler.js:15` `DEFAULT_CWD` | `src/lib/constants.ts` `SANDBOX_PATHS.BASE` | `/workspace` |
+| `handler.js` `DEFAULT_CWD` | `src/lib/constants.ts` `SANDBOX_PATHS.BASE` | `/workspace` |
 
 agent-runner의 `cwd: params.context_dir ?? DEFAULT_CWD`로 들어가며, sandbox 안 모든 도구가 이 경로 기준으로 동작한다. 메인 앱이 `SANDBOX_PATHS.BASE`를 바꾸면 agent-runner도 같이 갱신해야 한다.
 
@@ -18,7 +18,7 @@ agent-runner의 `cwd: params.context_dir ?? DEFAULT_CWD`로 들어가며, sandbo
 
 | agent-runner | daiops 메인 앱 | 값 |
 |---|---|---|
-| `handler.js:22` `DEFAULT_FALLBACK_MODEL` | `src/lib/llm/models.ts` `MODEL_REGISTRY.sonnet.id` | `claude-sonnet-4-6` |
+| `handler.js` `DEFAULT_FALLBACK_MODEL` | `src/lib/llm/models.ts` `MODEL_REGISTRY.sonnet.id` | `claude-sonnet-4-6` |
 
 cloud가 `params.model`을 안 보낸 경우의 fallback. 모델 세대 교체 시 두 곳을 같이 바꿔야 한다.
 
@@ -113,10 +113,25 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
 
 ### 2-2. `POST /v1/chat` (Bearer auth)
 
-Request body 핵심 필드:
-- `prompt`: string (필수)
-- `model`: string (옵션 — 미전달 시 `DEFAULT_FALLBACK_MODEL`)
-- `systemPrompt`, `history`, `context_dir`: 옵션
+Request body 필드(`handleChat` 이 읽는 `rawParams.*` 전부. 줄 번호 대신 이름으로 적는다. daiops `scripts/check-runner-contract.mjs` 가 이 목록과 코드를 대조한다):
+- `message`: string (필수, 사용자 발화)
+- `model`: string (옵션, 미전달 시 `DEFAULT_FALLBACK_MODEL`)
+- `system_prompt`: string (옵션)
+- `history`: 지난 대화 배열 (옵션)
+- `context_dir`: string (옵션, 도구 작업 디렉토리)
+- `tools`: 노출할 도구 목록 (옵션)
+- `mcp_servers`: 외부 MCP 서버 spec 배열 (옵션)
+- `policy`: PreToolUse 평가 정책 (옵션, 미전달 시 러너 기본 정책)
+- `memory_ops`: cloud 가 처리할 수 있는 메모리 연산 선언 `['forget','revise']` (옵션, 미지정이면 `remember` 만)
+- `tool_exposure`: 도구 노출 방식 (옵션, `parseToolExposureParam`)
+- `response_schema`: JSON Schema (옵션, 있으면 구조화 출력 강제)
+- `timeout_seconds`: number (옵션, 기본 750)
+- `response_deadline_seconds`: number (옵션, 명시할 때만 응답 벽시계 예산)
+- `max_turns`: number (옵션, 주면 하드 상한)
+- `approval_timeout_seconds`: number (옵션, 결재 대기)
+- `has_approval_channel`: boolean (옵션, `false` 일 때만 결재 길 없음)
+- `force_plan_mode`: boolean (옵션)
+- `session_id`, `message_id`: string (옵션, 버퍼와 인제스트 식별)
 - `thinking`: `{ effort: 'low'|'medium'|'high'|'xhigh'|'max' }` (옵션 — 미전달 시 `medium`).
   adaptive thinking 깊이. **cloud가 켜고 끄는 손잡이**라 러너는 문자열만 통과시키고 유효성 판정은
   `buildThinkingOptions`의 `ADAPTIVE_EFFORT_MAP` 한 곳에서만 한다(미지의 값 → `medium`). 목록을
@@ -184,6 +199,8 @@ agent-runner 시작 시 메인 앱(deployer)이 주입해야 하는 env:
 | `LLM_PROXY_URL` | yes | cloud LLM proxy |
 | `WORKSPACE_ID` | yes | x-workspace-id 헤더 |
 | `BASH_ENV` | no | Bash 도구 자동 source (사용자 secrets) |
+| `AGENT_RUNNER_VCPU` | no | 티어의 vCPU 수. 도구 동시 실행 판단(`/health` `admission.envVcpu`) |
+| `AGENT_RUNNER_LOG_DIR` | no | errors.log 위치 (기본 `/workspace/.agent-runner/logs`) |
 | `AGENT_RUNNER_HOST` | no | bind host (기본 0.0.0.0) |
 | `AGENT_RUNNER_MCP_MAX_RESULT_CHARS` | no | **개별 MCP 도구 결과 상한**(기본 100,000자 ≈ 25K토큰). 넘으면 원문을 오프로드 파일로 빼고 프리뷰 + 페이지네이션 안내만 남긴다. per-turn 예산(`AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS`)은 *합계* 기준이라 단일 호출을 못 잡는다. |
 | `AGENT_RUNNER_MCP_MAX_RESPONSE_BYTES` | no | **MCP 응답 본문 바이트 상한**(기본 16MB). 넘으면 스트림을 끊고 거절한다 — 자르면 JSON이 깨지므로 거절이 정직하다. 컨텍스트 보호가 아니라 **OOM 방어**다(러너는 워크스페이스 공유 프로세스). |
