@@ -10,6 +10,16 @@ import path from 'node:path'
 import os from 'node:os'
 
 const TMP = path.join(os.tmpdir(), `agent-runner-events-test-${Date.now()}`)
+
+/** 조건이 참이 될 때까지 짧게 되묻는다. 고정 대기는 장비가 바쁘면 모자라 가끔 실패했다(트랙 G 2단계, 부하 20대 20회 중 5회) */
+async function waitUntil(check, { timeoutMs = 2000, stepMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (!(await check())) {
+    if (Date.now() > deadline) return false
+    await new Promise((r) => setTimeout(r, stepMs))
+  }
+  return true
+}
 process.env.AGENT_RUNNER_BUFFER_DIR = TMP
 
 // 환경변수가 import 시점에 읽히므로 import는 env 설정 후
@@ -70,8 +80,9 @@ test('파일에서 buffer 복원 — 메모리에 없으면 ensureBuffer로 json
   const sid = 'sess-D-restore'
   // 메모리에서 만들고 forceCleanup으로 메모리만 비움 (파일은 남김)
   appendEvent(sid, 'text', { content: 'persisted' })
-  // 파일이 비동기로 쓰여지니 약간 대기
-  await new Promise((r) => setTimeout(r, 50))
+  // 파일이 비동기로 쓰인다. 다 쓰일 때까지 기다린다
+  const srcPath = path.join(TMP, `agent-runner-events-${sid}.jsonl`)
+  await waitUntil(() => fs.readFile(srcPath, 'utf-8').then((t) => t.includes('persisted'), () => false))
 
   // 메모리에서만 제거 — 파일은 그대로
   const state = getBufferState(sid)
@@ -95,7 +106,8 @@ test('파일에서 buffer 복원 — 메모리에 없으면 ensureBuffer로 json
 test('forceCleanup — 메모리 + 파일 둘 다 제거', async () => {
   const sid = 'sess-F-cleanup'
   appendEvent(sid, 'tick', {})
-  await new Promise((r) => setTimeout(r, 50))
+  // 쓰기가 끝나기 전에 지우면 늦게 끝난 쓰기가 파일을 되살린다. 다 쓰인 뒤에 지운다
+  await waitUntil(() => fs.access(path.join(TMP, `agent-runner-events-${sid}.jsonl`)).then(() => true, () => false))
   await forceCleanup(sid)
   assert.equal(getBufferState(sid), null)
   // 파일 fs.access 시 ENOENT

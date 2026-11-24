@@ -6,6 +6,16 @@ import os from 'node:os'
 
 import { hasActiveJobs, sendKeepalive, ensureJobKeepalive, stopJobKeepalive } from './job-keepalive.js'
 
+/** 조건이 참이 될 때까지 짧게 되묻는다. 고정 대기는 장비가 바쁘면 모자라 가끔 실패했다(트랙 G 2단계, 부하 20대 20회 중 5회) */
+async function waitUntil(check, { timeoutMs = 2000, stepMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (!(await check())) {
+    if (Date.now() > deadline) return false
+    await new Promise((r) => setTimeout(r, stepMs))
+  }
+  return true
+}
+
 const DEAD_PID = 2147483646 // 거의 확실히 존재하지 않는 pid → ESRCH
 
 async function withJobsDir(fn) {
@@ -148,7 +158,7 @@ describe('ensureJobKeepalive', () => {
       let calls = 0
       try {
         ensureJobKeepalive({ intervalMs: 10, fetchFn: async () => { calls++; return new Response('{}', { status: 200 }) } })
-        await new Promise((res) => setTimeout(res, 60))
+        await waitUntil(() => calls >= 1)
         assert.ok(calls >= 1, `expected keepalive call, got ${calls}`)
       } finally {
         stopJobKeepalive()
