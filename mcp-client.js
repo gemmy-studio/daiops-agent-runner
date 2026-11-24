@@ -274,7 +274,10 @@ function assertSafeMcpUrl(rawUrl, opts = {}) {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error(`createMcpHttpClient: unsupported URL scheme '${u.protocol}' (http/https only)`)
   }
-  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const literal = u.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  // IPv4 를 품은 IPv6 표기(`::ffff:127.0.0.1` 등)는 그 IPv4 로 풀어 아래 판정을 모두 거친다.
+  // 종전에는 사설 대역만 풀어 봐서 사상 표기의 루프백, 메타데이터가 통과했다(트랙 G5, 2026-11-25).
+  const host = embeddedIpv4(literal) ?? literal
 
   // 메타데이터/내부/wildcard 바인드 — allowLoopback와 무관하게 항상 차단 (SSRF 최우선 벡터).
   const metadataBlocked =
@@ -311,7 +314,9 @@ function assertSafeMcpUrl(rawUrl, opts = {}) {
  * @param {boolean} allowLoopback
  */
 function resolvedAddressIssue(address, allowLoopback) {
-  const a = String(address).toLowerCase().replace(/^\[|\]$/g, '')
+  const raw = String(address).toLowerCase().replace(/^\[|\]$/g, '')
+  // AAAA 가 `::ffff:169.254.169.254` 처럼 IPv4 를 품고 오면 그 IPv4 로 판정한다(위 assertSafeMcpUrl 과 같음)
+  const a = embeddedIpv4(raw) ?? raw
   if (a === '0.0.0.0' || a === '::') return 'wildcard'
   if (a.startsWith('169.254.')) return 'metadata/link-local'
   if (a === '::1' || /^127\./.test(a)) return allowLoopback ? null : 'loopback'
@@ -438,20 +443,33 @@ function isPrivateIpLiteral(host) {
   if (host.includes(':')) {
     if (/^f[cd][0-9a-f]{0,2}:/.test(host)) return true
     if (/^fe[89ab][0-9a-f]?:/.test(host)) return true
+    // site-local(fec0::/10). 폐기된 대역이지만 사설 망에서 아직 쓰일 수 있다
+    if (/^fe[c-f][0-9a-f]?:/.test(host)) return true
 
-    // IPv4-mapped(`::ffff:…`). ⚠️ **점4옥텟으로 들어와도 URL 파서가 16진수로 압축한다** —
-    // `::ffff:10.0.0.1` → `::ffff:a00:1`. 점 표기만 보던 초안이 이걸 놓쳤고 테스트가 잡았다.
-    const mappedDotted = host.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
-    if (mappedDotted) return isPrivateIpLiteral(mappedDotted[1])
-    const mappedHex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
-    if (mappedHex) {
-      const hi = parseInt(mappedHex[1], 16)
-      const lo = parseInt(mappedHex[2], 16)
-      const dotted = `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`
-      return isPrivateIpLiteral(dotted)
-    }
+    // IPv4 를 품은 표기는 그 IPv4 로 판정한다(embeddedIpv4)
+    const v4 = embeddedIpv4(host)
+    if (v4) return isPrivateIpLiteral(v4)
   }
   return false
+}
+
+/**
+ * IPv4 를 품은 IPv6 표기면 그 IPv4(점4옥텟)를, 아니면 null.
+ *  - IPv4-mapped `::ffff:a.b.c.d`
+ *  - IPv4-compatible `::a.b.c.d`(폐기 표기. `::`, `::1` 은 제외)
+ *  - NAT64 잘 알려진 접두 `64:ff9b::a.b.c.d`(RFC 6052). NAT64 가 있는 망에서는 그 IPv4 로 나간다
+ * ⚠️ 점4옥텟으로 들어와도 URL 파서와 일부 리졸버는 16진수로 압축한다(`::ffff:10.0.0.1` → `::ffff:a00:1`).
+ * 두 꼴을 다 받는다.
+ * @param {string} host 대괄호가 벗겨진 lowercase 호스트
+ */
+function embeddedIpv4(host) {
+  if (!host.includes(':')) return null
+  const m = host.match(/^(?:::ffff:|::|64:ff9b::)(?:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/)
+  if (!m) return null
+  if (m[1]) return m[1]
+  const hi = parseInt(m[2], 16)
+  const lo = parseInt(m[3], 16)
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`
 }
 
 /**

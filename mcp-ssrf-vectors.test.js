@@ -7,7 +7,8 @@
  *  - request-filtering-agent: 가짜 DNS 로 해소 결과를 주입해 해소 뒤 판정을 본다
  *
  * 기본 대역(10/8 등)과 loopback opt-in 은 mcp-client.test.js, mcp-hardening.test.js 가 본다. 여기는 표기 우회만.
- * `todo` 로 둔 것은 지금 가드를 통과하는 표기다. 고칠지와 고치는 법은 보안 세션이 정한다(G 는 시험만, 고치지 않음).
+ * IPv4 를 품은 IPv6 표기 10건은 처음 쓸 때 가드를 통과했다(todo). 대표 결정(보안 카드 9b9bf57e-2611250830 「지금 바로 고치기」)으로
+ * 같은 가지에서 고쳤고 지금은 막는 시험이다.
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
@@ -56,9 +57,18 @@ describe('SSRF 가드: 주소 글자 단계에서 막는 표기', () => {
   it('보통 도메인은 통과한다', () => {
     assert.doesNotThrow(make('https://mcp.example.com/mcp'))
   })
+
+  it('공인 IPv6 와 공인 IPv4 를 품은 사상 표기는 통과한다(풀어서 판정해도 막지 않음)', () => {
+    assert.doesNotThrow(make('https://[2606:4700:4700::1111]/mcp'))
+    assert.doesNotThrow(make('https://[::ffff:93.184.216.34]/mcp'))
+  })
+
+  it('allowLoopback 이면 사상 표기 루프백도 일반 루프백과 똑같이 통과한다', () => {
+    assert.doesNotThrow(make('http://[::ffff:127.0.0.1]:8792/mcp', { allowLoopback: true }))
+  })
 })
 
-describe('SSRF 가드: 지금 통과하는 표기(보안 세션 넘김)', () => {
+describe('SSRF 가드: IPv4 를 품은 IPv6 표기(11/25 고침 전 통과하던 것)', () => {
   const holes = [
     ['IPv4-mapped 루프백', 'http://[::ffff:127.0.0.1]/'],
     ['IPv4-mapped 루프백(풀어 쓴 꼴)', 'http://[0:0:0:0:0:ffff:127.0.0.1]/'],
@@ -69,7 +79,7 @@ describe('SSRF 가드: 지금 통과하는 표기(보안 세션 넘김)', () => 
     ['IPv6 site-local(폐기 대역)', 'http://[fec0::1]/'],
   ]
   for (const [label, url] of holes) {
-    it(`${label}: ${url}`, { todo: '지금 통과함. 보안 세션 9b9bf57e 에 넘김(11/25)' }, () => {
+    it(`${label}: ${url}`, () => {
       assert.throws(make(url), /blocked URL host/)
     })
   }
@@ -111,7 +121,7 @@ describe('SSRF 가드: DNS 해소 뒤 판정', () => {
     ['IPv4-compatible 루프백', '::7f00:1'],
   ]
   for (const [label, address] of dnsHoles) {
-    it(`${label}(${address})로 해소되면 막는다`, { todo: '지금 통과함. 보안 세션 9b9bf57e 에 넘김(11/25)' }, async () => {
+    it(`${label}(${address})로 해소되면 막는다`, async () => {
       await assert.rejects(() => viaDns([address]), /resolves to/)
     })
   }
