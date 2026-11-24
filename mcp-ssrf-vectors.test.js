@@ -160,3 +160,106 @@ describe('SSRF 가드: DNS 해소 뒤 판정', () => {
     })
   }
 })
+
+describe('SSRF 가드: 대역 경계(돌연변이로 고름)', () => {
+  const blocked = ['http://10.255.255.255/', 'http://172.31.255.255/', 'http://100.64.0.0/', 'http://100.127.255.255/',
+    'http://192.168.255.255/', 'http://198.19.255.255/', 'http://[fdff::1]/', 'http://[febf::1]/', 'http://[feff::1]/']
+  for (const url of blocked) it(`막는다: ${url}`, () => assert.throws(make(url), /blocked URL host/))
+
+  const allowed = ['http://11.0.0.1/', 'http://172.15.255.255/', 'http://172.32.0.0/', 'http://100.63.255.255/',
+    'http://100.128.0.0/', 'http://192.167.255.255/', 'http://192.169.0.0/', 'http://198.17.255.255/',
+    'http://[fbff::1]/', 'http://[fe7f::1]/', 'http://[2001:db8::fc00:1]/', 'http://[2001:db8::fe80:1]/',
+    'http://[64:ff9b:2::1]/', 'http://[64:ff9a:1::1]/', 'http://[65:ff9b:1::1]/']
+  for (const url of allowed) it(`통과: ${url}`, () => assert.doesNotThrow(make(url)))
+})
+
+describe('SSRF 가드: DNS 판정 캐시와 시간 상한', () => {
+  const passed = /fetched/
+  const fetchMarks = async () => { throw new Error('fetched') }
+  const client = (host, lookupFn) =>
+    createMcpHttpClient({ name: 'x', url: `https://${host}/mcp` }, { fetchFn: fetchMarks, lookupFn })
+
+  it('60초 안에 같은 이름은 다시 묻지 않는다(막힘도 통과도)', async () => {
+    _resetDnsGuardCache()
+    let asked = 0
+    const bad = async () => { asked++; return [{ address: '10.0.0.1', family: 4 }] }
+    await assert.rejects(() => client('cache-bad.example.com', bad).listTools(), /resolves to private/)
+    await assert.rejects(() => client('cache-bad.example.com', bad).listTools(), /resolves to private/)
+    assert.equal(asked, 1)
+    let okAsked = 0
+    const good = async () => { okAsked++; return [{ address: '93.184.216.34', family: 4 }] }
+    await assert.rejects(() => client('cache-ok.example.com', good).listTools(), passed)
+    await assert.rejects(() => client('cache-ok.example.com', good).listTools(), passed)
+    assert.equal(okAsked, 1)
+  })
+
+  it('60초가 지나면 다시 묻는다(그사이 레코드가 바뀌면 새 판정)', async () => {
+    _resetDnsGuardCache()
+    const realNow = Date.now
+    let addr = '93.184.216.34'
+    let asked = 0
+    const lookup = async () => { asked++; return [{ address: addr, family: 4 }] }
+    try {
+      const t0 = realNow()
+      Date.now = () => t0
+      await assert.rejects(() => client('rebind.example.com', lookup).listTools(), passed)
+      addr = '127.0.0.1'
+      Date.now = () => t0 + 59_000
+      await assert.rejects(() => client('rebind.example.com', lookup).listTools(), passed)
+      Date.now = () => t0 + 61_000
+      await assert.rejects(() => client('rebind.example.com', lookup).listTools(), /resolves to loopback/)
+      assert.equal(asked, 2)
+    } finally {
+      Date.now = realNow
+    }
+  })
+
+  it('리졸버가 답하지 않으면 2초 뒤 판정을 포기하고 보낸다(fail-open)', async () => {
+    _resetDnsGuardCache()
+    const t0 = Date.now()
+    await assert.rejects(() => client('hang.example.com', () => new Promise(() => {})).listTools(), passed)
+    const waited = Date.now() - t0
+    assert.ok(waited >= 1_900 && waited < 5_000, `waited ${waited}ms`)
+  })
+
+  it('리졸버가 배열이 아닌 값을 주면 보낸다', async () => {
+    _resetDnsGuardCache()
+    await assert.rejects(() => client('weird.example.com', async () => null).listTools(), passed)
+  })
+
+  it('주소 칸이 빈 항목은 건너뛰고 나머지로 판정한다', async () => {
+    _resetDnsGuardCache()
+    await assert.rejects(() => client('holes.example.com', async () => [{}, { address: '10.0.0.9', family: 4 }]).listTools(), /resolves to private/)
+  })
+
+  it('IP 글자 호스트는 DNS 에 묻지 않는다', async () => {
+    _resetDnsGuardCache()
+    let asked = 0
+    const lookup = async () => { asked++; return [{ address: '10.0.0.1', family: 4 }] }
+    await assert.rejects(() => client('93.184.216.34', lookup).listTools(), passed)
+    await assert.rejects(() => client('[2606:4700:4700::1111]', lookup).listTools(), passed)
+    assert.equal(asked, 0)
+  })
+
+  it('숫자와 점으로 시작하기만 하는 이름은 DNS 에 묻는다', async () => {
+    _resetDnsGuardCache()
+    let asked = 0
+    const lookup = async () => { asked++; return [{ address: '10.0.0.1', family: 4 }] }
+    await assert.rejects(() => client('1.2.3.4.nip.example.com', lookup).listTools(), /resolves to private/)
+    // 끝 칸이 숫자인 이름(a1.2.3.4)은 URL 파서가 IPv4 로 읽으려다 거절하므로 여기까지 오지 않는다
+    assert.equal(asked, 1)
+  })
+
+  it('캐시가 256개를 넘으면 비우고 다시 묻는다', async () => {
+    _resetDnsGuardCache()
+    let asked = 0
+    const lookup = async () => { asked++; return [{ address: '93.184.216.34', family: 4 }] }
+    for (let i = 0; i < 256; i++) await assert.rejects(() => client(`h${i}.example.com`, lookup).listTools(), passed)
+    assert.equal(asked, 256)
+    await assert.rejects(() => client('h0.example.com', lookup).listTools(), passed)
+    assert.equal(asked, 256) // 아직 남아 있음
+    await assert.rejects(() => client('h256.example.com', lookup).listTools(), passed) // 257번째: 비우고 저장
+    await assert.rejects(() => client('h0.example.com', lookup).listTools(), passed)
+    assert.equal(asked, 258)
+  })
+})
