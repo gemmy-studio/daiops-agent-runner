@@ -274,10 +274,11 @@ function assertSafeMcpUrl(rawUrl, opts = {}) {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error(`createMcpHttpClient: unsupported URL scheme '${u.protocol}' (http/https only)`)
   }
-  const literal = u.hostname.toLowerCase().replace(/^\[|\]$/g, '')
-  // IPv4 를 품은 IPv6 표기(`::ffff:127.0.0.1` 등)는 그 IPv4 로 풀어 아래 판정을 모두 거친다.
-  // 종전에는 사설 대역만 풀어 봐서 사상 표기의 루프백, 메타데이터가 통과했다(트랙 G5, 2026-11-25).
-  const host = embeddedIpv4(literal) ?? literal
+  // 끝에 점 붙인 절대 이름(`localhost.`, `metadata.google.internal.`)은 점을 떼고 판정한다
+  const rawHost = u.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
+  // IPv6 안에 IPv4 를 실은 꼴(`::ffff:127.0.0.1`, NAT64 `64:ff9b::a9fe:a9fe` 등)은 실린 IPv4 로 판정한다.
+  // 종전에는 사설 대역만 풀어 봐서 루프백, 메타데이터, 0.0.0.0 이 IPv6 꼴로 통과했다(트랙 G 시험, 11-25)
+  const host = canonicalIpHost(rawHost)
 
   // 메타데이터/내부/wildcard 바인드 — allowLoopback와 무관하게 항상 차단 (SSRF 최우선 벡터).
   const metadataBlocked =
@@ -314,9 +315,7 @@ function assertSafeMcpUrl(rawUrl, opts = {}) {
  * @param {boolean} allowLoopback
  */
 function resolvedAddressIssue(address, allowLoopback) {
-  const raw = String(address).toLowerCase().replace(/^\[|\]$/g, '')
-  // AAAA 가 `::ffff:169.254.169.254` 처럼 IPv4 를 품고 오면 그 IPv4 로 판정한다(위 assertSafeMcpUrl 과 같음)
-  const a = embeddedIpv4(raw) ?? raw
+  const a = canonicalIpHost(String(address).toLowerCase().replace(/^\[|\]$/g, ''))
   if (a === '0.0.0.0' || a === '::') return 'wildcard'
   if (a.startsWith('169.254.')) return 'metadata/link-local'
   if (a === '::1' || /^127\./.test(a)) return allowLoopback ? null : 'loopback'
@@ -429,6 +428,10 @@ function isPrivateIpLiteral(host) {
     if (a === 172 && b >= 16 && b <= 31) return true
     if (a === 192 && b === 168) return true
     if (a === 100 && b >= 64 && b <= 127) return true // CGNAT 100.64/10
+    if (a === 0) return true // 0.0.0.0/8 「이 망」
+    if (a === 192 && b === 0 && Number(parts[2]) === 0) return true // 192.0.0.0/24 IETF 프로토콜 할당
+    if (a === 198 && (b === 18 || b === 19)) return true // 198.18.0.0/15 벤치마크
+    if (a >= 240) return true // 240.0.0.0/4 예약, 255.255.255.255 방송
     return false
   }
   // 숫자·점만으로 이뤄졌는데 위 형태가 아니면 비정상 IPv4 표기 — 막는다.
@@ -439,14 +442,16 @@ function isPrivateIpLiteral(host) {
   // loopback 분기가 잡는다. 이 줄은 파서가 통과시키는 표기가 생길 경우의 나머지 방어다.
   if (/^[0-9.]+$/.test(host)) return true
 
-  // IPv6 — ULA(fc00::/7)와 link-local(fe80::/10).
+  // IPv6 — ULA(fc00::/7), link-local(fe80::/10), 폐기된 site-local(fec0::/10), NAT64 지역용(64:ff9b:1::/48).
   if (host.includes(':')) {
     if (/^f[cd][0-9a-f]{0,2}:/.test(host)) return true
     if (/^fe[89ab][0-9a-f]?:/.test(host)) return true
-    // site-local(fec0::/10). 폐기된 대역이지만 사설 망에서 아직 쓰일 수 있다
     if (/^fe[c-f][0-9a-f]?:/.test(host)) return true
+    const groups = parseIpv6(host)
+    if (groups && groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 1) return true
 
-    // IPv4 를 품은 표기는 그 IPv4 로 판정한다(embeddedIpv4)
+    // IPv4 를 실은 꼴(`::ffff:…` 등). ⚠️ **점4옥텟으로 들어와도 URL 파서가 16진수로 압축한다** —
+    // `::ffff:10.0.0.1` → `::ffff:a00:1`. 점 표기만 보던 초안이 이걸 놓쳤고 테스트가 잡았다.
     const v4 = embeddedIpv4(host)
     if (v4) return isPrivateIpLiteral(v4)
   }
@@ -454,22 +459,62 @@ function isPrivateIpLiteral(host) {
 }
 
 /**
- * IPv4 를 품은 IPv6 표기면 그 IPv4(점4옥텟)를, 아니면 null.
- *  - IPv4-mapped `::ffff:a.b.c.d`
- *  - IPv4-compatible `::a.b.c.d`(폐기 표기. `::`, `::1` 은 제외)
- *  - NAT64 잘 알려진 접두 `64:ff9b::a.b.c.d`(RFC 6052). NAT64 가 있는 망에서는 그 IPv4 로 나간다
- * ⚠️ 점4옥텟으로 들어와도 URL 파서와 일부 리졸버는 16진수로 압축한다(`::ffff:10.0.0.1` → `::ffff:a00:1`).
- * 두 꼴을 다 받는다.
+ * IPv6 글자를 16비트 여덟 칸으로 푼다. IPv6 가 아니거나 못 풀면 null.
+ * 끝의 점4옥텟(`::ffff:127.0.0.1`)과 영역 표시(`fe80::1%eth0`)를 받는다.
  * @param {string} host 대괄호가 벗겨진 lowercase 호스트
+ * @returns {number[] | null}
+ */
+function parseIpv6(host) {
+  if (!host.includes(':')) return null
+  let h = host.split('%')[0]
+  const dotted = h.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (dotted) {
+    const o = dotted.slice(2).map(Number)
+    if (o.some((n) => n > 255)) return null
+    h = `${dotted[1]}${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`
+  }
+  const halves = h.split('::')
+  if (halves.length > 2) return null
+  const split = (s) => (s === '' ? [] : s.split(':'))
+  const head = split(halves[0])
+  const tail = halves.length === 2 ? split(halves[1]) : []
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0
+  if (fill < 0) return null
+  const parts = [...head, ...Array(fill).fill('0'), ...tail]
+  if (parts.length !== 8 || parts.some((p) => !/^[0-9a-f]{1,4}$/.test(p))) return null
+  return parts.map((p) => parseInt(p, 16))
+}
+
+/**
+ * IPv6 안에 IPv4 가 실린 꼴이면 그 IPv4 점4옥텟, 아니면 null.
+ * OWASP SSRF 치트시트가 드는 우회 표기를 덮는다: IPv4-mapped(`::ffff:0:0/96`), SIIT(`::ffff:0:0:0/96`),
+ * IPv4-compatible(`::/96`, `::` 와 `::1` 제외), NAT64(`64:ff9b::/96`), 6to4(`2002::/16`).
+ * @param {string} host
  */
 function embeddedIpv4(host) {
-  if (!host.includes(':')) return null
-  const m = host.match(/^(?:::ffff:|::|64:ff9b::)(?:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/)
-  if (!m) return null
-  if (m[1]) return m[1]
-  const hi = parseInt(m[2], 16)
-  const lo = parseInt(m[3], 16)
-  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`
+  const g = parseIpv6(host)
+  if (!g) return null
+  const v4 = (hi, lo) => `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`
+  const zero = (from, to) => g.slice(from, to).every((x) => x === 0)
+  if (zero(0, 5) && g[5] === 0xffff) return v4(g[6], g[7])
+  if (zero(0, 4) && g[4] === 0xffff && g[5] === 0) return v4(g[6], g[7])
+  if (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) return v4(g[6], g[7])
+  if (g[0] === 0x2002) return v4(g[1], g[2])
+  if (zero(0, 6) && !(g[6] === 0 && g[7] <= 1)) return v4(g[6], g[7])
+  return null
+}
+
+/**
+ * 판정에 쓸 표준 호스트. IPv4 가 실린 IPv6 는 그 IPv4 로, 풀어 쓴 미지정과 루프백(`0:0:0:0:0:0:0:1`)은
+ * `::`, `::1` 로 바꾼다. 그 밖에는 그대로.
+ * @param {string} host 대괄호가 벗겨진 lowercase 호스트
+ */
+function canonicalIpHost(host) {
+  const v4 = embeddedIpv4(host)
+  if (v4) return v4
+  const g = parseIpv6(host)
+  if (g && g.slice(0, 7).every((x) => x === 0) && g[7] <= 1) return g[7] === 0 ? '::' : '::1'
+  return host
 }
 
 /**

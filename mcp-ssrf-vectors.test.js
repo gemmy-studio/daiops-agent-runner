@@ -63,12 +63,23 @@ describe('SSRF 가드: 주소 글자 단계에서 막는 표기', () => {
     assert.doesNotThrow(make('https://[::ffff:93.184.216.34]/mcp'))
   })
 
+  it('allowLoopback 이어도 IPv6 에 실린 메타데이터는 막는다', () => {
+    assert.throws(make('http://[::ffff:169.254.169.254]/', { allowLoopback: true }), /metadata/)
+  })
+
+  it('공인 IPv4 를 실은 6to4 와 경계 밖 공인 주소는 통과한다', () => {
+    assert.doesNotThrow(make('http://[2002:5db8:d822::1]/'))
+    assert.doesNotThrow(make('http://198.20.0.1/'))
+    assert.doesNotThrow(make('http://192.0.1.1/'))
+    assert.doesNotThrow(make('http://239.255.255.250/'))
+  })
+
   it('allowLoopback 이면 사상 표기 루프백도 일반 루프백과 똑같이 통과한다', () => {
     assert.doesNotThrow(make('http://[::ffff:127.0.0.1]:8792/mcp', { allowLoopback: true }))
   })
 })
 
-describe('SSRF 가드: IPv4 를 품은 IPv6 표기(11/25 고침 전 통과하던 것)', () => {
+describe('SSRF 가드: IPv6 에 실린 IPv4, 끝 점 이름, 특수 대역(11/25 고침 전 통과하던 것)', () => {
   const holes = [
     ['IPv4-mapped 루프백', 'http://[::ffff:127.0.0.1]/'],
     ['IPv4-mapped 루프백(풀어 쓴 꼴)', 'http://[0:0:0:0:0:ffff:127.0.0.1]/'],
@@ -77,6 +88,18 @@ describe('SSRF 가드: IPv4 를 품은 IPv6 표기(11/25 고침 전 통과하던
     ['IPv4-compatible 루프백', 'http://[::127.0.0.1]/'],
     ['NAT64 메타데이터', 'http://[64:ff9b::a9fe:a9fe]/'],
     ['IPv6 site-local(폐기 대역)', 'http://[fec0::1]/'],
+    ['SIIT 메타데이터', 'http://[::ffff:0:a9fe:a9fe]/'],
+    ['6to4 메타데이터', 'http://[2002:a9fe:a9fe::1]/'],
+    ['6to4 사설', 'http://[2002:a00:1::1]/'],
+    ['NAT64 지역용 대역', 'http://[64:ff9b:1::1]/'],
+    ['풀어 쓴 IPv6 루프백', 'http://[0:0:0:0:0:0:0:1]/'],
+    ['끝 점 붙인 localhost', 'http://localhost./'],
+    ['끝 점 붙인 메타데이터 이름', 'http://metadata.google.internal./'],
+    ['0.0.0.0/8', 'http://0.1.2.3/'],
+    ['192.0.0.0/24', 'http://192.0.0.8/'],
+    ['198.18.0.0/15 벤치마크', 'http://198.18.0.1/'],
+    ['240.0.0.0/4 예약', 'http://240.0.0.1/'],
+    ['방송 주소', 'http://255.255.255.255/'],
   ]
   for (const [label, url] of holes) {
     it(`${label}: ${url}`, () => {
@@ -119,7 +142,18 @@ describe('SSRF 가드: DNS 해소 뒤 판정', () => {
     ['IPv4-mapped 루프백', '::ffff:127.0.0.1'],
     ['IPv4-mapped 메타데이터', '::ffff:169.254.169.254'],
     ['IPv4-compatible 루프백', '::7f00:1'],
+    ['NAT64 메타데이터', '64:ff9b::a9fe:a9fe'],
+    ['풀어 쓴 IPv6 루프백', '0:0:0:0:0:0:0:1'],
   ]
+  it('공인 IPv4 를 실은 mapped 주소로 해소되면 통과한다', async () => {
+    _resetDnsGuardCache()
+    const c = createMcpHttpClient(
+      { name: 'x', url: 'https://ok.example.com/mcp' },
+      { fetchFn: async () => { throw new Error('fetched') }, lookupFn: async () => [{ address: '::ffff:93.184.216.34', family: 6 }] },
+    )
+    await assert.rejects(() => c.listTools(), /fetched/)
+  })
+
   for (const [label, address] of dnsHoles) {
     it(`${label}(${address})로 해소되면 막는다`, async () => {
       await assert.rejects(() => viaDns([address]), /resolves to/)
