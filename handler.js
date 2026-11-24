@@ -665,7 +665,8 @@ function writeTargetsOf(words) {
     if (positional.length > 0) targets.push(positional[positional.length - 1])
   } else if ((cmd === 'sed' || cmd === 'perl') && args.some((a) => /^-[A-Za-z]*i/.test(a) || a.startsWith('--in-place'))) {
     // 첫 positional 은 스크립트(-e 가 없을 때). 나머지가 고칠 파일이다.
-    const hasExpr = args.some((a) => a === '-e' || a === '--expression')
+    // `--expression=스크립트` 꼴도 스크립트를 따로 준 것이다. 빠지면 고칠 파일을 스크립트로 보고 놓친다(트랙 G5)
+    const hasExpr = args.some((a) => a === '-e' || a === '--expression' || a.startsWith('--expression='))
     targets.push(...(hasExpr ? positional : positional.slice(1)))
   } else if (cmd === 'dd') {
     for (const a of args) if (a.startsWith('of=')) targets.push(a.slice(3))

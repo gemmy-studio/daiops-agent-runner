@@ -93,6 +93,44 @@ describe('쓰기 목적지: 명령 인자', () => {
   }
 })
 
+describe('쓰기 목적지: 낱말 경계(돌연변이로 고름)', () => {
+  const DIR = '/workspace/.daiops/skills'
+  const cases = [
+    ['탭으로 띄운 인자', `rm\t${SKILL}`, true],
+    ['띄어쓰기 없는 ;', `true;rm ${SKILL}`, true],
+    ['띄어쓰기 없는 |', `cat a|tee ${SKILL}`, true],
+    ['단독 & 뒤 명령', `sleep 1 & rm ${SKILL}`, true],
+    ['앞에 공백', `   rm ${SKILL}`, true],
+    ['인자 사이 2>&1', `cp /tmp/x 2>&1 ${SKILL}`, true],
+    ['인자 사이 >&2', `cp /tmp/x >&2 ${SKILL}`, true],
+    ['숫자로 끝나는 낱말 바로 뒤 >', `rm ${DIR}/x2>/dev/null`, true],
+    ['숫자로 시작하는 낱말 바로 뒤 >', `cd ${DIR} && rm 1x>/dev/null`, true],
+    ['한 글자 낱말 바로 뒤 >', `cd ${DIR} && rm b>/dev/null`, true],
+    ['큰따옴표 안 \\" 는 따옴표를 닫지 않는다', `echo "a\\" ; rm ${SKILL} ; \\"b"`, false],
+    ['역슬래시로 막은 && 는 분리자가 아니다', `echo a \\&\\& rm ${SKILL}`, false],
+  ]
+  for (const [label, cmd, want] of cases) {
+    it(`${label}: ${want ? '막는다' : '통과'}`, () => assert.equal(writes(cmd), want))
+  }
+})
+
+describe('쓰기 목적지: 명령 목록 전부', () => {
+  for (const cmd of ['rmdir', 'truncate -s 0', 'chown root', 'chgrp root', 'unlink', 'shred -u']) {
+    it(`${cmd.split(' ')[0]}: 막는다`, () => assert.equal(writes(`${cmd} ${SKILL}`), true))
+  }
+  for (const prefix of ['nohup', 'time', 'command', 'exec', 'nice']) {
+    it(`앞붙이 ${prefix}: 막는다`, () => assert.equal(writes(`${prefix} rm ${SKILL}`), true))
+  }
+  it('cp -t 붙여 씀', () => assert.equal(writes('cp -t/workspace/.daiops/skills /tmp/x'), true))
+  it('sed -ni 묶은 글자', () => assert.equal(writes(`sed -ni 's/a/b/p' ${SKILL}`), true))
+  it('sed --in-place=.bak', () => assert.equal(writes(`sed --in-place=.bak 's/a/b/' ${SKILL}`), true))
+  it('sed -i --expression 띄어 씀', () => assert.equal(writes(`sed -i --expression 's/a/b/' ${SKILL}`), true))
+  it('sed -i --expression= 붙여 씀', () => assert.equal(writes(`sed -i --expression='s/a/b/' ${SKILL}`), true))
+  it('sed -i 의 스크립트 낱말은 목적지가 아니다', () => assert.equal(writes(`sed -i ${SKILL} /tmp/x`), false))
+  it('tar -t(목록)는 풀지 않는다', () => assert.equal(writes('tar -tf a.tar -C /workspace/.daiops/skills'), false))
+  it('변수 대입만 있고 명령이 없으면 통과', () => assert.equal(writes(`FOO=${SKILL}`), false))
+})
+
 describe('쓰기 목적지: 상대경로와 cd', () => {
   it('cwd 기준 상대경로', () => assert.equal(writes('rm .daiops/skills/active/x/SKILL.md'), true))
   it('cd 를 따라간다', () => assert.equal(writes('cd /workspace/.daiops && rm skills/active/x/SKILL.md'), true))
