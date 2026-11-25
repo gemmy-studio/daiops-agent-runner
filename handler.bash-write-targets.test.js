@@ -4,8 +4,8 @@
  * 셸 꼴은 Claude Code 권한 매처가 이슈에서 반복해 놓친 자리(파이프, 서브셸, 히어독, 리다이렉트, bash -c)와
  * 판정 주석(handler.js 「목적지로 보는 자리」)에서 골랐다.
  *
- * `todo` 는 지금 판정이 놓치는 꼴이다. 판정 주석이 이미 「스크립트로 우회하는 것은 명령 문자열로 못 막는다」고 적어 둔
- * 한계와 같은 갈래라 고치지 않고 기록만 한다.
+ * 간접 쓰기(bash -c, eval, xargs, find -delete, find -exec)는 처음에 todo 로 기록했다가 보안 2차-가 2-1 에서 막았다.
+ * 스크립트 파일을 만들어 실행하는 우회는 여전히 명령 문자열로 못 막는다(판정 주석).
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
@@ -147,10 +147,59 @@ describe('쓰기 목적지: 풀 수 없는 변수', () => {
   it('변수가 든 목적지에 보호 이름이 없으면 통과', () => assert.equal(writes('rm $TMPDIR/x'), false))
 })
 
-describe('쓰기 목적지: 지금 놓치는 꼴(기록만)', () => {
-  const todo = { todo: '명령 문자열 판정의 한계(스크립트 우회와 같은 갈래). 고치지 않고 기록' }
-  it('bash -c 안의 리다이렉트', todo, () => assert.equal(writes(`bash -c "echo hi > ${SKILL}"`), true))
-  it('sh -c 안의 rm', todo, () => assert.equal(writes(`sh -c 'rm ${SKILL}'`), true))
-  it('xargs 로 넘긴 rm', todo, () => assert.equal(writes(`echo ${SKILL} | xargs rm`), true))
-  it('find -delete', todo, () => assert.equal(writes('find /workspace/.daiops/skills -name "*.md" -delete'), true))
+describe('쓰기 목적지: 간접 쓰기(보안 2차-가 2-1)', () => {
+  const DIR = '/workspace/.daiops/skills'
+  const blocked = [
+    ['bash -c 안의 리다이렉트', `bash -c "echo hi > ${SKILL}"`],
+    ['sh -c 안의 rm', `sh -c 'rm ${SKILL}'`],
+    ['bash -lc 묶은 글자', `bash -lc 'rm ${SKILL}'`],
+    ['/bin/sh -c', `/bin/sh -c 'touch ${SKILL}'`],
+    ['sh -c 안의 cd 뒤 상대경로', `sh -c 'cd /workspace/.daiops && rm skills/x'`],
+    ['sh -c 가 바깥 cd 를 물려받음', `cd /workspace/.daiops && sh -c 'rm skills/x'`],
+    ['셸 안의 셸', `bash -c "sh -c 'rm ${SKILL}'"`],
+    ['eval', `eval "rm ${SKILL}"`],
+    ['xargs 로 넘긴 rm', `echo ${SKILL} | xargs rm`],
+    ['xargs 옵션 뒤 rm', `printf '%s\\n' ${SKILL} | xargs -n 1 -I {} rm {}`],
+    ['xargs 의 보이는 목적지', 'ls /tmp | xargs cp -t /workspace/.daiops/skills'],
+    ['xargs sed -i', `echo ${SKILL} | xargs sed -i s/a/b/`],
+    ['보호 폴더 안에서 xargs(이름이 따로 보이지 않음)', 'cd /workspace/.daiops && cd skills && ls | xargs rm'],
+    ['xargs sh -c', `echo ${SKILL} | xargs sh -c 'rm "$@"' _`],
+    ['find -delete', 'find /workspace/.daiops/skills -name "*.md" -delete'],
+    ['find 조상 폴더 -delete', 'find /workspace/.daiops -name SKILL.md -delete'],
+    ['find -exec rm', `find ${DIR} -name x -exec rm {} \\;`],
+    ['find -exec rm +', `find ${DIR} -type f -exec rm -f {} +`],
+    ['find -execdir', `find ${DIR} -execdir rm {} \\;`],
+    ['find -exec sh -c', `find ${DIR} -exec sh -c 'echo > "$1"' _ {} \\;`],
+    ['find 시작 경로 없음(지금 폴더)', `cd ${DIR} && find -name x -delete`],
+    ['find 의 상대 시작 경로', 'find .daiops/skills -delete'],
+  ]
+  for (const [label, cmd] of blocked) {
+    it(`${label}: 막는다`, () => assert.equal(writes(cmd), true))
+  }
+
+  const allowed = [
+    ['bash -c 로 밖에 쓰기', `bash -c "cat ${SKILL} > /tmp/x"`],
+    ['bash 로 스킬 스크립트 실행(-c 없음)', 'bash /workspace/.daiops/skills/active/x/run.sh'],
+    ['sh -c 읽기만', `sh -c 'cat ${SKILL}'`],
+    ['xargs 로 읽기', `echo ${SKILL} | xargs cat`],
+    ['xargs 하위 명령 없음', `echo ${SKILL} | xargs`],
+    ['보호 이름 없는 xargs rm', 'ls /tmp/old | xargs rm'],
+    ['find 읽기만', 'find /workspace/.daiops/skills -name "*.md"'],
+    ['find -exec cat', `find ${DIR} -exec cat {} \\;`],
+    ['find 다른 폴더 -delete', 'find /tmp/cache -name "*.tmp" -delete'],
+    ['find 다른 하위 폴더 -delete', 'find /workspace/knowledge/tmp -delete'],
+  ]
+  for (const [label, cmd] of allowed) {
+    it(`${label}: 통과`, () => assert.equal(writes(cmd), false))
+  }
+
+  it('셸 깊이를 넘으면 보호 이름이 보일 때 막는다', () => {
+    let cmd = `rm ${SKILL}`
+    for (let i = 0; i < 5; i++) cmd = `sh -c ${JSON.stringify(cmd)}`
+    assert.equal(writes(cmd), true)
+  })
+
+  it('작업 폴더 /workspace 에서 find . -delete 는 보호 경로의 조상이라 막는다', () => {
+    assert.equal(writes('find . -delete'), true)
+  })
 })

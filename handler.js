@@ -607,6 +607,9 @@ export function resolveToolFilePath(filePath, sandboxRoot) {
 // 목적지로 보는 자리: 리다이렉트(`>`·`>>`·`&>`) 대상, `tee` 인자, `cp`·`install`·`rsync`·`ln` 의 마지막 인자(`-t DIR`
 // 포함), `mv` 의 모든 경로 인자(옮겨 나가는 것도 스킬을 끄는 쓰기다), `rm`·`touch`·`mkdir`·`truncate`·`chmod` 등의
 // 인자, `sed -i`·`perl -i` 의 파일 인자, `dd of=`, `tar -x … -C DIR`·`unzip -d DIR`. `cd` 는 따라가 상대경로를 푼다.
+// 간접 쓰기(2026-11-25 보안 2차-가 2-1): `bash -c`·`sh -c`·`eval` 의 문자열은 다시 판정하고, `xargs` 로 넘기는 쓰기는
+// 명령에 보호 이름이 보이거나 지금 폴더가 보호 경로 안이면 막고, `find -delete`·`-exec 쓰는 명령` 은 시작 경로가 보호 경로
+// 이거나 그 안이거나 그 위(조상)면 막는다. 조상 규칙 때문에 `/workspace` 에서 `find . -name x -delete` 도 막힌다(보호 파일까지 닿는다).
 
 /** 셸 단어로 쪼갠다. 따옴표는 벗기고, 분리자(`;` `&&` `||` `|` 개행)와 리다이렉트는 별도 토큰으로 남긴다. */
 function tokenizeShell(command) {
@@ -653,12 +656,16 @@ const ARG_DEST_ALL = new Set(['rm', 'rmdir', 'touch', 'mkdir', 'truncate', 'chmo
 const ARG_DEST_LAST = new Set(['cp', 'install', 'rsync', 'ln'])
 const COMMAND_PREFIXES = new Set(['sudo', 'nohup', 'time', 'env', 'command', 'exec', 'nice'])
 
-/** 한 단순 명령의 쓰기 목적지 후보(원문 그대로)를 뽑는다. */
-function writeTargetsOf(words) {
+/** 앞붙이(sudo, env, 변수 대입 등)를 건너뛴 명령 이름과 인자 */
+function commandWords(words) {
   let k = 0
   while (k < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]) || COMMAND_PREFIXES.has(words[k]))) k++
-  const cmd = (words[k] ?? '').split('/').pop()
-  const args = words.slice(k + 1)
+  return { cmd: (words[k] ?? '').split('/').pop(), args: words.slice(k + 1) }
+}
+
+/** 한 단순 명령의 쓰기 목적지 후보(원문 그대로)를 뽑는다. */
+function writeTargetsOf(words) {
+  const { cmd, args } = commandWords(words)
   const positional = args.filter((a) => !a.startsWith('-'))
   const targets = []
   const optValue = (names) => {
@@ -691,6 +698,65 @@ function writeTargetsOf(words) {
   return targets
 }
 
+// 셸이 문자열을 다시 읽거나(`bash -c`, `eval`) 다른 명령에 인자를 넘기는(`xargs`, `find -exec`, `find -delete`) 꼴.
+// 목적지가 명령 문자열의 그 자리에 없어 writeTargetsOf 만으로는 놓쳤다(보안 2차-가 2-1, 트랙 G5 의 todo 시험 넷).
+const SHELL_BINS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh'])
+const XARGS_VALUE_OPTS = new Set(['-a', '-d', '-E', '-I', '-L', '-n', '-P', '-s'])
+const FIND_EXEC_OPTS = new Set(['-exec', '-execdir', '-ok', '-okdir'])
+const MAX_SHELL_DEPTH = 3
+/** 목적지를 풀 수 없을 때 보는 보호 이름. 이것이 명령에 보이면 막는다 */
+const PROTECTED_NAME_RE = /\.daiops\/+(skills|harness|instructions|persona_overrides)|persona\.yaml|\.integrations\.env/
+
+/** 이 명령이 무언가를 쓰거나 지울 수 있는가(목적지를 몰라도). 셸, eval, xargs 는 무엇이든 할 수 있어 쓴다고 본다 */
+function mayWrite(words) {
+  const { cmd, args } = commandWords(words)
+  if (SHELL_BINS.has(cmd) || cmd === 'eval' || cmd === 'xargs' || cmd === 'find') return true
+  if (ARG_DEST_ALL.has(cmd) || ARG_DEST_LAST.has(cmd) || cmd === 'dd' || cmd === 'patch' || cmd === 'unzip') return true
+  if ((cmd === 'sed' || cmd === 'perl') && args.some((a) => /^-[A-Za-z]*i/.test(a) || a.startsWith('--in-place'))) return true
+  return cmd === 'tar' && args.some((a) => /^-?[A-Za-z]*x/.test(a) || a === '--extract')
+}
+
+/**
+ * 간접 쓰기. scripts 는 다시 판정할 셸 문자열, targets 는 그 자리에서 보이는 목적지,
+ * opaque 는 목적지를 모르는 쓰기(xargs 가 표준 입력으로 받는 인자), findRoots 는 find 가 지우거나 고칠 수 있는 시작 경로.
+ */
+function indirectWritesOf(words) {
+  const { cmd, args } = commandWords(words)
+  if (SHELL_BINS.has(cmd)) {
+    const i = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a))
+    return i >= 0 && args[i + 1] !== undefined ? { scripts: [args[i + 1]] } : null
+  }
+  if (cmd === 'eval') return args.length > 0 ? { scripts: [args.join(' ')] } : null
+  if (cmd === 'xargs') {
+    let i = 0
+    while (i < args.length && args[i].startsWith('-')) i += XARGS_VALUE_OPTS.has(args[i]) ? 2 : 1
+    const sub = args.slice(i)
+    // 하위 명령이 없으면 echo 다. 쓰는 명령이면 보이는 목적지는 잡고, 표준 입력으로 올 목적지는 opaque 로 둔다
+    return sub.length > 0 && mayWrite(sub) ? { targets: writeTargetsOf(sub), opaque: true } : null
+  }
+  if (cmd === 'find') {
+    const firstExpr = args.findIndex((a) => a.startsWith('-') || a === '(' || a === '!')
+    const roots = firstExpr < 0 ? args : args.slice(0, firstExpr)
+    const expr = firstExpr < 0 ? [] : args.slice(firstExpr)
+    let writes = expr.includes('-delete')
+    for (let i = 0; i < expr.length && !writes; i++) {
+      if (!FIND_EXEC_OPTS.has(expr[i])) continue
+      let j = i + 1
+      while (j < expr.length && expr[j] !== ';' && expr[j] !== '+') j++
+      writes = mayWrite(expr.slice(i + 1, j))
+    }
+    return writes ? { findRoots: roots.length > 0 ? roots : ['.'] } : null
+  }
+  return null
+}
+
+/** find 시작 경로가 보호 경로이거나 그 안이거나 그 위(조상)인가. 위면 -name 등으로 보호 파일까지 닿는다 */
+function findRootReachesProtected(root, protectedPaths) {
+  if (isProtectedTarget(root, protectedPaths)) return true
+  const prefix = root.endsWith('/') ? root : root + '/'
+  return protectedPaths.some((p) => p.startsWith(prefix))
+}
+
 function resolveShellPath(word, cwd) {
   if (word === '~' || word.startsWith('~/')) return path.posix.resolve('/workspace', word.slice(2))
   return path.posix.resolve(cwd, word)
@@ -708,18 +774,39 @@ export function bashWritesProtectedPath(command, opts = {}) {
 }
 
 /** Bash 명령의 쓰기 목적지 중 처음 걸린 보호 경로(없으면 null). 거절 안내를 경로에 맞추는 데 쓴다. */
-function bashProtectedWriteTarget(command, { cwd = '/workspace', protectedPaths = PROTECTED_HARNESS_PATHS } = {}) {
-  const tokens = tokenizeShell(String(command ?? ''))
+function bashProtectedWriteTarget(command, { cwd = '/workspace', protectedPaths = PROTECTED_HARNESS_PATHS, depth = 0 } = {}) {
+  const text = String(command ?? '')
+  const tokens = tokenizeShell(text)
   let dir = cwd
   let words = []
   const targets = []
+  let indirectHit = null
   const flush = () => {
     if (words[0] === 'cd') {
       dir = words[1] ? resolveShellPath(words[1], dir) : '/workspace'
     } else if (words.length > 0) {
       for (const t of writeTargetsOf(words)) targets.push(resolveShellPath(t, dir))
+      indirectHit ??= indirectProtectedHit(words)
     }
     words = []
+  }
+  const indirectProtectedHit = (w) => {
+    const ind = indirectWritesOf(w)
+    if (!ind) return null
+    for (const t of ind.targets ?? []) targets.push(resolveShellPath(t, dir))
+    for (const script of ind.scripts ?? []) {
+      // 셸 안의 셸. 깊이를 넘으면 안을 못 본 것이라 보호 이름이 보일 때 막는다
+      if (depth >= MAX_SHELL_DEPTH) { if (PROTECTED_NAME_RE.test(script)) return script; continue }
+      const hit = bashProtectedWriteTarget(script, { cwd: dir, protectedPaths, depth: depth + 1 })
+      if (hit !== null) return hit
+    }
+    for (const root of ind.findRoots ?? []) {
+      const resolved = resolveShellPath(root, dir)
+      if (findRootReachesProtected(resolved, protectedPaths)) return resolved
+    }
+    // xargs: 목적지가 표준 입력으로 온다. 명령에 보호 이름이 보이거나 지금 폴더가 보호 경로 안이면 막는다
+    if (ind.opaque && (PROTECTED_NAME_RE.test(text) || isProtectedTarget(dir, protectedPaths))) return dir
+    return null
   }
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]
@@ -733,10 +820,7 @@ function bashProtectedWriteTarget(command, { cwd = '/workspace', protectedPaths 
   }
   flush()
   // 변수·치환이 남은 목적지는 풀 수 없다. 보호 경로 이름이 보이면 막는 쪽으로 판정한다.
-  return targets.find((t) =>
-    /[$`]/.test(t)
-      ? /\.daiops\/+(skills|instructions|persona_overrides)|persona\.yaml|\.integrations\.env/.test(t)
-      : isProtectedTarget(t, protectedPaths)) ?? null
+  return targets.find((t) => (/[$`]/.test(t) ? PROTECTED_NAME_RE.test(t) : isProtectedTarget(t, protectedPaths))) ?? indirectHit
 }
 
 /**
