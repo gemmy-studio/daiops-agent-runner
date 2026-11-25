@@ -12,12 +12,21 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { resolveJobsDir } from './tools/bash.js'
 
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000 // 5분 — 기본 idle(15~30분) 대비 충분히 잦음
 const MAX_JOB_AGE_MS = 2 * 60 * 60 * 1000 // 2h 상한 — stuck 잡이 sandbox를 영구 유지하지 못하게
 
 let timer = null
+
+/**
+ * 백그라운드 잡 레지스트리 디렉토리. event-buffer.js BUFFER_DIR과 같은 persistent volume 베이스.
+ * 호출 시점에 env를 읽어 테스트에서 override 가능 (AGENT_RUNNER_JOBS_DIR). Bash, BashOutput, KillShell 이 공유.
+ * 종전엔 tools/bash.js 에 있어 bash.js ↔ job-keepalive.js 가 서로를 불러왔다(트랙 G6에서 옮김).
+ * @returns {string}
+ */
+export function resolveJobsDir() {
+  return process.env.AGENT_RUNNER_JOBS_DIR ?? '/workspace/.agent-runner/jobs'
+}
 
 /**
  * jobs 디렉토리에 keepalive가 필요한 활성 잡이 있는지.

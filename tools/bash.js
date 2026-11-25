@@ -14,7 +14,7 @@ import { existsSync, openSync, closeSync, writeFileSync, mkdirSync } from 'node:
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { resolvePath, resolveCwd, buildToolEnv } from './_common.js'
-import { ensureJobKeepalive } from '../job-keepalive.js'
+import { ensureJobKeepalive, resolveJobsDir } from '../job-keepalive.js'
 import { admitTool, buildSpawnArgs, MIN_FREE_BYTES } from '../tool-cpu-lane.js'
 import { attachToToolCgroup } from '../tool-cgroup.js'
 import { logWarn } from '../logger.js'
@@ -33,14 +33,8 @@ function lastLines(s, n) {
   return lines.length <= n ? s : lines.slice(-n).join('\n')
 }
 
-/**
- * 백그라운드 잡 레지스트리 디렉토리. event-buffer.js BUFFER_DIR과 같은 persistent volume 베이스.
- * 호출 시점에 env를 읽어 테스트에서 override 가능 (AGENT_RUNNER_JOBS_DIR). BashOutput/KillShell이 공유.
- * @returns {string}
- */
-export function resolveJobsDir() {
-  return process.env.AGENT_RUNNER_JOBS_DIR ?? '/workspace/.agent-runner/jobs'
-}
+// 잡 레지스트리 경로는 job-keepalive.js 가 정본이다(순환 import 를 끊으려고 옮김). BashOutput/KillShell 이 이 이름으로 쓴다
+export { resolveJobsDir }
 
 export const BASH_TOOL = Object.freeze({
   name: 'Bash',
