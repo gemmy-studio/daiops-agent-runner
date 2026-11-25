@@ -29,7 +29,7 @@ export const TURN_RESULT_BUDGET_CHARS = (() => {
 })()
 
 /** 이보다 작은 개별 결과는 오프로드 대상 아님(작은 것 여러 개를 파일로 빼도 이득 없음). */
-export const OFFLOAD_SINGLE_MIN_CHARS = 8_000
+const OFFLOAD_SINGLE_MIN_CHARS = 8_000
 
 /**
  * **개별 MCP 도구 결과 상한(chars).** per-turn 예산(위)과 **다른 것을 막는다.**
@@ -45,7 +45,7 @@ export const OFFLOAD_SINGLE_MIN_CHARS = 8_000
  * 빌트인 도구에는 걸지 않는다 — Bash·Read 는 이미 자체 상한(64KB·5MB)이 있고, 그쪽은 우리가
  * 출력 형태를 통제한다. MCP 응답만 크기를 상대가 정한다.
  */
-export const MCP_RESULT_MAX_CHARS = (() => {
+const MCP_RESULT_MAX_CHARS = (() => {
   const v = Number(process.env.AGENT_RUNNER_MCP_MAX_RESULT_CHARS)
   return Number.isFinite(v) && v > 0 ? v : 100_000
 })()
@@ -59,7 +59,7 @@ export const MCP_RESULT_MAX_CHARS = (() => {
  * (opencode `Truncate`: 7일 보관 + 시간당 cleanup 스케줄러. 러너에는 스케줄러가 없어
  *  오프로드 경로에 얹는다 — 파일이 안 생기면 청소할 것도 없으므로 그 결합이 자연스럽다.)
  */
-export const OFFLOAD_RETENTION_MS = (() => {
+const OFFLOAD_RETENTION_MS = (() => {
   const v = Number(process.env.AGENT_RUNNER_OFFLOAD_RETENTION_MS)
   return Number.isFinite(v) && v > 0 ? v : 7 * 24 * 60 * 60 * 1000
 })()
@@ -68,7 +68,7 @@ export const OFFLOAD_RETENTION_MS = (() => {
 const OFFLOAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000
 
 /** 프리뷰 head+tail 총 길이(chars). */
-export const OFFLOAD_PREVIEW_CHARS = 1_500
+const OFFLOAD_PREVIEW_CHARS = 1_500
 
 /** 오프로드된 결과를 식별하는 마커(재오프로드 무한 방지 = 멱등). */
 export const OFFLOAD_MARKER = '…[대용량 도구 결과 오프로드됨]'

@@ -43,7 +43,7 @@ export const MEMORY_EDIT_ACTIONS = Object.freeze([
 ])
 
 /** 실패류 — deny로 매핑되는 결과. protected·duplicate는 "정상 처리됐고 결과가 이것"이라 실패가 아니다. */
-export const MEMORY_EDIT_FAILURES = Object.freeze(['failed', 'not_found', 'stale'])
+const MEMORY_EDIT_FAILURES = Object.freeze(['failed', 'not_found', 'stale'])
 
 /** cloud가 보낸 action이 계약상 유효한가. */
 export function isMemoryEditAction(action) {
@@ -63,7 +63,7 @@ export function isValidRuleText(text) {
 }
 
 /** cloud 가 결과와 함께 싣는 재료의 목록 상한(cloud `rule-edit-target.ts` RULE_LIST_LIMIT 과 같다). */
-export const MEMORY_DETAIL_RULES_MAX = 100
+const MEMORY_DETAIL_RULES_MAX = 100
 
 const clip = (v, n = MEMORY_RULE_MAX) => (typeof v === 'string' ? v.slice(0, n) : undefined)
 

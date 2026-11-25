@@ -62,7 +62,7 @@ function firstSentence(text) {
  * @param {{ input_schema?: any }} tool
  * @returns {string[]}
  */
-export function requiredArgNames(tool) {
+function requiredArgNames(tool) {
   const schema = tool.input_schema
   const required = schema && typeof schema === 'object' ? schema.required : undefined
   return Array.isArray(required) ? required.filter((k) => typeof k === 'string' && k.length > 0) : []

@@ -15,9 +15,9 @@
 import { createHash } from 'node:crypto'
 
 /** 설명 길이 상한. openclaude `MAX_MCP_DESCRIPTION_LENGTH` 와 같은 값 */
-export const MAX_TOOL_DESCRIPTION_CHARS = 2048
+const MAX_TOOL_DESCRIPTION_CHARS = 2048
 /** 정화한 스키마를 JSON 으로 적었을 때 상한. 넘으면 그 도구를 뺀다 */
-export const MAX_TOOL_SCHEMA_CHARS = 16_384
+const MAX_TOOL_SCHEMA_CHARS = 16_384
 /** 원래 도구 이름 규칙. 모델 API 도구 이름 문자셋이고, 접두사를 붙여도 넘치지 않게 64자 */
 const TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/
 /** MCP 표준 `ToolAnnotations` 의 불리언 힌트. `mcp-client.js` `ANNOTATION_BOOL_KEYS` 와 같다 */

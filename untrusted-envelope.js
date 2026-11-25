@@ -26,7 +26,7 @@
 import { randomBytes } from 'node:crypto'
 
 /** 소스별 문자 상한 — 컨텍스트 범람 차단(vellum `DEFAULT_BUDGETS` 차용). */
-export const DEFAULT_BUDGETS = {
+const DEFAULT_BUDGETS = {
   document: 60_000,
   attachment: 40_000,
   tool_result: 20_000,

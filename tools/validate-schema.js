@@ -48,7 +48,7 @@ const MAX_VALIDATION_DEPTH = 100
  * @param {number} [depth] - 사이클 방어용 재귀 깊이.
  * @returns {string[]} 위반 메시지 목록 (빈 배열이면 통과)
  */
-export function collectSchemaErrors(schema, value, path = '$', root = undefined, depth = 0) {
+function collectSchemaErrors(schema, value, path = '$', root = undefined, depth = 0) {
   if (!schema || typeof schema !== 'object') return []
   if (root === undefined) root = schema
   // $ref 사이클(자기참조 스키마 등)에서 값이 소비되지 않으면 무한 재귀 → 상한 초과 시 검증 포기.

@@ -51,11 +51,6 @@ function appendErrorsLog(line) {
   }
 }
 
-/** info — stdout(메인 로그)만. errors.log 미기록. */
-export function logInfo(...args) {
-  console.log(...args)
-}
-
 /** warn — stdout + errors.log */
 export function logWarn(...args) {
   console.warn(...args)

@@ -15,7 +15,7 @@ import { promises as fs, existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 
-export const MAX_LINE_LENGTH = 2000
+const MAX_LINE_LENGTH = 2000
 export const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5MB
 export const DEFAULT_READ_LIMIT = 500
 export const MAX_READ_LIMIT = 2000

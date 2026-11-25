@@ -130,7 +130,7 @@ export const MIN_FREE_BYTES = (() => {
 })()
 
 /** admission 대기 상한(ms). 이 시간을 넘기면 경고를 남기고 통과시킨다(fail-open). */
-export const ADMIT_MAX_WAIT_MS = (() => {
+const ADMIT_MAX_WAIT_MS = (() => {
   const v = Number(process.env.AGENT_RUNNER_ADMIT_MAX_WAIT_MS)
   return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 10_000
 })()

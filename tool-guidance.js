@@ -22,13 +22,13 @@
  * 예시를 받아 주는 서버. 바깥 서버(고객이 등록한 MCP)의 예시는 프롬프트에 그대로 실리므로 받지 않는다.
  * 이름은 클라우드 `qualified-tool-name.ts` 의 서버 이름과 같아야 한다.
  */
-export const TRUSTED_EXAMPLE_SERVERS = new Set(['daiops-mcp', 'daiops-wiki-local'])
+const TRUSTED_EXAMPLE_SERVERS = new Set(['daiops-mcp', 'daiops-wiki-local'])
 
 /** 도구 하나에 붙이는 예시 상한. Anthropic 권고 「1-5 examples per tool」, 입력이 늘지 않게 셋 */
 export const MAX_INPUT_EXAMPLES = 3
 
 /** 묶음 안내 한 줄 상한(글자) */
-export const SERVER_NOTE_MAX_CHARS = 160
+const SERVER_NOTE_MAX_CHARS = 160
 
 const TYPE_CHECK = {
   string: (v) => typeof v === 'string',

@@ -26,7 +26,7 @@
  */
 
 /** 가명화 대상. cloud(lattice) `src/lib/ai/pii/recognizers.ts` 에서 **복사·이식**했다(별개 레포). */
-export const PII_RECOGNIZERS = [
+const PII_RECOGNIZERS = [
   {
     type: 'rrn',
     label: '주민등록번호',
@@ -53,7 +53,7 @@ export const PII_RECOGNIZERS = [
 ]
 
 /** 기본 적용 대상 — cloud 봉투가 목록을 주지 않을 때 쓴다(1단계는 항상 이것). */
-export const DEFAULT_PII_TYPES = PII_RECOGNIZERS.map((r) => r.type)
+const DEFAULT_PII_TYPES = PII_RECOGNIZERS.map((r) => r.type)
 
 function isPlausibleYymmdd(s) {
   const mm = Number(s.slice(2, 4))

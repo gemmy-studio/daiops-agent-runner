@@ -12,7 +12,7 @@
  */
 
 /** 환경변수 키 규칙 — cloud workspace_secrets KEY_PATTERN과 정합(대문자 시작, 영대문자/숫자/밑줄). */
-export const SECRET_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/
+const SECRET_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/
 
 /** Anthropic 호환 tool 정의 — llm-wrapper가 options.tools로 머지해 LLM에 노출. */
 export const REQUEST_SECRET_TOOL = Object.freeze({
@@ -90,7 +90,7 @@ export function isValidSecretKey(name) {
  *  - 내부 인프라 시크릿/식별자(LLM_PROXY_URL/WORKSPACE_ID/AGENT_RUNNER_TOKEN) → 자식 노출·우회 방지
  *  - OAuth 관리명(SLACK_TOKEN/NOTION_TOKEN) → harness-bundler가 관리하므로 충돌 방지(조용한 skip 대신 명시 거부)
  */
-export const RESERVED_SECRET_KEYS = Object.freeze(new Set([
+const RESERVED_SECRET_KEYS = Object.freeze(new Set([
   // 셸 실행 흐름 (LD_*/DYLD_*는 RESERVED_PREFIXES로 커버)
   'PATH', 'HOME', 'SHELL', 'IFS', 'ENV', 'BASH_ENV', 'GCONV_PATH', 'SSLKEYLOGFILE',
   'NODE_OPTIONS', 'NODE_PATH', 'NODE_ENV', 'PYTHONPATH', 'PYTHONHOME', 'RUBYLIB', 'PERL5LIB',
