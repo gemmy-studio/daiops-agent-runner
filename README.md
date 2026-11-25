@@ -16,7 +16,7 @@ daiops는 직원별 샌드박스(Daytona)에서 agent loop을 돌린다. agent-r
 
 ```bash
 npm install        # dependencies 0개라 즉시 끝남
-npm test           # node --test (외부 의존 없음, 276 tests)
+npm test           # node --test (외부 의존 없음. 시험 수는 적지 않는다, 늘 낡는다)
 node server.js     # 환경변수 필요 — LOCAL_DEV.md 참조
 ```
 
