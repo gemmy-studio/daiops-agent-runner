@@ -126,7 +126,7 @@ describe('evaluatePolicy — 엮인 명령은 조각마다 (cloud와 일치)', (
 
   for (const [label, command] of [
     ['cd 뒤 허용 bin', 'cd /tmp && git status'],
-    ['허용 bin 둘', 'git fetch && curl -s https://x.example -o a'],
+    ['허용 bin 둘', 'git fetch && git status'],
     ['허용 bin | 안전 bin', 'git log --oneline | head -5'],
     ['줄바꿈', 'cd /tmp\ngit status'],
     ['|| 와 ;', 'git pull || git status; git log'],
@@ -533,6 +533,7 @@ describe('샌드박스 게이트 parity 스냅샷 (드리프트 감지)', () => 
     const { SANDBOX_GATE_REGEXES } = await import('./handler.js')
     const snap = JSON.parse(readFileSync(new URL('./policy-sandbox-gate.json', import.meta.url), 'utf8'))
 
+    assert.deepEqual(SANDBOX_GATE_REGEXES.networkTools, snap.networkTools)
     assert.equal(SANDBOX_GATE_REGEXES.networkEgress.source, snap.networkEgress)
     assert.equal(SANDBOX_GATE_REGEXES.supplyChain.source, snap.supplyChain)
     assert.deepEqual(

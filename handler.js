@@ -419,6 +419,10 @@ const NO_OP_SHELL_BUILTINS = new Set(['cd', 'pushd', 'popd', 'chdir', 'true', ':
  */
 export function bashAllowlistReason(command, allowlist) {
   if (isDangerousCommand(command)) return null
+  // 바깥으로 보내는 명령(망 도구, git push, gh)은 상시 허용에 든 bin 이어도 결재로 간다. 종전에는 위험 명령만 봐서
+  // curl 을 상시 허용하면 다른 목적지로 보내는 curl 도 결재 없이 통과했다(보안 2차-가 1-2, 11/25 재현).
+  // git fetch, pull 같은 반입은 종전대로 상시 허용을 따른다(내보내지 않는다)
+  if (OUTWARD_SEND_RE.test(normalizeCommandForDetection(String(command ?? '')))) return null
   const chained = hasUnquotedShellMetachar(command)
   const segments = chained ? splitSimpleCommandChain(command) : [String(command ?? '')]
   if (!segments) return null
@@ -500,7 +504,11 @@ export function isDangerousCommand(command) {
  * 네트워크 egress 도구. 샌드박스는 파일시스템만 격리되고 네트워크는 열려 있으므로,
  * 데이터 유출·원격 전송 벡터는 샌드박스 자동 허용에서 제외하고 결재로 남긴다.
  */
-const NETWORK_EGRESS_RE = /\b(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|sftp|ftp|rsync|socat)\b/i
+const NETWORK_TOOLS = ['curl', 'wget', 'nc', 'ncat', 'netcat', 'telnet', 'ssh', 'scp', 'sftp', 'ftp', 'rsync', 'socat']
+const NETWORK_TOOL_SET = new Set(NETWORK_TOOLS)
+const NETWORK_EGRESS_RE = new RegExp(`\\b(?:${NETWORK_TOOLS.join('|')})\\b`, 'i')
+/** 상시 허용으로도 넘기지 않는 바깥 전송: 망 도구 전부, git push, gh(저장소, PR, 이슈를 바깥에 만든다) */
+const OUTWARD_SEND_RE = new RegExp(`${NETWORK_EGRESS_RE.source}|\\bgit\\s+(?:-[cC]\\s+\\S+\\s+|--?\\S+\\s+)*push\\b|\\bgh\\s+\\S`, 'i')
 
 /**
  * 공급망 반입 도구 — 원격에서 코드·패키지를 로컬로 받아오는 명령(git clone·npm/pip install 등).
@@ -512,9 +520,11 @@ const NETWORK_EGRESS_RE = /\b(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|sftp|ftp
  */
 const SUPPLY_CHAIN_EGRESS_RE = new RegExp(
   [
-    'git\\s+(?:-[cC]\\s+\\S+\\s+|--?\\S+\\s+)*(?:clone|fetch|pull|ls-remote|remote\\s+(?:add|set-url)|submodule\\s+(?:update|add))\\b',
+    'git\\s+(?:-[cC]\\s+\\S+\\s+|--?\\S+\\s+)*(?:clone|fetch|pull|push|ls-remote|remote\\s+(?:add|set-url)|submodule\\s+(?:update|add))\\b',
     '(?:npm|pnpm|yarn|bun)\\s+(?:install|i|add|ci|dlx|create|exec|update|upgrade)\\b',
     'npx\\s',
+    // gh 는 저장소, PR, 이슈를 바깥에 만들고 올린다(보안 2차-가 1-2, 11/25)
+    'gh\\s+\\S',
     'uvx\\s',
     'pip[23]?\\s+(?:install|download)\\b',
     'python[23]?\\s+-m\\s+pip\\s+(?:install|download)\\b',
@@ -534,6 +544,7 @@ const SUPPLY_CHAIN_EGRESS_RE = new RegExp(
  * `policy-sandbox-gate.json` 스냅샷과 `.source` 일치를 단정한다. 런타임 판정에는 쓰지 않는다.
  */
 export const SANDBOX_GATE_REGEXES = {
+  networkTools: NETWORK_TOOLS,
   networkEgress: NETWORK_EGRESS_RE,
   supplyChain: SUPPLY_CHAIN_EGRESS_RE,
   dangerousCommands: DANGEROUS_COMMAND_PATTERNS,
@@ -787,6 +798,8 @@ export function isSafeAllowlistPattern(pattern) {
   }
   if (!/^[a-zA-Z0-9_.-]+$/.test(p)) return false
   if (isInterpreterBin(p)) return false
+  // 망 밖 전송 도구는 상시 허용으로 등록하지 않는다(목적지를 가리지 못한다). gh 는 공급망 정규식이 같은 이유로 막는다
+  if (NETWORK_TOOL_SET.has(p) || p === 'gh') return false
   return true
 }
 

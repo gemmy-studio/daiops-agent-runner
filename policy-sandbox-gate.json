@@ -1,7 +1,7 @@
 {
   "_comment": "ADR 21 §2.4 샌드박스 격리 예외 게이트의 스냅샷(정규식 + 도구 이름 집합). daiops(src/lib/daytona/policy.ts)와 agent-runner(handler.js)가 동일 사본을 보유하며 양쪽 parity 테스트가 코드와의 일치를 단정한다. 규칙 변경 시 ①양쪽 코드 ②양쪽 스냅샷 ③minRunnerVersion ④러너 package.json version ⑤cloud AGENT_RUNNER_IMAGE 핀을 함께 갱신해야 테스트가 통과한다.",
   "_comment_askReasons": "P2에서 추가. cloud가 toolOverrides.askReasons로 도구별 결재 사유 키를 보내고 러너 REASON_LABEL_KO가 한국어 문구를 소유한다. 키가 어긋나면 카드 사유가 조용히 공란이 되므로(P1에서 실제로 발생) 양쪽 parity 테스트가 이 목록과의 일치를 단정한다.",
-  "version": 8,
+  "version": 9,
   "minRunnerVersion": "0.31.0",
   "askReasonKeys": [
     "channel-ask",
@@ -10,8 +10,22 @@
     "outward-send",
     "routine-write-ask"
   ],
+  "networkTools": [
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "netcat",
+    "telnet",
+    "ssh",
+    "scp",
+    "sftp",
+    "ftp",
+    "rsync",
+    "socat"
+  ],
   "networkEgress": "\\b(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|sftp|ftp|rsync|socat)\\b",
-  "supplyChain": "git\\s+(?:-[cC]\\s+\\S+\\s+|--?\\S+\\s+)*(?:clone|fetch|pull|ls-remote|remote\\s+(?:add|set-url)|submodule\\s+(?:update|add))\\b|(?:npm|pnpm|yarn|bun)\\s+(?:install|i|add|ci|dlx|create|exec|update|upgrade)\\b|npx\\s|uvx\\s|pip[23]?\\s+(?:install|download)\\b|python[23]?\\s+-m\\s+pip\\s+(?:install|download)\\b|(?:uv|poetry|pipenv)\\s+(?:add|install|sync)\\b|gem\\s+install\\b|cargo\\s+(?:install|add)\\b|go\\s+(?:get|install)\\b|(?:apt|apt-get|dnf|yum|apk|zypper|pacman)\\s+(?:install|add|-S)\\b|brew\\s+(?:install|tap)\\b|docker\\s+(?:pull|run)\\b",
+  "supplyChain": "git\\s+(?:-[cC]\\s+\\S+\\s+|--?\\S+\\s+)*(?:clone|fetch|pull|push|ls-remote|remote\\s+(?:add|set-url)|submodule\\s+(?:update|add))\\b|(?:npm|pnpm|yarn|bun)\\s+(?:install|i|add|ci|dlx|create|exec|update|upgrade)\\b|npx\\s|gh\\s+\\S|uvx\\s|pip[23]?\\s+(?:install|download)\\b|python[23]?\\s+-m\\s+pip\\s+(?:install|download)\\b|(?:uv|poetry|pipenv)\\s+(?:add|install|sync)\\b|gem\\s+install\\b|cargo\\s+(?:install|add)\\b|go\\s+(?:get|install)\\b|(?:apt|apt-get|dnf|yum|apk|zypper|pacman)\\s+(?:install|add|-S)\\b|brew\\s+(?:install|tap)\\b|docker\\s+(?:pull|run)\\b",
   "dangerousCommands": [
     "\\b(?:bash|sh|zsh|ksh|dash|fish)\\s+-[^\\s]*c(?:\\s|$)",
     "\\b(?:python[\\d.]*|perl[\\d.]*|ruby[\\d.]*|node[\\d.]*|nodejs|deno|bun|php[\\d.]*)\\s+-[ec]\\s",
@@ -34,5 +48,6 @@
   "_comment_v5": "v5: 거버넌스 경로 보호(protectedPaths) 추가. 샌드박스 격리 예외가 /workspace 하위 전부를 무결재로 열어, 도구 레벨 결재 아래에 파일 레벨 구멍이 있었다(skill_manage를 막아도 Write로 스킬 파일을 덮으면 자기 승급이 된다). cloud가 정책으로 지시하고 러너가 강제하되, 러너에 내장 폴백을 둬 구버전 cloud 조합에서도 닫힌다. MEMORY.md는 프롬프트가 쓰라고 지시하는 파일이라 제외하고, 위키는 baked CLI(Bash)로 저장돼 Write 차단이 무의미하므로 제외한다.",
   "_comment_v6": "v6: 외부 MCP 서버 쓰기 도구 게이트(QA #105 축1). cloud가 policy.builtinMcpServers 로 내장 서버 이름을 보내고, 러너가 그 목록 밖 서버의 도구를 annotations.readOnlyHint!==true 이면 결재로 보낸다. askReasonKeys 는 늘지 않는다 — 새 사유(external-mcp-write·external-mcp-undeclared)는 cloud 가 보내는 키가 아니라 러너가 직접 판정하는 것이라 이 목록의 대상이 아니다. minRunnerVersion 을 올리는 이유는 cloud 가 builtinMcpServers 를 보내도 구 러너는 그 필드를 무시해 게이트가 **조용히 없어지기** 때문이다 — 핀이 이 아래로 내려가면 parity 테스트가 실패한다.",
   "_comment_v7": "v7(2026-10-13, R25): protectedPaths 에 /workspace/.daiops/harness/ 추가. 인재 스킬은 그 아래 레포 사본을 가리키는 링크로 심겨, .daiops/skills/ 만 막으면 실제 경로로 쓸 때 고정을 비켜 갔다. cloud 가 policy.protectedPaths 로 보내고 러너가 그 값을 먼저 쓰므로(handler.js 647행) 러너 버전을 올리지 않아도 닫힌다. 러너 내장 폴백 · 러너 스냅샷은 다음 러너 릴리스 때 같은 값으로 맞춘다.",
-  "_comment_v8": "v8(2026-10-22, 사용자 결정 · cloud 21번 문서 §3.1 「권한 계층」): 보호 경로 쓰기를 결재 없이 거절한다. 종전 러너는 결재 채널이 있으면 plan_request 를 냈고, 대화 중 멤버가 승인하면 매니저가 「수정 안 함」으로 둔 항목도 바뀌었다. MultiEdit 도 파일 쓰기 도구로 본다. 러너 스냅샷 · 내장 폴백에 v7 의 harness/ 를 함께 맞춘다. minRunnerVersion 을 올리는 이유: 구 러너는 결재 채널이 있으면 여전히 카드를 띄운다."
+  "_comment_v8": "v8(2026-10-22, 사용자 결정 · cloud 21번 문서 §3.1 「권한 계층」): 보호 경로 쓰기를 결재 없이 거절한다. 종전 러너는 결재 채널이 있으면 plan_request 를 냈고, 대화 중 멤버가 승인하면 매니저가 「수정 안 함」으로 둔 항목도 바뀌었다. MultiEdit 도 파일 쓰기 도구로 본다. 러너 스냅샷 · 내장 폴백에 v7 의 harness/ 를 함께 맞춘다. minRunnerVersion 을 올리는 이유: 구 러너는 결재 채널이 있으면 여전히 카드를 띄운다.",
+  "_comment_v9": "v9(2026-11-25, 보안 2차-가 1-2): networkTools 칸 추가(networkEgress 정규식은 이 목록으로 만든다). 상시 허용(allowlist)에 든 bin 이어도 망 밖 전송, 공급망 반입이면 결재로 가고, 상시 허용 등록 거르기가 networkTools 와 gh 를 받지 않는다. supplyChain 에 git push, gh 추가. 종전에는 curl 을 상시 허용하면 다른 목적지로 보내는 curl 이 결재 없이 통과했다. minRunnerVersion 은 그대로 둔다: 클라우드가 보내는 값이 아니라 러너가 혼자 판정하는 규칙이라 구 러너와 섞여도 조용히 꺼지는 칸이 없다."
 }
