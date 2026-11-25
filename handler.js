@@ -2244,6 +2244,8 @@ export async function handleChat(rawParams, res, req) {
           onRevise,
           // Phase B 격리 — 세션 secret을 도구 자식 프로세스 env로만 전달(본체 process.env 미오염).
           getToolEnv: () => Object.fromEntries(workspaceSecrets),
+          // 감싼 도구 셸에서 읽기 전용으로 덮을 보호 경로(`tool-sandbox.js`). cloud 가 보낸 목록이 우선, 없으면 내장 목록
+          getProtectedPaths: () => (Array.isArray(params.policy?.protectedPaths) ? params.policy.protectedPaths : PROTECTED_HARNESS_PATHS),
           // P3-a — 도구(Bash) 실행 중 stdout/stderr tail 라이브 전송. 휘발성(buffer 미누적).
           onToolProgress: (p) => emitEphemeralSse(sessionId, 'tool_progress', p),
           // 크레덴셜 주입 프록시가 "허용 호스트 아님"으로 막은 사건. 자식 프로세스의 403 본문에만

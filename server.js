@@ -22,6 +22,7 @@ import { collectRuntimeProbe } from './runtime-probe.js'
 import { sweepOrphanedBuffers } from './event-buffer.js'
 import { admissionStats } from './tool-cpu-lane.js'
 import { initToolCgroup, toolCgroupState } from './tool-cgroup.js'
+import { initToolSandbox, toolSandboxState } from './tool-sandbox.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -68,6 +69,11 @@ const RUNTIME_PROBE = (() => {
  * nice + 메모리 pacing이 그대로 방어를 담당한다. 판정 사유는 `/health.toolCgroup.reason`에 실린다.
  */
 initToolCgroup()
+
+/**
+ * 도구 명령 감싸기(bubblewrap) 부팅 점검. 통과해야 켜지고, 결과와 사유는 `/health.toolSandbox` 에 실린다(`tool-sandbox.js`).
+ */
+initToolSandbox()
 
 const LLM_PROXY_ORIGIN = (() => {
   const raw = process.env.LLM_PROXY_URL
@@ -225,6 +231,13 @@ const server = createServer(async (req, res) => {
       toolCgroup: (() => {
         try {
           return toolCgroupState()
+        } catch {
+          return null
+        }
+      })(),
+      toolSandbox: (() => {
+        try {
+          return toolSandboxState()
         } catch {
           return null
         }

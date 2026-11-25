@@ -248,6 +248,7 @@ export async function* runAnthropicSdkStream(sdkInput, ctx = {}) {
         cwd: opts.cwd,
         signal: runCtx?.signal ?? combinedSignal,
         env: typeof ctx.getToolEnv === 'function' ? ctx.getToolEnv() : undefined,
+        protectedPaths: typeof ctx.getProtectedPaths === 'function' ? ctx.getProtectedPaths() : undefined,
         // P3-a — 실행 중 tail 라이브 표시. 현재 실행 중인 tool_use_id를 붙여 handler가 SSE로 전달.
         onProgress: typeof ctx.onToolProgress === 'function'
           ? (p) => ctx.onToolProgress({ ...p, toolUseId: runCtx?.toolUseId })

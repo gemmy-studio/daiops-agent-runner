@@ -17,6 +17,7 @@ import { resolvePath, resolveCwd, buildToolEnv } from './_common.js'
 import { ensureJobKeepalive, resolveJobsDir } from '../job-keepalive.js'
 import { admitTool, buildSpawnArgs, MIN_FREE_BYTES } from '../tool-cpu-lane.js'
 import { attachToToolCgroup } from '../tool-cgroup.js'
+import { wrapToolSpawn } from '../tool-sandbox.js'
 import { logWarn } from '../logger.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -93,7 +94,7 @@ export async function runBash(input, ctx = {}) {
   }
 
   return await new Promise((resolve) => {
-    const { file, args } = buildSpawnArgs(['-c', input.command])
+    const { file, args } = wrapToolSpawn(buildSpawnArgs(['-c', input.command]), { protectedPaths: ctx.protectedPaths })
     const child = spawn(file, args, {
       cwd,
       env: buildToolEnv(ctx.env),
@@ -234,7 +235,7 @@ function runBackground(input, ctx, cwd) {
   // 장기 백그라운드 파싱이 인터랙티브 turn의 CPU를 굶기지 않게 한다.
   // Wave 1부터는 이름 분기 없이 모든 백그라운드 잡이 저우선이다 — 종전에는 분류를 벗어난 장기 잡이
   // nice 0으로 무제한 누적될 수 있었고, 백그라운드는 세마포어도 없어 방어가 0이었다.
-  const { file, args } = buildSpawnArgs(['-c', wrapped])
+  const { file, args } = wrapToolSpawn(buildSpawnArgs(['-c', wrapped]), { protectedPaths: ctx.protectedPaths, background: true })
 
   let child
   try {

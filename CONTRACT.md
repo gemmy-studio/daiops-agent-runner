@@ -85,6 +85,14 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
     "vcpu": 2,
     "group": "/sys/fs/cgroup/daiops-tools"
   },
+  "toolSandbox": {
+    "mode": "auto",
+    "enabled": true,
+    "bwrap": "/usr/bin/bwrap",
+    "selfCheck": { "runner": "blocked", "runnerState": "blocked", "protected": "blocked", "tmp": "written", "umount": "blocked", "runnerPid": "hidden" },
+    "reason": null,
+    "wrapped": 12
+  },
   "timestamp": 1717000000000
 }
 ```
@@ -105,6 +113,7 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
   - `vcpu`: 실제 파생된 vCPU(`AGENT_RUNNER_VCPU` → cgroup `cpu.max` → `os.cpus()` 순).
   - `memoryLimitBytes` / `minFreeBytes`: 판정에 쓰인 상한과 확보 임계값. 상한을 못 읽으면 `null`.
 - `toolCgroup`: **커널 집행 계층 상태**(`tool-cgroup.js`). 도구 자식 프로세스를 별도 cgroup v2 서브그룹에 넣어 `cpu.weight`·`memory.high`·`memory.max`를 커널이 집행하게 한다. 쓰기 위임이 없는 환경에서는 비활성되고 nice + admission이 방어를 담당한다(기능 저하 없음, 보장만 약해짐).
+- `toolSandbox`: **도구 명령 감싸기 상태**(`tool-sandbox.js`, 2026-11-25 보안 2차-가 2-2, 2-3). Bash 자식 프로세스를 bubblewrap 으로 감싸 러너 프로그램(`/opt/agent-runner`), 러너 상태(`/workspace/.agent-runner`, 잡 폴더 제외), 보호 경로(`policy.protectedPaths`)를 읽기 전용으로 덮고 권한을 내린다. 부팅 때 감싼 셸로 스스로 점검해 통과해야 켜진다(`selfCheck`). 통과하지 못하거나 bubblewrap 이 없으면 감싸지 않고 `reason` 에 사유를 싣는다.
   - `enabled`: 활성 여부. `reason`: **비활성 사유(비활성이면 항상 문자열)** — 조용한 실패를 막기 위해 반드시 실린다. 활성이면 `null`.
   - `cpuWeight`: 도구 그룹의 `cpu.weight`(기본 20 — 루트 기본 100 대비 약 1/5 몫). 이 값 쓰기가 실패하면 부분 적용 상태로 두지 않고 전체를 비활성한다.
   - `memoryHigh` / `memoryMax`: 상한의 60% / 80%. `high`는 **소프트**(초과 시 회수 압력으로 감속, 죽이지 않음), `max`는 **하드**(초과 시 이 그룹 내에서 OOM kill → 희생자가 도구 자식으로 한정되고 러너 본체는 보호된다). 컨테이너 상한을 모르면 둘 다 `null`이고 CPU 가중치만 적용된다.
@@ -201,6 +210,7 @@ agent-runner 시작 시 메인 앱(deployer)이 주입해야 하는 env:
 | `BASH_ENV` | no | Bash 도구 자동 source (사용자 secrets) |
 | `AGENT_RUNNER_VCPU` | no | 티어의 vCPU 수. 도구 동시 실행 판단(`/health` `admission.envVcpu`) |
 | `AGENT_RUNNER_LOG_DIR` | no | errors.log 위치 (기본 `/workspace/.agent-runner/logs`) |
+| `AGENT_RUNNER_TOOL_SANDBOX` | no | `off` 면 도구 명령 감싸기를 끈다(기본 `auto`: 부팅 점검을 통과하면 켬) |
 | `AGENT_RUNNER_HOST` | no | bind host (기본 0.0.0.0) |
 | `AGENT_RUNNER_MCP_MAX_RESULT_CHARS` | no | **개별 MCP 도구 결과 상한**(기본 100,000자 ≈ 25K토큰). 넘으면 원문을 오프로드 파일로 빼고 프리뷰 + 페이지네이션 안내만 남긴다. per-turn 예산(`AGENT_RUNNER_TURN_RESULT_BUDGET_CHARS`)은 *합계* 기준이라 단일 호출을 못 잡는다. |
 | `AGENT_RUNNER_MCP_MAX_RESPONSE_BYTES` | no | **MCP 응답 본문 바이트 상한**(기본 16MB). 넘으면 스트림을 끊고 거절한다 — 자르면 JSON이 깨지므로 거절이 정직하다. 컨텍스트 보호가 아니라 **OOM 방어**다(러너는 워크스페이스 공유 프로세스). |
