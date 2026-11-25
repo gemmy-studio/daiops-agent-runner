@@ -19,7 +19,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm test
+      # 시험과 시험 범위 하한을 한 번에 돈다(트랙 G6). 하한은 CI 와 같은 Node 22 의 2026-11-25 실측(줄 91.89,
+      # 갈래 85.27, 함수 93.24)보다 1~2포인트 낮다. Node 24 는 같은 코드를 줄 86 으로 낮게 세므로 로컬 판정에 쓰지 않는다.
+      # 범위가 오르면 손으로 올린다
+      - name: Test + coverage floor
+        run: node --test --experimental-test-coverage --test-coverage-lines=90 --test-coverage-branches=84 --test-coverage-functions=92
+      # 안 쓰는 export, 파일(knip). 러너는 의존 0 이라 설치하지 않고 판을 고정해 점검 때만 불러 쓴다(대표 결정 11-25)
+      - name: Unused exports (knip)
+        run: npx --yes knip@6.48.0 --reporter compact
 
   docker:
     needs: test

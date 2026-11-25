@@ -1,0 +1,5 @@
+{
+  "entry": ["server.js", "**/*.test.js", "proxy/*.js", "scripts/*.{js,mjs}"],
+  "project": ["**/*.js"],
+  "ignore": ["test-fixtures/**"]
+}
