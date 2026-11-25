@@ -4,6 +4,28 @@
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-11-26
+
+> **배포 순서**: 순서 제약 없음. 클라우드가 보내는 값과 정책 스냅샷(v9)은 그대로다. 도구 감싸기는 샌드박스에 bubblewrap 이
+> 있고 부팅 점검을 통과할 때만 켜지고, 아니면 0.40.0 처럼 감싸지 않고 돌며 사유를 `/health.toolSandbox.reason` 에 싣는다.
+> 앱 스냅샷(SYSTEM_DEPS)에 bubblewrap 을 넣기 전에는 늘 꺼져 있다. 판 올림으로 `/opt/agent-runner` 만 바뀐 옛 샌드박스도 꺼져 있다.
+
+### Security
+- **직원 터미널 명령을 bubblewrap 으로 감싼다(보안 2차-가 2-2, 2-3).** 감싼 안에서 러너 프로그램(`/opt/agent-runner`), 러너 상태
+  (`/workspace/.agent-runner`, 잡 폴더 제외), 업무 방식 파일(`policy.protectedPaths`)이 읽기 전용이고, 권한을 모두 내리고 pid
+  namespace 를 새로 만들어 러너를 끄거나 들여다볼 수 없다. 백그라운드 잡도 같다. 부팅 때 감싼 셸로 스스로 점검해 통과해야 켜고,
+  결과를 `/health.toolSandbox` 에 싣는다. `AGENT_RUNNER_TOOL_SANDBOX=off` 로 끈다(aea130b). 로컬 docker 확인: seccomp 가
+  pivot_root 를 허용하는 환경에서 켜지고 시험 19건이 기대대로, docker 기본 seccomp 에서는 꺼짐
+- **`bash -c`, `eval`, `xargs`, `find -delete`, `find -exec` 로 보호 경로를 쓰는 간접 쓰기를 막는다.** 스크립트 파일은 3단계까지
+  열어 본다. `find` 시작 경로가 보호 폴더를 품으면 시작 경로를 좁히라고 안내한다(d41f018, 7758845)
+
+### Fixed
+- BashOutput 이 종료 코드 파일을 쓰는 도중 읽어 정상 종료를 「코드 모름」으로 보이던 경합(f8cfc43)
+
+### Changed
+- 안 쓰는 export 정리, `resolveJobsDir` 를 job-keepalive.js 로 옮겨 순환 import 해소(81fa551, f50359c)
+- CI 에 시험 범위 하한(줄 90, 분기 84, 함수 92)과 knip 추가(eb1588b)
+
 ## [0.40.0] - 2026-11-25
 
 > **배포 순서**: 앱 쪽 `src/lib/daytona/policy-sandbox-gate.json` 사본을 이 판의 v9 와 같은 바이트로 맞춘 뒤(앱 parity 시험), 앱 `AGENT_RUNNER_IMAGE` 를 0.40.0 으로 올린다.
