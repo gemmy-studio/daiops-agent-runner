@@ -62,19 +62,15 @@ export async function runBashOutput(input) {
   /** @type {number | null} */
   let exitCode = null
   if (existsSync(exitPath)) {
+    exitCode = readExitCode(exitPath)
+    // 래퍼의 `echo rc > 파일` 은 파일을 먼저 만들고 숫자를 나중에 쓴다. 비어 있는데 잡이 살아 있으면 아직 쓰는 중이다
+    const writing = exitCode === null && typeof meta.pid === 'number' && isAlive(meta.pid)
+    status = writing ? 'running' : 'exited'
+  } else if (typeof meta.pid === 'number' && !isAlive(meta.pid)) {
     status = 'exited'
-    try {
-      const n = parseInt(readFileSync(exitPath, 'utf8').trim(), 10)
-      exitCode = Number.isNaN(n) ? null : n
-    } catch { /* exit 파일 읽기 실패 — code unknown */ }
-  } else if (typeof meta.pid === 'number') {
-    try {
-      process.kill(meta.pid, 0) // signal 0 = liveness probe (시그널 미전송)
-      status = 'running'
-    } catch (err) {
-      // ESRCH = 프로세스 없음(sentinel 없이 종료 — SIGKILL/비정상). 그 외(EPERM 등)는 살아있다고 간주.
-      status = err.code === 'ESRCH' ? 'exited' : 'running'
-    }
+    // sentinel 확인과 pid 확인 사이에 잡이 끝났을 수 있다(래퍼는 sentinel 을 쓰고 나서 끝난다).
+    // 한 번 더 보지 않으면 정상 종료가 「exit code unavailable」로 보인다(트랙 G6, 부하 시험에서 잡힘)
+    if (existsSync(exitPath)) exitCode = readExitCode(exitPath)
   }
 
   const header = status === 'exited'
@@ -87,5 +83,25 @@ export async function runBashOutput(input) {
   return {
     content: body,
     ...(status === 'exited' && exitCode !== null && exitCode !== 0 ? { is_error: true } : {}),
+  }
+}
+
+/** @param {string} exitPath @returns {number | null} */
+function readExitCode(exitPath) {
+  try {
+    const n = parseInt(readFileSync(exitPath, 'utf8').trim(), 10)
+    return Number.isNaN(n) ? null : n
+  } catch {
+    return null // exit 파일 읽기 실패 — code unknown
+  }
+}
+
+/** signal 0 = liveness probe(시그널 미전송). ESRCH 면 없음, 그 밖(EPERM 등)은 살아 있다고 본다 */
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return err.code !== 'ESRCH'
   }
 }

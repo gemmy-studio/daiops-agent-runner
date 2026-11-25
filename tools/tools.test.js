@@ -496,6 +496,37 @@ describe('BashOutput / KillShell — 백그라운드 잡 제어', () => {
     })
   })
 
+  // 래퍼는 sentinel 파일을 만들고 숫자를 나중에 쓴다. 그 사이에 읽으면 정상 종료가 「exit code unavailable」로 보였다(G6, 부하 시험)
+  it('sentinel 이 비어 있고 잡이 살아 있으면 아직 running', async () => {
+    await withJobsDir(async (jobsDir) => {
+      const job_id = 'writing-exit'
+      await fs.writeFile(path.join(jobsDir, `${job_id}.exit`), '')
+      await fs.writeFile(path.join(jobsDir, `${job_id}.meta.json`), JSON.stringify({ pid: process.pid }))
+      const out = await runBashOutput({ job_id })
+      assert.ok(out.content.includes('status=running'), out.content)
+    })
+  })
+
+  it('sentinel 이 비어 있고 잡이 없으면 exited(코드 모름)', async () => {
+    await withJobsDir(async (jobsDir) => {
+      const job_id = 'dead-empty-exit'
+      await fs.writeFile(path.join(jobsDir, `${job_id}.exit`), '')
+      await fs.writeFile(path.join(jobsDir, `${job_id}.meta.json`), JSON.stringify({ pid: 2 ** 22 + 7 }))
+      const out = await runBashOutput({ job_id })
+      assert.ok(out.content.includes('status=exited (exit code unavailable)'), out.content)
+      assert.equal(out.is_error, undefined)
+    })
+  })
+
+  it('sentinel 이 없고 잡이 없으면 exited(코드 모름)', async () => {
+    await withJobsDir(async (jobsDir) => {
+      const job_id = 'dead-no-exit'
+      await fs.writeFile(path.join(jobsDir, `${job_id}.meta.json`), JSON.stringify({ pid: 2 ** 22 + 7 }))
+      const out = await runBashOutput({ job_id })
+      assert.ok(out.content.includes('status=exited (exit code unavailable)'), out.content)
+    })
+  })
+
   it('없는 job_id → 둘 다 is_error', async () => {
     await withJobsDir(async () => {
       assert.equal((await runBashOutput({ job_id: 'nope' })).is_error, true)
