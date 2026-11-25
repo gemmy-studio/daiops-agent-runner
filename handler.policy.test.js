@@ -831,4 +831,15 @@ describe('evaluatePolicy: 보호 경로 종류별 거절 안내', () => {
   it('종류별 안내도 재시도가 의미 없음을 말한다', () => {
     for (const [kind, text] of Object.entries(PROTECTED_PATH_GUIDANCE_EN)) assert.match(text, /retry/i, kind)
   })
+
+  it('find 가 보호 폴더의 위에서 지우면 시작 경로를 좁히라고 안내한다(scope)', () => {
+    const d = evaluatePolicy({ security: 'full' }, 'Bash', { command: 'find . -name "*.pyc" -delete' }, false)
+    assert.deepEqual([d.reason, d.pathKind], ['protected-path', 'scope'])
+    assert.match(PROTECTED_PATH_GUIDANCE_EN.scope, /narrow/i)
+    // 보호 폴더 자체를 지우는 find 는 종전 안내(정식 도구)
+    const inside = evaluatePolicy({ security: 'full' }, 'Bash', { command: 'find /workspace/.daiops/skills -delete' }, false)
+    assert.equal(inside.pathKind, undefined)
+    // 좁힌 경로는 통과
+    assert.notEqual(evaluatePolicy({ security: 'full' }, 'Bash', { command: 'find ./src -name "*.pyc" -delete' }, false).reason, 'protected-path')
+  })
 })

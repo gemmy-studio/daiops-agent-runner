@@ -846,7 +846,9 @@ function guardProtectedHarnessWrite(policy, toolName, input) {
     if (isProtectedHarnessPath(resolved, protectedPaths)) hit = resolved
   }
   if (hit === null) return null
-  const pathKind = protectedPathKind(hit)
+  // 보호 경로 자체가 아니라 그 위 폴더에서 걸린 것(find 조상 규칙)이면 시작 경로를 좁혀 다시 하라고 안내한다(보안 검토 11-25)
+  const reachesFromAbove = !isProtectedTarget(hit, protectedPaths) && findRootReachesProtected(hit, protectedPaths)
+  const pathKind = reachesFromAbove ? 'scope' : protectedPathKind(hit)
   return { kind: 'deny', reason: 'protected-path', toolName, commandSummary: summarizeToolInput(toolName, input), ...(pathKind ? { pathKind } : {}) }
 }
 
@@ -1108,6 +1110,8 @@ export const DENY_GUIDANCE_EN = {
 
 /** `protected-path` 중 경로 종류별 안내. 없으면 위 기본 문구(스킬 · 지시문 · 성격 파일)를 쓴다. */
 export const PROTECTED_PATH_GUIDANCE_EN = {
+  scope:
+    'This command starts from a folder that contains skill, instruction or persona files, so it could delete or change them. Retry with the starting folder narrowed to a subfolder outside them (for example find ./src -name "*.pyc" -delete). Filtering them out with -not -path or similar is not accepted.',
   wiki:
     'Wiki files cannot be written in this conversation, and the wiki tools are not available here either. Do not retry with another tool or shell command. Tell the user that this change can be made from the web chat.',
   memory:
