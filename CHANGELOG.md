@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-11-25
+
+> **배포 순서**: 앱 쪽 `src/lib/daytona/policy-sandbox-gate.json` 사본을 이 판의 v9 와 같은 바이트로 맞춘 뒤(앱 parity 시험), 앱 `AGENT_RUNNER_IMAGE` 를 0.40.0 으로 올린다.
+> 클라우드가 보내는 값이 바뀌지 않아 구 러너와 섞여도 조용히 꺼지는 칸은 없다(minRunnerVersion 그대로).
+
+### Security
+- **MCP 주소 가드가 IPv4 를 품은 IPv6 표기를 풀어서 판정한다.** `::ffff:127.0.0.1`(사상), `::ffff:0:a9fe:a9fe`(SIIT),
+  `::127.0.0.1`(호환), `64:ff9b::a9fe:a9fe`(NAT64), `2002:a9fe:a9fe::1`(6to4), 풀어 쓴 `0:0:0:0:0:0:0:1` 이 루프백, 메타데이터,
+  사설 대역 판정을 비켜 갔고, 사상 루프백 주소로 보낸 요청은 127.0.0.1 서버에 실제로 닿았다. 주소 글자 단계와 DNS 해소 단계가
+  같은 풀이를 쓴다. 끝에 점 붙인 이름(`localhost.`)은 점을 떼고 판정하고, 0.0.0.0/8, 192.0.0.0/24, 198.18.0.0/15, 240.0.0.0/4,
+  fec0::/10, 64:ff9b:1::/48 을 막는다(fa3002e, 99770e9. 보안 세션 검토)
+- **상시 허용에 든 명령이어도 바깥 전송은 결재로 간다.** curl 을 상시 허용하면 다른 목적지로 보내는 curl 이 결재 없이 통과했다.
+  망 도구 12개, 원격으로 올리는 git 명령, gh 는 상시 허용을 따르지 않고, 상시 허용 등록도 받지 않는다. git fetch, pull 같은
+  반입은 종전대로. 정책 스냅샷 v9: `networkTools` 칸, supplyChain 에 원격으로 올리는 git 명령과 gh(7e734cf)
+
+### Fixed
+- Bash 보호 경로 판정이 `sed -i --expression='…' <파일>` 꼴에서 고칠 파일을 스크립트로 보고 놓치던 것(62a8208)
+- 장비가 바쁘면 가끔 실패하던 시험 둘(job-keepalive, event-buffer)의 고정 대기를 조건 되묻기로(부하 20대에서 20회 중 5회 → 0회)
+
+### Docs
+- CONTRACT.md: 낡은 줄 번호를 이름으로, `/v1/chat` 요청 칸을 21개 전부로(`prompt`, `systemPrompt` → `message`, `system_prompt`),
+  env 표에 `AGENT_RUNNER_VCPU`, `AGENT_RUNNER_LOG_DIR`
+
+### Tests
+- handleChat 대화 한 턴 흐름(가짜 LLM 프록시), SSRF 우회 표기와 대역 경계와 DNS 캐시, Bash 쓰기 목적지 셸 꼴, LLM 오류 분류 표.
+  시험 955 → 1222건. 돌연변이 점수 SSRF 가드 51 → 82%, Bash 쓰기 목적지 59 → 81%, 오류 분류 69 → 87%
+
 ## [0.39.2] - 2026-11-21
 
 > **배포 순서**: 순서가 자유롭다. 앱 변경은 부스 시험 기록뿐이다(앱은 이미지 판 고정 `AGENT_RUNNER_IMAGE` 만 올린다).
