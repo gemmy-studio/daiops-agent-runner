@@ -114,6 +114,8 @@ export function aptEnv(tmpdir) {
 }
 
 const APT_GET = '/usr/bin/apt-get'
+/** 저장소가 느리거나 503 일 때(snapshot.debian.org 실사례, 문서 관리 조사 11-27 덧붙임) 받기를 다시 한다. 고정 인자라 입력과 무관 */
+const APT_RETRIES = ['-o', 'Acquire::Retries=3']
 const DPKG_QUERY = '/usr/bin/dpkg-query'
 const POLICY_RC_D = '/usr/sbin/policy-rc.d'
 const APT_LISTS = '/var/lib/apt/lists'
@@ -225,7 +227,7 @@ export async function previewInstall(names, deps = {}) {
   const hasLists = deps.hasLists ?? (() => { try { return readdirSync(APT_LISTS).some((f) => f.endsWith('_Packages')) } catch { return false } })
   if (!hasLists()) {
     // 이미지가 목록을 지운다. 처음 한 번 받는다
-    const up = await run(APT_GET, ['update', '-qq'], { env })
+    const up = await run(APT_GET, [...APT_RETRIES, 'update', '-qq'], { env })
     if (up.code !== 0) return { ok: false, error: `package lists could not be fetched: ${tail(up.stderr || up.stdout, 300)}` }
   }
   const sim = await run(APT_GET, ['install', '-s', '--no-install-recommends', '--', ...names], { env })
@@ -238,7 +240,7 @@ export async function previewInstall(names, deps = {}) {
   const denied = installs.filter((p) => isDeniedPackage(p.name)).map((p) => p.name)
   if (denied.length > 0) return { ok: false, error: `these would come in as dependencies and are not allowed: ${denied.join(', ')}` }
   if (installs.length === 0) return { ok: true, installs: [], downloadBytes: 0 }
-  const uris = await run(APT_GET, ['install', '--print-uris', '-qq', '--no-install-recommends', '--', ...names], { env })
+  const uris = await run(APT_GET, [...APT_RETRIES, 'install', '--print-uris', '-qq', '--no-install-recommends', '--', ...names], { env })
   // 크기를 못 재면 거절한다. 0 바이트로 보면 상한을 그냥 지난다(보안 검토 12-7 권장)
   if (uris.code !== 0) return { ok: false, error: `download size could not be measured: ${tail(uris.stdout + uris.stderr, 300)}` }
   const downloadBytes = sumDownloadBytes(uris.stdout)
@@ -303,7 +305,7 @@ async function installCore(names, deps = {}) {
       const pinned = preview.installs.map((p) => `${p.name}=${p.version}`)
       const hooks = deps.hooks ?? { snapshot: snapshotHooks, restore: restoreHooks }
       const before = hooks.snapshot()
-      const res = await run(APT_GET, ['install', '-y', '-qq', '--no-install-recommends', '--no-remove', '--no-upgrade', '--', ...pinned], { env: aptEnv(tmpdir) })
+      const res = await run(APT_GET, [...APT_RETRIES, 'install', '-y', '-qq', '--no-install-recommends', '--no-remove', '--no-upgrade', '--', ...pinned], { env: aptEnv(tmpdir) })
       if (diffHooks(before, hooks.snapshot()).length > 0) {
         // 거절 목록을 지나 훅이나 저장소를 바꾼 꾸러미. 훅 자리를 먼저 되돌리고(purge 실행이 새 훅을 돌리지 않게) 이번에 깐 것을 지운다
         hooks.restore(before)

@@ -23,7 +23,8 @@ function fakeRun(answers) {
   const calls = []
   const run = async (file, args, opts) => {
     calls.push({ file, args, env: opts?.env })
-    const key = `${path.basename(file)} ${args.slice(0, 2).join(' ')}`
+    const a0 = args[0] === '-o' ? args.slice(2) : args
+    const key = `${path.basename(file)} ${a0.slice(0, 2).join(' ')}`
     const a = answers.find(([k]) => key.startsWith(k))
     return a ? { code: 0, stdout: '', stderr: '', ...a[1] } : { code: 0, stdout: '', stderr: '' }
   }
@@ -87,7 +88,7 @@ describe('runInstallSystemPackage', () => {
     const r = await runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'video' }, {}, d)
     assert.equal(r.is_error, undefined, r.content)
     assert.match(r.content, /Installed ffmpeg 7:5\.1\.6-0\+deb12u1 \(\+1 dependencies\)/)
-    const install = f.calls.find((c) => c.args[0] === 'install' && c.args.includes('-y'))
+    const install = f.calls.find((c) => c.args.includes('install') && c.args.includes('-y'))
     assert.deepEqual(install.args.slice(install.args.indexOf('--') + 1), ['libavutil57=7:5.1.6-0+deb12u1', 'ffmpeg=7:5.1.6-0+deb12u1'])
     for (const flag of ['--no-remove', '--no-upgrade', '--no-install-recommends']) assert.ok(install.args.includes(flag), flag)
     assert.equal(install.file, '/usr/bin/apt-get')
@@ -139,7 +140,7 @@ describe('runInstallSystemPackage', () => {
     ], { hooks })
     const run0 = d.run
     d.run = async (file, args, opts) => {
-      if (args[0] === 'install' && args.includes('-y')) state.set('/etc/apt/apt.conf.d/99evil', Buffer.from('DPkg::Pre-Invoke'))
+      if (args.includes('install') && args.includes('-y')) state.set('/etc/apt/apt.conf.d/99evil', Buffer.from('DPkg::Pre-Invoke'))
       if (args[0] === 'purge') order.push('purge')
       return run0(file, args, opts)
     }
@@ -187,7 +188,7 @@ describe('runInstallSystemPackage', () => {
   it('목록이 없으면 먼저 받는다', async () => {
     const { f, d } = deps([['apt-get install -s', { stdout: '' }]], { hasLists: () => false })
     await runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)
-    assert.deepEqual(f.calls[0].args, ['update', '-qq'])
+    assert.deepEqual(f.calls[0].args, ['-o', 'Acquire::Retries=3', 'update', '-qq'])
   })
 
   it('이름이 틀리면 apt 를 부르지 않는다', async () => {
@@ -203,7 +204,7 @@ describe('runInstallSystemPackage', () => {
       active++; maxActive = Math.max(maxActive, active)
       await new Promise((r) => setTimeout(r, 5))
       active--
-      return { code: 0, stdout: args[1] === '-s' ? SIM_FFMPEG : '', stderr: '' }
+      return { code: 0, stdout: args.includes('-s') ? SIM_FFMPEG : '', stderr: '' }
     }
     const d = { run, hasLists: () => true, policyRcD: async () => 101, tmpdir: '/x' }
     await Promise.all([1, 2, 3].map(() => runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)))
@@ -242,7 +243,7 @@ describe('ensureApprovedSystemPackages(다시 깔기)', () => {
     const st = await ensureApprovedSystemPackages(['jq', 'ffmpeg', 'bubblewrap', '-o'], d)
     assert.equal(st.status, 'ok')
     assert.deepEqual(st.missing, ['ffmpeg'], 'rc(설정만 남음)는 빠진 것, 거절 목록과 틀린 이름은 버림')
-    const install = f.calls.find((c) => c.args[0] === 'install' && c.args.includes('-y'))
+    const install = f.calls.find((c) => c.args.includes('install') && c.args.includes('-y'))
     assert.ok(install.args.includes('ffmpeg=7:5.1.6-0+deb12u1') && install.args.includes('--no-remove'))
     const n = f.calls.length
     await ensureApprovedSystemPackages(['ffmpeg', 'jq'], d)
