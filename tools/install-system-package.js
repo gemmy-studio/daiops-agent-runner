@@ -38,7 +38,7 @@ export const INSTALL_SYSTEM_PACKAGE_TOOL = Object.freeze({
 
 /** 데비안 꾸러미 이름(Debian Policy 5.6.1): 소문자, 숫자, + - . 두 글자 이상, 영숫자로 시작 */
 const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]{1,62}$/
-export const MAX_PACKAGES = 10
+const MAX_PACKAGES = 10
 /** 받을 크기 상한(바이트) */
 export const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 
@@ -124,7 +124,7 @@ const APT_LISTS = '/var/lib/apt/lists'
  * /etc/apt 는 트리 전체(sources.list.d, preferences.d, trusted.gpg.d 까지). 꾸러미가 저장소나 키를 더하면 다음 설치부터 공식 밖
  * 꾸러미가 들어온다(12-8 권장)
  */
-export const HOOK_PATHS = ['/etc/apt', '/etc/dpkg/dpkg.cfg.d', '/etc/ld.so.preload']
+const HOOK_PATHS = ['/etc/apt', '/etc/dpkg/dpkg.cfg.d', '/etc/ld.so.preload']
 /** 감싼 셸이 못 쓰는 러너 상태 아래(RUNNER_READONLY_DIRS). 설치 기록과 임시 폴더 */
 const STATE_DIR = process.env.AGENT_RUNNER_STATE_DIR || '/workspace/.agent-runner'
 export const SYSTEM_PACKAGES_FILE = () => path.join(STATE_DIR, 'system-packages.json')
@@ -220,7 +220,7 @@ function recordInstalled(requested, installed) {
  * 설치 미리 보기(바꾸지 않음). 결재 카드와 실행이 같은 판정을 쓴다.
  * @returns {Promise<{ ok: true, installs: {name: string, version: string}[], downloadBytes: number } | { ok: false, error: string }>}
  */
-export async function previewInstall(names, deps = {}) {
+async function previewInstall(names, deps = {}) {
   const run = deps.run ?? defaultRun
   const tmpdir = deps.tmpdir ?? '/tmp'
   const env = aptEnv(tmpdir)
