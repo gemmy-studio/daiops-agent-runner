@@ -58,6 +58,12 @@ export const REMOVE_SYSTEM_PACKAGE_TOOL = Object.freeze({
   },
 })
 
+/**
+ * 결과 끝 줄의 표지. 앱이 이 줄로 승인 목록을 고친다(`installed=` 는 이번에 새로 깐 이름만, `removed=` 는 뺄 이름).
+ * 실패(is_error)에는 붙지 않는다. CONTRACT.md 「설치 요청 결과」
+ */
+const SYSTEM_PACKAGES_MARKER = '[system-packages]'
+
 /** 데비안 꾸러미 이름(Debian Policy 5.6.1): 소문자, 숫자, + - . 두 글자 이상, 영숫자로 시작 */
 const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]{1,62}$/
 const MAX_PACKAGES = 10
@@ -364,13 +370,18 @@ async function installCore(names, deps = {}) {
         return fail(`these packages change how apt or dpkg runs and were removed${left.length > 0 ? ' (restore was incomplete; the platform team has been notified)' : ''}`)
       }
       if (res.code !== 0) return fail(`apt-get failed (exit ${res.code}): ${tail(res.stdout + res.stderr)}`)
-      const installed = await queryInstalled(run, tmpdir, v.names)
-      recordInstalled(v.names, installed)
-      const deps_ = preview.installs.length - v.names.length
+      // 이번에 새로 깐 이름만 기록하고 알린다. 이미 깔려 있던 것(기본 이미지 등)은 앱 승인 목록에 넣지 않게 따로 적는다(보안 검토 15절)
+      const fresh = v.names.filter((n) => preview.installs.some((p) => p.name === n))
+      const already = v.names.filter((n) => !fresh.includes(n))
+      const installed = await queryInstalled(run, tmpdir, fresh)
+      recordInstalled(fresh, installed)
+      const deps_ = preview.installs.length - fresh.length
       return {
         content: `Installed ${installed.map((p) => `${p.name} ${p.version}`).join(', ')}`
           + (deps_ > 0 ? ` (+${deps_} dependencies)` : '')
-          + `. It will be reinstalled if this workspace is rebuilt.`,
+          + (already.length > 0 ? `. Already installed: ${already.join(', ')}` : '')
+          + `. It will be reinstalled if this workspace is rebuilt.`
+          + `\n${SYSTEM_PACKAGES_MARKER} installed=${installed.map((p) => p.name).join(',')}`,
       }
     } finally {
       if (!deps.tmpdir) { try { rmSync(tmpdir, { recursive: true, force: true }) } catch { /* 다음 회차가 덮어쓴다 */ } }
@@ -408,7 +419,8 @@ async function removeCore(names, deps = {}) {
     const present = (await queryInstalled(run, tmpdir, names)).map((p) => p.name)
     if (present.length === 0) {
       recordRemoved(names)
-      return { content: `Not installed: ${names.join(', ')}` }
+      // 깔려 있지 않아도 앱 목록에서는 빼야 다음 재구성이 되살리지 않는다
+      return { content: `Not installed: ${names.join(', ')}\n${SYSTEM_PACKAGES_MARKER} removed=${names.join(',')}` }
     }
     const sim = await run(APT_GET, ['purge', '-s', '--', ...present], { env: aptEnv(tmpdir) })
     if (sim.code !== 0) return removeFail(`apt could not plan the removal: ${tail(sim.stdout + sim.stderr, 400)}`)
@@ -428,7 +440,7 @@ async function removeCore(names, deps = {}) {
     const left = (await queryInstalled(run, tmpdir, present)).map((p) => p.name)
     if (left.length > 0) return removeFail(`still installed after removal: ${left.join(', ')}`)
     recordRemoved(names)
-    return { content: `Removed ${present.join(', ')}. It will not be reinstalled when this workspace is rebuilt.` }
+    return { content: `Removed ${present.join(', ')}. It will not be reinstalled when this workspace is rebuilt.\n${SYSTEM_PACKAGES_MARKER} removed=${names.join(',')}` }
   } finally {
     if (!deps.tmpdir) { try { rmSync(tmpdir, { recursive: true, force: true }) } catch { /* 같음 */ } }
   }

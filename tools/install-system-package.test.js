@@ -89,6 +89,7 @@ describe('runInstallSystemPackage', () => {
     const r = await runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'video' }, {}, d)
     assert.equal(r.is_error, undefined, r.content)
     assert.match(r.content, /Installed ffmpeg 7:5\.1\.6-0\+deb12u1 \(\+1 dependencies\)/)
+    assert.match(r.content, /\n\[system-packages\] installed=ffmpeg$/)
     const install = f.calls.find((c) => c.args.includes('install') && c.args.includes('-y'))
     assert.deepEqual(install.args.slice(install.args.indexOf('--') + 1), ['libavutil57=7:5.1.6-0+deb12u1', 'ffmpeg=7:5.1.6-0+deb12u1'])
     for (const flag of ['--no-remove', '--no-upgrade', '--no-install-recommends']) assert.ok(install.args.includes(flag), flag)
@@ -257,6 +258,30 @@ describe('ensureApprovedSystemPackages(다시 깔기)', () => {
     const st = await ensureApprovedSystemPackages(['imagemagick'], d)
     assert.equal(st.status, 'failed')
     assert.equal(st.failed[0].name, 'imagemagick')
+  })
+})
+
+describe('결과 표지(앱이 승인 목록을 고친다)', () => {
+  it('이미 깔려 있던 이름은 installed= 에 넣지 않는다(보안 검토 15절)', async () => {
+    const { d } = deps([
+      ['apt-get install -s', { stdout: SIM_FFMPEG }],
+      ['apt-get install --print-uris', { stdout: "'u' a.deb 1000 x\n" }],
+      ['dpkg-query -W', { stdout: 'ffmpeg\t7:5.1.6-0+deb12u1\n' }],
+    ])
+    const r = await runInstallSystemPackage({ packages: ['ffmpeg', 'git'], reason: 'x' }, {}, d)
+    assert.match(r.content, /Already installed: git/)
+    assert.match(r.content, /\[system-packages\] installed=ffmpeg$/)
+  })
+  it('깔려 있지 않은 이름의 제거도 removed= 를 준다(앱 목록에서 빼야 되살아나지 않는다)', async () => {
+    const { d } = deps([], { basePackages: () => new Set(['git']) })
+    const r = await runRemoveSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)
+    assert.match(r.content, /\[system-packages\] removed=ffmpeg$/)
+  })
+  it('실패에는 표지가 없다', async () => {
+    const { d } = deps([], { basePackages: () => new Set(['git']) })
+    const r = await runRemoveSystemPackage({ packages: ['git'], reason: 'x' }, {}, d)
+    assert.equal(r.is_error, true)
+    assert.doesNotMatch(r.content, /\[system-packages\]/)
   })
 })
 
