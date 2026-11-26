@@ -11,7 +11,12 @@
  *  - 받을 크기 상한
  *  - 설치 전 policy-rc.d 가 101(서비스 시작 금지)인지 확인
  *  - 한 번에 하나(dpkg 잠금)
- * 결재는 handler.js evaluatePolicy 가 먼저 본다(전권 직원도 승인 목록 밖이면 결재). 이 파일은 실행만 한다.
+ * 결재는 handler.js evaluatePolicy 가 먼저 본다. 설치와 제거 모두 매번 결재다(대표 11-27 「매번 승인을 하자 … 제거도 동일해」).
+ * 이 파일은 실행만 한다.
+ *
+ * RemoveSystemPackage(0.43.0): 이 길로 깐 꾸러미만 지운다. 기본 이미지에 든 꾸러미(이미지가 구울 때 적은 목록)는 지우지 않고,
+ * 목록이 없으면 지우지 않는다. 지울 때 다른 꾸러미가 딸려 지워지면 거절한다(그것에 기대는 꾸러미가 있다는 뜻).
+ * 승인 목록에 없는 이름은 handler.js 가 결재 전에 막는다.
  */
 import { execFile } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
@@ -23,14 +28,31 @@ export const INSTALL_SYSTEM_PACKAGE_TOOL = Object.freeze({
   name: INSTALL_SYSTEM_PACKAGE_TOOL_NAME,
   description:
     'Install Debian/Ubuntu OS packages from the official repository (the shell cannot run apt-get; system folders are read-only). '
-    + 'Give package names only, no options or versions. A package the manager has not approved before needs approval. '
-    + 'Approved packages are reinstalled automatically when the workspace is rebuilt. '
+    + 'Give package names only, no options or versions. Every install request needs approval. '
+    + 'Installed packages are reinstalled automatically when the workspace is rebuilt. '
     + 'For Python packages use pip install (goes to your home folder) or a venv; for Node use npx or a local npm install.',
   input_schema: {
     type: 'object',
     properties: {
       packages: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 10, description: 'Debian package names, e.g. ["ffmpeg"]' },
       reason: { type: 'string', description: 'One sentence: what the work needs this for (shown to the approver)' },
+    },
+    required: ['packages', 'reason'],
+  },
+})
+
+export const REMOVE_SYSTEM_PACKAGE_TOOL_NAME = 'RemoveSystemPackage'
+
+export const REMOVE_SYSTEM_PACKAGE_TOOL = Object.freeze({
+  name: REMOVE_SYSTEM_PACKAGE_TOOL_NAME,
+  description:
+    'Remove OS packages that were installed with InstallSystemPackage. Packages that came with the workspace cannot be removed. '
+    + 'Every removal request needs approval. Removed packages are not reinstalled when the workspace is rebuilt.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      packages: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 10, description: 'Debian package names, e.g. ["ffmpeg"]' },
+      reason: { type: 'string', description: 'One sentence: why it is no longer needed (shown to the approver)' },
     },
     required: ['packages', 'reason'],
   },
@@ -87,8 +109,8 @@ export function parseSimulation(stdout) {
     if (m) { upgrades.push({ name: m[1], from: m[2], version: m[3] }); continue }
     m = line.match(/^Inst (\S+) \((\S+)/)
     if (m) { installs.push({ name: m[1].replace(/:\w+$/, ''), version: m[2] }); continue }
-    m = line.match(/^Remv (\S+)/)
-    if (m) removes.push(m[1])
+    m = line.match(/^(?:Remv|Purg) (\S+)/)
+    if (m) removes.push(m[1].replace(/:\w+$/, ''))
   }
   return { installs, upgrades, removes }
 }
@@ -130,6 +152,11 @@ const STATE_DIR = process.env.AGENT_RUNNER_STATE_DIR || '/workspace/.agent-runne
 export const SYSTEM_PACKAGES_FILE = () => path.join(STATE_DIR, 'system-packages.json')
 const APT_TMP_ROOT = () => path.join(STATE_DIR, 'apt-tmp')
 const TIMEOUT_MS = 300_000
+/**
+ * 기본 이미지에 든 꾸러미 이름(한 줄에 하나). 앱이 이미지를 구울 때 시스템 꾸러미를 깐 직후 적는다(daytona constants.ts SYSTEM_DEPS).
+ * /usr 아래라 감싼 셸은 고치지 못한다. 없으면(옛 이미지) 제거를 하지 않는다
+ */
+const BASE_PACKAGES_FILE = '/usr/share/daiops/base-packages.txt'
 
 /** @returns {Promise<{ code: number, stdout: string, stderr: string }>} */
 function defaultRun(file, args, { env, timeoutMs = TIMEOUT_MS } = {}) {
@@ -214,6 +241,27 @@ function recordInstalled(requested, installed) {
     writeFileSync(tmp, JSON.stringify(list, null, 2))
     renameSync(tmp, file)
   } catch { /* 보조 기록 */ }
+}
+
+/** 기록 파일에서 뺀다. 쓰기 실패는 제거 결과를 바꾸지 않는다 */
+function recordRemoved(names) {
+  try {
+    const file = SYSTEM_PACKAGES_FILE()
+    let list = []
+    try { list = JSON.parse(readFileSync(file, 'utf8')) } catch { return }
+    if (!Array.isArray(list)) return
+    const tmp = `${file}.${process.pid}.tmp`
+    writeFileSync(tmp, JSON.stringify(list.filter((p) => !names.includes(p?.name)), null, 2))
+    renameSync(tmp, file)
+  } catch { /* 보조 기록 */ }
+}
+
+/** @returns {Set<string> | null} 없거나 비었으면 null */
+function readBasePackages(file = BASE_PACKAGES_FILE) {
+  try {
+    const names = readFileSync(file, 'utf8').split('\n').map((l) => l.trim().replace(/:\w+$/, '')).filter(Boolean)
+    return names.length > 0 ? new Set(names) : null
+  } catch { return null }
 }
 
 /**
@@ -327,6 +375,62 @@ async function installCore(names, deps = {}) {
     } finally {
       if (!deps.tmpdir) { try { rmSync(tmpdir, { recursive: true, force: true }) } catch { /* 다음 회차가 덮어쓴다 */ } }
     }
+  }
+}
+
+/**
+ * @param {{ packages?: unknown, reason?: unknown }} input
+ * @param {object} [_ctx]
+ * @param {{ run?: typeof defaultRun, policyRcD?: () => Promise<number>, basePackages?: () => Set<string> | null }} [deps] 시험용
+ */
+export async function runRemoveSystemPackage(input, _ctx = {}, deps = {}) {
+  const v = validatePackageNames(input)
+  if (!v.ok) return removeFail(v.error)
+  return serialize(() => removeCore(v.names, deps))
+}
+
+const removeFail = (msg) => ({ content: `RemoveSystemPackage: ${msg}`, is_error: true })
+
+async function removeCore(names, deps = {}) {
+  const run = deps.run ?? defaultRun
+  const base = (deps.basePackages ?? readBasePackages)()
+  if (!base) return removeFail('this workspace image does not record which packages it came with, so nothing can be removed safely; it will be possible after the workspace is rebuilt')
+  const fromImage = names.filter((n) => base.has(n))
+  if (fromImage.length > 0) return removeFail(`these came with the workspace and cannot be removed: ${fromImage.join(', ')}`)
+  let tmpdir = deps.tmpdir
+  if (!tmpdir) {
+    mkdirSync(APT_TMP_ROOT(), { recursive: true })
+    tmpdir = mkdtempSync(path.join(APT_TMP_ROOT(), 'remove-'))
+  }
+  try {
+    const rc = deps.policyRcD ? await deps.policyRcD() : (existsSync(POLICY_RC_D) ? (await run(POLICY_RC_D, ['x', 'stop'], { env: aptEnv(tmpdir), timeoutMs: 10_000 })).code : -1)
+    if (rc !== 101) return removeFail('this workspace image cannot remove packages safely (policy-rc.d missing); ask the platform team')
+    const present = (await queryInstalled(run, tmpdir, names)).map((p) => p.name)
+    if (present.length === 0) {
+      recordRemoved(names)
+      return { content: `Not installed: ${names.join(', ')}` }
+    }
+    const sim = await run(APT_GET, ['purge', '-s', '--', ...present], { env: aptEnv(tmpdir) })
+    if (sim.code !== 0) return removeFail(`apt could not plan the removal: ${tail(sim.stdout + sim.stderr, 400)}`)
+    const { installs, upgrades, removes } = parseSimulation(sim.stdout)
+    if (installs.length > 0 || upgrades.length > 0) return removeFail('removing would install or upgrade other packages')
+    // 이름 밖의 꾸러미가 함께 지워지면 그것이 이 꾸러미에 기댄다는 뜻이다. 기본 이미지 꾸러미일 수 있어 거절한다
+    const extra = removes.filter((n) => !present.includes(n))
+    if (extra.length > 0) return removeFail(`other packages depend on these and would be removed too (${extra.slice(0, 8).join(', ')}); remove nothing`)
+    const hooks = deps.hooks ?? { snapshot: snapshotHooks, restore: restoreHooks }
+    const before = hooks.snapshot()
+    const res = await run(APT_GET, ['purge', '-y', '-qq', '--', ...present], { env: aptEnv(tmpdir) })
+    if (diffHooks(before, hooks.snapshot()).length > 0) {
+      hooks.restore(before)
+      return removeFail('the removal changed how apt or dpkg runs; those files were put back (the platform team has been notified)')
+    }
+    if (res.code !== 0) return removeFail(`apt-get failed (exit ${res.code}): ${tail(res.stdout + res.stderr)}`)
+    const left = (await queryInstalled(run, tmpdir, present)).map((p) => p.name)
+    if (left.length > 0) return removeFail(`still installed after removal: ${left.join(', ')}`)
+    recordRemoved(names)
+    return { content: `Removed ${present.join(', ')}. It will not be reinstalled when this workspace is rebuilt.` }
+  } finally {
+    if (!deps.tmpdir) { try { rmSync(tmpdir, { recursive: true, force: true }) } catch { /* 같음 */ } }
   }
 }
 

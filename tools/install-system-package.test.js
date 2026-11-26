@@ -8,8 +8,9 @@ process.env.AGENT_RUNNER_STATE_DIR = mkdtempSync(path.join(os.tmpdir(), 'isp-sta
 const {
   validatePackageNames, parseSimulation, sumDownloadBytes, aptEnv, isDeniedPackage,
   runInstallSystemPackage, SYSTEM_PACKAGES_FILE, MAX_DOWNLOAD_BYTES, previewInstallRequest, ensureApprovedSystemPackages, resetSystemPackagesStateForTest,
+  runRemoveSystemPackage,
 } = await import('./install-system-package.js')
-const { evaluateSystemPackageInstall } = await import('../handler.js')
+const { evaluateSystemPackageInstall, evaluateSystemPackageRemove } = await import('../handler.js')
 
 const SIM_FFMPEG = [
   'NOTE: This is only a simulation!',
@@ -261,27 +262,109 @@ describe('ensureApprovedSystemPackages(다시 깔기)', () => {
 
 describe('evaluateSystemPackageInstall(결재)', () => {
   const input = { packages: ['ffmpeg'], reason: 'video' }
-  it('승인 목록에 다 있으면 통과, 하나라도 없으면 결재', () => {
-    assert.equal(evaluateSystemPackageInstall({ approvedSystemPackages: ['ffmpeg'] }, input, true).kind, 'allow')
-    const r = evaluateSystemPackageInstall({ approvedSystemPackages: ['ffmpeg'] }, { packages: ['ffmpeg', 'imagemagick'], reason: 'x' }, true)
+  it('매번 결재. 전에 결재해 승인 목록에 있어도 다시 묻는다(대표 11-27)', () => {
+    const r = evaluateSystemPackageInstall({ approvedSystemPackages: ['ffmpeg'] }, input, true)
     assert.equal(r.kind, 'plan_request')
-    assert.match(r.commandSummary, /ffmpeg, imagemagick: x/)
+    assert.match(evaluateSystemPackageInstall({ approvedSystemPackages: [] }, { packages: ['ffmpeg', 'imagemagick'], reason: 'x' }, true).commandSummary, /ffmpeg, imagemagick: x/)
   })
-  it('전권 직원도 승인 목록 밖이면 결재(감싸기 밖 root 라 터미널보다 힘이 크다)', () => {
-    assert.equal(evaluateSystemPackageInstall({ security: 'full', approvedSystemPackages: [] }, input, true).kind, 'plan_request')
+  it('전권 직원도 결재(감싸기 밖 root 라 터미널보다 힘이 크다)', () => {
+    assert.equal(evaluateSystemPackageInstall({ security: 'full', approvedSystemPackages: ['ffmpeg'] }, input, true).kind, 'plan_request')
   })
   it('결재할 사람이 없으면 askFallback 과 무관하게 거절', () => {
-    assert.equal(evaluateSystemPackageInstall({ askFallback: 'allow', approvedSystemPackages: [] }, input, false).kind, 'deny')
+    assert.equal(evaluateSystemPackageInstall({ askFallback: 'allow', approvedSystemPackages: ['ffmpeg'] }, input, false).kind, 'deny')
   })
-  it('승인 목록 칸이 없으면(옛 클라우드) 결재 쪽', () => {
-    assert.equal(evaluateSystemPackageInstall({}, input, true).kind, 'plan_request')
+})
+
+describe('evaluateSystemPackageRemove(결재)', () => {
+  const input = { packages: ['ffmpeg'], reason: 'done' }
+  it('이 길로 깐 것(승인 목록)이면 매번 결재', () => {
+    const r = evaluateSystemPackageRemove({ approvedSystemPackages: ['ffmpeg'] }, input, true)
+    assert.equal(r.kind, 'plan_request')
+    assert.equal(r.toolName, 'RemoveSystemPackage')
+    assert.match(r.commandSummary, /ffmpeg: done/)
+  })
+  it('승인 목록 밖 이름(기본 이미지 꾸러미 등)은 결재로 올리지 않고 막는다', () => {
+    const r = evaluateSystemPackageRemove({ approvedSystemPackages: ['ffmpeg'] }, { packages: ['ffmpeg', 'git'], reason: 'x' }, true)
+    assert.equal(r.kind, 'deny')
+    assert.equal(r.reason, 'remove-not-installed-by-request')
+    assert.equal(evaluateSystemPackageRemove({}, input, true).kind, 'deny')
+  })
+  it('전권, askFallback 과 무관. 결재할 사람이 없으면 거절', () => {
+    assert.equal(evaluateSystemPackageRemove({ security: 'full', askFallback: 'allow', approvedSystemPackages: ['ffmpeg'] }, input, false).kind, 'deny')
+  })
+})
+
+describe('runRemoveSystemPackage', () => {
+  const base = () => new Set(['git', 'curl', 'libc6'])
+  const installedFfmpeg = 'ffmpeg\t7:5.1.6\tii \n'
+  it('이 길로 깐 꾸러미만 purge 하고 기록에서 뺀다', async () => {
+    const { f, d } = deps([
+      ['dpkg-query -W', { stdout: installedFfmpeg }],
+      ['apt-get purge -s', { stdout: 'Purg ffmpeg [7:5.1.6]\n' }],
+    ], { basePackages: base, hooks: { snapshot: () => new Map(), restore: () => {} } })
+    let n = 0
+    const run0 = d.run
+    d.run = async (file, args, opts) => {
+      // 지운 뒤 다시 물으면 없다
+      if (path.basename(file) === 'dpkg-query' && n++ > 0) return { code: 0, stdout: '', stderr: '' }
+      return run0(file, args, opts)
+    }
+    const r = await runRemoveSystemPackage({ packages: ['ffmpeg'], reason: 'done' }, {}, d)
+    assert.equal(r.is_error, undefined, r.content)
+    assert.match(r.content, /Removed ffmpeg/)
+    const purge = f.calls.find((c) => c.args[0] === 'purge' && c.args[1] === '-y')
+    assert.deepEqual(purge.args.slice(-2), ['--', 'ffmpeg'])
+  })
+  it('기본 이미지 꾸러미는 지우지 않는다', async () => {
+    const { f, d } = deps([], { basePackages: base })
+    const r = await runRemoveSystemPackage({ packages: ['git'], reason: 'x' }, {}, d)
+    assert.equal(r.is_error, true)
+    assert.match(r.content, /came with the workspace/)
+    assert.equal(f.calls.length, 0)
+  })
+  it('기본 이미지 목록이 없으면(옛 이미지) 아무것도 지우지 않는다', async () => {
+    const { f, d } = deps([], { basePackages: () => null })
+    const r = await runRemoveSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)
+    assert.equal(r.is_error, true)
+    assert.equal(f.calls.length, 0)
+  })
+  it('다른 꾸러미가 딸려 지워지면 거절(그것이 기댄다)', async () => {
+    const { f, d } = deps([
+      ['dpkg-query -W', { stdout: installedFfmpeg }],
+      ['apt-get purge -s', { stdout: 'Purg ffmpeg [1]\nPurg some-base-tool [2]\n' }],
+    ], { basePackages: base })
+    const r = await runRemoveSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)
+    assert.match(r.content, /depend on these/)
+    assert.equal(f.calls.some((c) => c.args[0] === 'purge' && c.args[1] === '-y'), false)
+  })
+  it('policy-rc.d 가 101 이 아니면 지우지 않는다', async () => {
+    const { d } = deps([], { basePackages: base, policyRcD: async () => 0 })
+    assert.match((await runRemoveSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)).content, /policy-rc\.d/)
+  })
+  it('지우는 동안 훅 자리가 바뀌면 되돌리고 알린다', async () => {
+    let snap = 0
+    let restored = false
+    const { d } = deps([
+      ['dpkg-query -W', { stdout: installedFfmpeg }],
+      ['apt-get purge -s', { stdout: 'Purg ffmpeg [1]\n' }],
+    ], { basePackages: base, hooks: { snapshot: () => new Map(snap++ === 0 ? [] : [['/etc/apt/apt.conf.d/99x', Buffer.from('x')]]), restore: () => { restored = true } } })
+    const r = await runRemoveSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)
+    assert.equal(r.is_error, true)
+    assert.equal(restored, true)
+  })
+  it('깔려 있지 않으면 아무것도 돌리지 않고 알린다', async () => {
+    const { f, d } = deps([], { basePackages: base })
+    const r = await runRemoveSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)
+    assert.match(r.content, /Not installed/)
+    assert.equal(f.calls.some((c) => c.args[0] === 'purge'), false)
   })
 })
 
 describe('노출', () => {
   it('클라우드가 승인 목록 칸을 보낼 때만 도구가 보인다', () => {
     const src = readFileSync(new URL('../handler.js', import.meta.url), 'utf8')
-    assert.match(src, /if \(Array\.isArray\(params\.policy\?\.approvedSystemPackages\)\) \{\n\s+SDK_BUILTIN_TOOLS\.push\(INSTALL_SYSTEM_PACKAGE_TOOL_NAME\)/)
+    assert.match(src, /if \(Array\.isArray\(params\.policy\?\.approvedSystemPackages\)\) \{\n\s+SDK_BUILTIN_TOOLS\.push\(INSTALL_SYSTEM_PACKAGE_TOOL_NAME, REMOVE_SYSTEM_PACKAGE_TOOL_NAME\)/)
+    assert.match(src, /if \(toolName === REMOVE_SYSTEM_PACKAGE_TOOL_NAME\) return evaluateSystemPackageRemove\(policy, input, hasUiChannel\)/)
     assert.match(src, /if \(toolName === INSTALL_SYSTEM_PACKAGE_TOOL_NAME\) return evaluateSystemPackageInstall\(policy, input, hasUiChannel\)/)
   })
 })

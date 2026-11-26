@@ -91,11 +91,11 @@ describe('sdkMessageToLLMEvents', () => {
 // ── SDK_BUILTIN_TOOLS 노출 ────────────────────────────────────────────
 
 describe('SDK_BUILTIN_TOOLS', () => {
-  it('로컬 실행 빌트인 9종 — 파일 6 + BashOutput/KillShell + InstallSystemPackage', () => {
+  it('로컬 실행 빌트인 10종 — 파일 6 + BashOutput/KillShell + Install/RemoveSystemPackage', () => {
     // SDK_BUILTIN_TOOLS = tools/index.js BUILTIN_TOOL_NAMES (로컬 실행기 보유 도구).
     // WebSearch/WebFetch는 Anthropic server tool이라 여기엔 없음(handler.js allowlist에만 추가).
     // InstallSystemPackage 는 실행기는 늘 있고, 노출은 handler.js 가 클라우드의 승인 목록 칸이 있을 때만 한다
-    const expected = new Set(['Read', 'Edit', 'Glob', 'Grep', 'Bash', 'Write', 'BashOutput', 'KillShell', 'InstallSystemPackage'])
+    const expected = new Set(['Read', 'Edit', 'Glob', 'Grep', 'Bash', 'Write', 'BashOutput', 'KillShell', 'InstallSystemPackage', 'RemoveSystemPackage'])
     const actual = new Set(SDK_BUILTIN_TOOLS)
     assert.equal(actual.size, expected.size)
     for (const name of expected) assert.ok(actual.has(name), `missing ${name}`)

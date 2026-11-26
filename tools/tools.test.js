@@ -637,8 +637,8 @@ describe('BashOutput / KillShell — 백그라운드 잡 제어', () => {
 // ── index.js 디스패처 ─────────────────────────────────────────────────
 
 describe('BUILTIN_TOOLS / runBuiltinTool / isBuiltinTool', () => {
-  it('BUILTIN_TOOLS는 9종 — 파일 6 + BashOutput/KillShell + InstallSystemPackage', () => {
-    assert.deepEqual([...BUILTIN_TOOL_NAMES], ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'BashOutput', 'KillShell', 'InstallSystemPackage'])
+  it('BUILTIN_TOOLS는 10종 — 파일 6 + BashOutput/KillShell + Install/RemoveSystemPackage', () => {
+    assert.deepEqual([...BUILTIN_TOOL_NAMES], ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'BashOutput', 'KillShell', 'InstallSystemPackage', 'RemoveSystemPackage'])
     for (const t of BUILTIN_TOOLS) {
       assert.ok(typeof t.name === 'string')
       assert.ok(typeof t.description === 'string')

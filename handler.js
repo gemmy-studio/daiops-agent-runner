@@ -13,7 +13,7 @@ import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './tools/request-secret.js'
 import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX, isRememberFailure, blockedRememberGuidance } from './tools/remember.js'
 import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps, readRuleTarget, formatRuleList } from './tools/memory-edit.js'
-import { INSTALL_SYSTEM_PACKAGE_TOOL_NAME, validatePackageNames, ensureApprovedSystemPackages } from './tools/install-system-package.js'
+import { INSTALL_SYSTEM_PACKAGE_TOOL_NAME, REMOVE_SYSTEM_PACKAGE_TOOL_NAME, validatePackageNames, ensureApprovedSystemPackages } from './tools/install-system-package.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { postTerminalIngest } from './ingest-client.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
@@ -987,20 +987,38 @@ function isSafeBinCall(head) {
   return true
 }
 
-/** 설치 요청 판정(위 evaluatePolicy 참조). 시험을 위해 따로 둔다 */
+/**
+ * 설치 요청 판정(위 evaluatePolicy 참조). 시험을 위해 따로 둔다.
+ * 매번 결재다. 전에 결재한 꾸러미라도 다시 묻는다(대표 11-27 「프로그램 설치 얘기니 매번 승인을 하자」). 0.42.x 는 승인 목록에
+ * 든 이름이면 통과시켰다. 승인 목록은 이제 「재구성 뒤 다시 깔 것」과 「지워도 되는 것」의 목록이다
+ */
 export function evaluateSystemPackageInstall(policy, input, hasUiChannel) {
   const summary = summarizeToolInput(INSTALL_SYSTEM_PACKAGE_TOOL_NAME, input)
   const v = validatePackageNames(input)
   if (!v.ok) return { kind: 'allow', reason: 'install-invalid-input' }
-  const approved = Array.isArray(policy?.approvedSystemPackages) ? policy.approvedSystemPackages : []
-  if (v.names.every((n) => approved.includes(n))) return { kind: 'allow', reason: 'install-approved-package' }
   if (!hasUiChannel) return { kind: 'deny', reason: 'install-needs-approval', toolName: INSTALL_SYSTEM_PACKAGE_TOOL_NAME, commandSummary: summary }
-  return { kind: 'plan_request', reason: 'install-new-package', toolName: INSTALL_SYSTEM_PACKAGE_TOOL_NAME, commandSummary: summary }
+  return { kind: 'plan_request', reason: 'install-package', toolName: INSTALL_SYSTEM_PACKAGE_TOOL_NAME, commandSummary: summary }
+}
+
+/**
+ * 제거 요청 판정. 설치와 같이 매번 결재(대표 11-27 「제거도 동일해」). 승인 목록(이 길로 깐 것)에 없는 이름은 결재로 올리지 않고
+ * 막는다. 기본 이미지 꾸러미를 결재 카드에 올려 사람이 실수로 누르게 하지 않으려는 것이다(이미지 목록 검사는 도구가 한 번 더 한다)
+ */
+export function evaluateSystemPackageRemove(policy, input, hasUiChannel) {
+  const summary = summarizeToolInput(REMOVE_SYSTEM_PACKAGE_TOOL_NAME, input)
+  const v = validatePackageNames(input)
+  if (!v.ok) return { kind: 'allow', reason: 'remove-invalid-input' }
+  const approved = Array.isArray(policy?.approvedSystemPackages) ? policy.approvedSystemPackages : []
+  if (!v.names.every((n) => approved.includes(n))) {
+    return { kind: 'deny', reason: 'remove-not-installed-by-request', toolName: REMOVE_SYSTEM_PACKAGE_TOOL_NAME, commandSummary: summary }
+  }
+  if (!hasUiChannel) return { kind: 'deny', reason: 'remove-needs-approval', toolName: REMOVE_SYSTEM_PACKAGE_TOOL_NAME, commandSummary: summary }
+  return { kind: 'plan_request', reason: 'remove-package', toolName: REMOVE_SYSTEM_PACKAGE_TOOL_NAME, commandSummary: summary }
 }
 
 function summarizeToolInput(toolName, input) {
   if (toolName === 'Bash') return String(input.command ?? '').slice(0, 200)
-  if (toolName === INSTALL_SYSTEM_PACKAGE_TOOL_NAME) {
+  if (toolName === INSTALL_SYSTEM_PACKAGE_TOOL_NAME || toolName === REMOVE_SYSTEM_PACKAGE_TOOL_NAME) {
     const names = Array.isArray(input?.packages) ? input.packages.map(String).join(', ') : ''
     return `${names}: ${String(input?.reason ?? '')}`.slice(0, 200)
   }
@@ -1122,6 +1140,12 @@ export const DENY_GUIDANCE_EN = {
     'Skill, instruction and persona files can only be changed through the skill tools (skill_create, skill_patch) or remember, revise and forget. Do not retry with another shell command. Use those tools, or report the change you wanted to make.',
   'repeat-failure':
     'The same call already failed repeatedly, so retrying it will not help. Change the approach, or report that it cannot be done here.',
+  'install-needs-approval':
+    'Installing OS packages needs approval and no approval channel is attached to this request. Retrying will not help. Ask the user to request it from the web chat.',
+  'remove-needs-approval':
+    'Removing OS packages needs approval and no approval channel is attached to this request. Retrying will not help. Ask the user to request it from the web chat.',
+  'remove-not-installed-by-request':
+    'Only packages installed with InstallSystemPackage can be removed; packages that came with the workspace stay. Do not retry. Report which package you wanted to remove.',
 }
 
 /** `protected-path` 중 경로 종류별 안내. 없으면 위 기본 문구(스킬 · 지시문 · 성격 파일)를 쓴다. */
@@ -1205,10 +1229,11 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel, toolMeta) 
     }
   }
 
-  // OS 꾸러미 설치(0.42.0): 감싸기 밖에서 root 로 도는 일이라 전권 직원의 터미널(감싸기 안)보다 힘이 크다. 그래서
-  // security 와 무관하게, 클라우드가 보낸 그 직원의 승인 목록에 다 들어 있을 때만 통과하고 나머지는 결재다.
-  // 결재할 사람이 없으면 거절(askFallback 을 따르지 않는다). 이름이 틀리면 도구가 아무것도 하지 않고 사유를 돌려준다
+  // OS 꾸러미 설치, 제거(0.42.0, 0.43.0): 감싸기 밖에서 root 로 도는 일이라 전권 직원의 터미널(감싸기 안)보다 힘이 크다. 그래서
+  // security 와 무관하게 매번 결재다. 결재할 사람이 없으면 거절(askFallback 을 따르지 않는다). 이름이 틀리면 도구가 아무것도
+  // 하지 않고 사유를 돌려준다. 누가 결재할 수 있는지는 클라우드가 정한다(결재 카드 권한)
   if (toolName === INSTALL_SYSTEM_PACKAGE_TOOL_NAME) return evaluateSystemPackageInstall(policy, input, hasUiChannel)
+  if (toolName === REMOVE_SYSTEM_PACKAGE_TOOL_NAME) return evaluateSystemPackageRemove(policy, input, hasUiChannel)
 
   // ── 게이트 지시 부재 시 fail-safe (P3) ──────────────────────────────────────────
   // cloud가 v2 핸드셰이크를 선언하지 않았다 = 이 러너가 아는 게이트 지시가 없다는 뜻.
@@ -1762,7 +1787,7 @@ export async function handleChat(rawParams, res, req) {
     // OS 꾸러미 설치 요청(0.42.0)은 클라우드가 승인 목록 칸을 보낼 때만 보인다. 옛 클라우드, 사무실판은 기록과 다시 깔기가
     // 없어 깔아도 재구성 때 사라지므로 아예 보이지 않게 한다
     if (Array.isArray(params.policy?.approvedSystemPackages)) {
-      SDK_BUILTIN_TOOLS.push(INSTALL_SYSTEM_PACKAGE_TOOL_NAME)
+      SDK_BUILTIN_TOOLS.push(INSTALL_SYSTEM_PACKAGE_TOOL_NAME, REMOVE_SYSTEM_PACKAGE_TOOL_NAME)
       // 승인 목록에서 빠진 꾸러미(재구성, 복직 뒤)를 뒤에서 다시 깐다. 턴을 기다리게 하지 않는다
       void ensureApprovedSystemPackages(params.policy.approvedSystemPackages).catch(() => {})
     }
