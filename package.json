@@ -1,6 +1,6 @@
 {
   "name": "@daiops/agent-runner",
-  "version": "0.41.2",
+  "version": "0.41.3",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
