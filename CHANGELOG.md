@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.41.4] - 2026-11-27
+
+> **배포 순서**: 순서 제약 없음(정책 스냅샷 v9 그대로). 0.41.3 은 따로 내지 않고 이 판에 함께 실린다.
+> 미리보기에서 `/health.toolSandbox.enabled` 와 selfCheck 의 `bwrapDir`, `etc` 가 blocked 인지 본 뒤 운영에 올린다.
+
+### Security
+- **감싼 셸에서 시스템 폴더를 읽기 전용으로 덮는다**(보안 검토 11-26 6-4 (1), 대표 「권장대로」 11-27). 감싼 셸이
+  `/usr/bin/bwrap` 을 바꿔치기해 다음 Bash 부터 감싸기를 벗어나던 길을 막는다. `/usr /bin /sbin /lib /lib64 /etc /opt`.
+  대가로 감싼 셸에서 `apt-get install`, `npm install -g` 가 안 된다(시스템 pip 는 `~/.local` 로 넘어가 되고, venv, npx 도 된다)
+- **부팅 점검에 bwrap 폴더, /etc 새 파일 쓰기 항목**(6-4 (2)). 둘이 막혔을 때만 감싸기를 켠다
+- **Write, Edit 가 `/opt/agent-runner`, `/workspace/.agent-runner` 에 쓰지 못한다**(6-4 (3)). 파일 도구는 감싸기를 거치지 않아
+  full 등급이 러너 코드를, 모든 등급이 잡 메타를 고칠 수 있었다
+
 ## [0.41.3] - 2026-11-26
 
 > **배포 순서**: 순서 제약 없음(정책 스냅샷 v9 그대로). bubblewrap 이 있는 새 스냅샷에서 부팅 점검이 실패하면 터미널이 멈추니,
