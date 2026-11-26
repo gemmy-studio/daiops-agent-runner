@@ -61,7 +61,8 @@ export const SYSTEM_READONLY_DIRS = ['/usr', '/bin', '/sbin', '/lib', '/lib64', 
  * apt, dpkg 가 감싸기 밖에서 root 로 읽는 상태 자리. 감싼 셸이 postinst 를 바꾸고 트리거를 더하면 밖에서 상관없는 꾸러미를
  * 깔 때 심은 것이 uid 0 으로 돌았다(보안 검토 11-27 12-1 probe15). 꾸민 목록, 받아 둔 .deb, debconf 답도 같은 자리다
  */
-export const PACKAGE_STATE_DIRS = ['/var/lib/dpkg', '/var/lib/apt/lists', '/var/cache/apt/archives', '/var/cache/debconf']
+// 0.42.0: /var/lib/apt, /var/cache/apt 를 통째로(목록 캐시 *.bin, extended_states 까지, 보안 검토 12-6 작은 지적)
+export const PACKAGE_STATE_DIRS = ['/var/lib/dpkg', '/var/lib/apt', '/var/cache/apt', '/var/cache/debconf']
 /**
  * 앱이 감싸기 밖(Daytona executeCommand)에서 python 으로 돌리는 스크립트와 그 재료를 올리는 폴더(skill-sync.ts, harness-seed.ts).
  * 감싼 셸이 여기 json.py 를 심거나 sync.py 를 올리기 직전 바꿔치면 감싸기 밖에서 실행됐다(보안 검토 11-27 10절 probe12).

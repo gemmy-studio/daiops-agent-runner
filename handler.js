@@ -13,6 +13,7 @@ import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './tools/request-secret.js'
 import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX, isRememberFailure, blockedRememberGuidance } from './tools/remember.js'
 import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps, readRuleTarget, formatRuleList } from './tools/memory-edit.js'
+import { INSTALL_SYSTEM_PACKAGE_TOOL_NAME, validatePackageNames } from './tools/install-system-package.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { postTerminalIngest } from './ingest-client.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
@@ -986,8 +987,23 @@ function isSafeBinCall(head) {
   return true
 }
 
+/** 설치 요청 판정(위 evaluatePolicy 참조). 시험을 위해 따로 둔다 */
+export function evaluateSystemPackageInstall(policy, input, hasUiChannel) {
+  const summary = summarizeToolInput(INSTALL_SYSTEM_PACKAGE_TOOL_NAME, input)
+  const v = validatePackageNames(input)
+  if (!v.ok) return { kind: 'allow', reason: 'install-invalid-input' }
+  const approved = Array.isArray(policy?.approvedSystemPackages) ? policy.approvedSystemPackages : []
+  if (v.names.every((n) => approved.includes(n))) return { kind: 'allow', reason: 'install-approved-package' }
+  if (!hasUiChannel) return { kind: 'deny', reason: 'install-needs-approval', toolName: INSTALL_SYSTEM_PACKAGE_TOOL_NAME, commandSummary: summary }
+  return { kind: 'plan_request', reason: 'install-new-package', toolName: INSTALL_SYSTEM_PACKAGE_TOOL_NAME, commandSummary: summary }
+}
+
 function summarizeToolInput(toolName, input) {
   if (toolName === 'Bash') return String(input.command ?? '').slice(0, 200)
+  if (toolName === INSTALL_SYSTEM_PACKAGE_TOOL_NAME) {
+    const names = Array.isArray(input?.packages) ? input.packages.map(String).join(', ') : ''
+    return `${names}: ${String(input?.reason ?? '')}`.slice(0, 200)
+  }
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
     return String(input.file_path ?? '').slice(0, 200)
   }
@@ -1188,6 +1204,11 @@ export function evaluatePolicy(policy, toolName, input, hasUiChannel, toolMeta) 
       return { kind: 'deny', reason: 'channel-deny', toolName, commandSummary: summarizeToolInput(toolName, input) }
     }
   }
+
+  // OS 꾸러미 설치(0.42.0): 감싸기 밖에서 root 로 도는 일이라 전권 직원의 터미널(감싸기 안)보다 힘이 크다. 그래서
+  // security 와 무관하게, 클라우드가 보낸 그 직원의 승인 목록에 다 들어 있을 때만 통과하고 나머지는 결재다.
+  // 결재할 사람이 없으면 거절(askFallback 을 따르지 않는다). 이름이 틀리면 도구가 아무것도 하지 않고 사유를 돌려준다
+  if (toolName === INSTALL_SYSTEM_PACKAGE_TOOL_NAME) return evaluateSystemPackageInstall(policy, input, hasUiChannel)
 
   // ── 게이트 지시 부재 시 fail-safe (P3) ──────────────────────────────────────────
   // cloud가 v2 핸드셰이크를 선언하지 않았다 = 이 러너가 아는 게이트 지시가 없다는 뜻.
@@ -1738,6 +1759,9 @@ export async function handleChat(rawParams, res, req) {
     // 안 타므로, allowedTools 목록에서 직접 빼야 request tools[] 자동 등록을 막을 수 있다. MCP 위키 도구
     // 노출(availability) 복원 로직은 resolveAllowedTools에 위치(테스트 seam). 자세한 근거는 그 함수 doc 참조.
     const SDK_BUILTIN_TOOLS = ['Read', 'Edit', 'Glob', 'Grep', 'Bash', 'Write', 'BashOutput', 'KillShell', 'WebSearch', 'WebFetch']
+    // OS 꾸러미 설치 요청(0.42.0)은 클라우드가 승인 목록 칸을 보낼 때만 보인다. 옛 클라우드, 사무실판은 기록과 다시 깔기가
+    // 없어 깔아도 재구성 때 사라지므로 아예 보이지 않게 한다
+    if (Array.isArray(params.policy?.approvedSystemPackages)) SDK_BUILTIN_TOOLS.push(INSTALL_SYSTEM_PACKAGE_TOOL_NAME)
     const userTools = Array.isArray(params.tools) && params.tools.length > 0
       ? params.tools
       : []

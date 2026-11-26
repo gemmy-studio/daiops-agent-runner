@@ -18,6 +18,7 @@ import { GREP_TOOL, runGrep } from './grep.js'
 import { BASH_TOOL, runBash } from './bash.js'
 import { BASH_OUTPUT_TOOL, runBashOutput } from './bash-output.js'
 import { KILL_SHELL_TOOL, runKillShell } from './kill-shell.js'
+import { INSTALL_SYSTEM_PACKAGE_TOOL, runInstallSystemPackage } from './install-system-package.js'
 
 /** Anthropic 호환 tool 정의 배열 (input_schema 포함). */
 export const BUILTIN_TOOLS = Object.freeze([
@@ -29,6 +30,7 @@ export const BUILTIN_TOOLS = Object.freeze([
   BASH_TOOL,
   BASH_OUTPUT_TOOL,
   KILL_SHELL_TOOL,
+  INSTALL_SYSTEM_PACKAGE_TOOL,
 ])
 
 /** 빌트인 도구 이름 집합 — handler.js의 SDK_BUILTIN_TOOLS와 일치. */
@@ -44,6 +46,7 @@ const RUNNERS = {
   Bash: runBash,
   BashOutput: runBashOutput,
   KillShell: runKillShell,
+  InstallSystemPackage: runInstallSystemPackage,
 }
 
 /**
