@@ -31,6 +31,12 @@
  * 통과하지 못하면 지금처럼 감싸지 않고 돈다(조용한 실패를 막으려고 사유를 함께 싣는다). 통과 못 할 때 명령을
  * 막을지(안전 쪽)는 대표 결정을 기다린다. `AGENT_RUNNER_TOOL_SANDBOX=off` 로 끌 수 있다.
  *
+ * ## 새 /proc 를 못 붙이는 환경
+ *
+ * Daytona 미리보기(11-26)는 bwrap 의 `--proc /proc` 를 EINVAL 로 거절했다. Codex 처럼 그 문구면 `--proc` 없이 다시
+ * 점검한다. 그때 감싼 셸은 `--bind / /` 로 따라온 바깥 /proc 를 보아 러너의 번호, 명령줄은 보이지만, 메모리와 환경 변수는
+ * user namespace 밖이라 읽히지 않고(ptrace 권한), 신호는 pid namespace 가 달라 닿지 않는다. 이 둘을 점검에 넣었다.
+ *
  * ## 알려진 한계
  *
  *  - 없는 보호 **파일**(예: 아직 없는 persona_overrides.yaml)은 덮을 자리가 없어 감싼 셸이 새로 만들 수 있다.
@@ -50,6 +56,8 @@ const JOBS_DIR = resolveJobsDir
 const state = {
   mode: 'auto',
   enabled: false,
+  /** 새 /proc 를 붙이는가. 붙이지 못하는 환경(11-26 Daytona 미리보기: EINVAL)에서는 false 로 다시 점검한다 */
+  mountProc: true,
   bwrap: null,
   selfCheck: null,
   reason: 'not initialized',
@@ -60,13 +68,14 @@ let initialized = false
 /**
  * 감싸기 인자. `background` 는 러너가 다시 떠도 살아야 해 `--die-with-parent` 를 붙이지 않는다
  * (백그라운드 잡은 keepalive 로 러너보다 오래 산다. 끝낼 때는 KillShell 이 프로세스 그룹에 신호를 보낸다).
- * @param {{ protectedPaths?: string[], background?: boolean }} [opts]
+ * `mountProc` 가 false 면 새 /proc 를 붙이지 않고 `--bind / /` 로 따라온 바깥 /proc 를 그대로 쓴다(아래 initToolSandbox).
+ * @param {{ protectedPaths?: string[], background?: boolean, mountProc?: boolean }} [opts]
  */
-export function buildSandboxArgs({ protectedPaths = [], background = false } = {}) {
+export function buildSandboxArgs({ protectedPaths = [], background = false, mountProc = state.mountProc } = {}) {
   const args = [
     '--bind', '/', '/',
     '--dev', '/dev',
-    '--proc', '/proc',
+    ...(mountProc ? ['--proc', '/proc'] : []),
     '--unshare-user', '--uid', '0', '--gid', '0',
     '--unshare-pid',
     '--cap-drop', 'ALL',
@@ -118,7 +127,7 @@ function ensureProtectedDirs(protectedPaths) {
  * @param {string} bwrap
  * @param {{ spawn?: typeof spawnSync, protectedDir?: string, runnerPid?: number }} [deps]
  */
-export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/workspace/.daiops/skills', runnerPid = process.pid, jobsMetaDir = resolveJobsMetaDir() } = {}) {
+export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/workspace/.daiops/skills', runnerPid = process.pid, jobsMetaDir = resolveJobsMetaDir(), mountProc = state.mountProc } = {}) {
   const tag = `.daiops-sandbox-selfcheck-${process.pid}`
   const mustFail = [
     ['runner', `/opt/agent-runner/${tag}`],
@@ -139,11 +148,16 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
     ...(checkParent ? [`mv '${parent}' '${moved}' 2>/dev/null && { mv '${moved}' '${parent}'; echo "parentMove=done"; } || echo "parentMove=blocked"`] : []),
     // 새 pid namespace 의 번호는 1부터라 러너 번호가 작으면 겹칠 수 있다. 10 넘을 때만 본다
     runnerPid > 10 ? `kill -0 ${runnerPid} 2>/dev/null && echo "runnerPid=visible" || echo "runnerPid=hidden"` : 'echo "runnerPid=skipped"',
+    // 바깥 /proc 를 쓰면 러너의 /proc/<pid> 가 보인다. 메모리, 환경 변수는 user namespace 밖이라 읽히지 않아야 한다
+    ...(!mountProc && runnerPid > 10 ? [
+      `head -c 1 /proc/${runnerPid}/mem >/dev/null 2>&1 && echo "runnerMem=read" || echo "runnerMem=blocked"`,
+      `head -c 1 /proc/${runnerPid}/environ >/dev/null 2>&1 && echo "runnerEnv=read" || echo "runnerEnv=blocked"`,
+    ] : []),
   ]
   const result = {}
   let leaked = []
   try {
-    const r = spawn(bwrap, [...buildSandboxArgs({ protectedPaths: [`${protectedDir}/`] }), '/bin/sh', '-c', lines.join('\n')], {
+    const r = spawn(bwrap, [...buildSandboxArgs({ protectedPaths: [`${protectedDir}/`], mountProc }), '/bin/sh', '-c', lines.join('\n')], {
       encoding: 'utf8',
       timeout: 10_000,
     })
@@ -171,6 +185,7 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
     umount: 'blocked',
     ...(checkParent ? { parentMove: 'blocked' } : {}),
     ...(runnerPid > 10 ? { runnerPid: 'hidden' } : {}),
+    ...(!mountProc && runnerPid > 10 ? { runnerMem: 'blocked', runnerEnv: 'blocked' } : {}),
   }
   const wrong = Object.entries(expected).filter(([k, v]) => result[k] !== v).map(([k, v]) => `${k}=${result[k] ?? '없음'}(기대 ${v})`)
   if (leaked.length > 0) wrong.push(`새어 나감: ${leaked.join(', ')}`)
@@ -198,7 +213,14 @@ export function initToolSandbox(deps = {}) {
     return state
   }
   ensureProtectedDirs(['/workspace/.daiops/skills/'])
-  const check = runSelfCheck(state.bwrap, { spawn: deps.spawn })
+  let check = runSelfCheck(state.bwrap, { spawn: deps.spawn, mountProc: true })
+  // 컨테이너가 새 /proc 붙이기를 막는 환경이 있다(11-26 Daytona 미리보기 「Can't mount proc on /newroot/proc: Invalid
+  // argument」). Codex linux-sandbox 도 같은 문구를 보면 --proc 없이 다시 한다(linux_run_main.rs is_proc_mount_failure).
+  // 그때는 바깥 /proc 가 보이므로 러너 메모리, 환경 변수가 읽히지 않는지까지 점검해야 켠다
+  if (!check.pass && isProcMountFailure(check.reason)) {
+    state.mountProc = false
+    check = runSelfCheck(state.bwrap, { spawn: deps.spawn, mountProc: false })
+  }
   state.selfCheck = check.result
   if (!check.pass) {
     state.reason = check.reason
@@ -207,6 +229,13 @@ export function initToolSandbox(deps = {}) {
   state.enabled = true
   state.reason = null
   return state
+}
+
+/** bwrap 이 새 /proc 를 못 붙였다는 문구인가(Codex 와 같은 판정) */
+export function isProcMountFailure(reason) {
+  const t = String(reason ?? '')
+  return t.includes("Can't mount proc") && t.includes('/newroot/proc')
+    && (t.includes('Invalid argument') || t.includes('Operation not permitted') || t.includes('Permission denied'))
 }
 
 /**
@@ -229,5 +258,5 @@ export function toolSandboxState() {
 
 export function _resetToolSandboxForTest() {
   initialized = false
-  Object.assign(state, { mode: 'auto', enabled: false, bwrap: null, selfCheck: null, reason: 'not initialized', wrapped: 0 })
+  Object.assign(state, { mode: 'auto', enabled: false, mountProc: true, bwrap: null, selfCheck: null, reason: 'not initialized', wrapped: 0 })
 }

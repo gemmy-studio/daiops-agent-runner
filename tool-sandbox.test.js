@@ -14,6 +14,7 @@ import {
   toolSandboxState,
   RUNNER_READONLY_DIRS,
   ancestorsOf,
+  isProcMountFailure,
   _resetToolSandboxForTest,
 } from './tool-sandbox.js'
 
@@ -169,6 +170,42 @@ describe('initToolSandbox, wrapToolSpawn', () => {
     assert.deepEqual(w.args.slice(dash + 1), ['/bin/bash', '-c', 'echo hi'])
     assert.ok(w.args.join(' ').includes('/workspace/schema/persona.yaml'))
     assert.equal(toolSandboxState().wrapped, 1)
+  })
+
+  // 11-26 Daytona 미리보기: 새 /proc 를 못 붙여 감싸기가 꺼졌다. Codex 처럼 --proc 없이 다시 점검한다
+  const PROC_FAIL = "bwrap: Can't mount proc on /newroot/proc: Invalid argument"
+  it('새 /proc 를 못 붙이면 --proc 없이 다시 점검하고, 러너 메모리, 환경 변수 읽기 막힘까지 봐야 켠다', () => {
+    const calls = []
+    const spawn = (file, args) => {
+      calls.push(args)
+      if (args.includes('--proc')) return { status: 1, stdout: '', stderr: PROC_FAIL }
+      const lines = [...PASS_LINES, 'runnerMem=blocked', 'runnerEnv=blocked'].map((l) => (l.startsWith('runnerPid=') && process.pid <= 10 ? 'runnerPid=skipped' : l))
+      return { status: 0, stdout: lines.join('\n'), stderr: '' }
+    }
+    const s = initToolSandbox({ exists: (p) => p === '/usr/bin/bwrap', spawn })
+    assert.equal(s.enabled, true, s.reason)
+    assert.equal(s.mountProc, false)
+    assert.equal(calls.length, 2)
+    if (process.pid > 10) assert.match(calls[1].at(-1), /\/proc\/\d+\/environ/)
+    assert.ok(!wrapToolSpawn(plain).args.includes('--proc'), '감쌀 때도 --proc 없이')
+  })
+
+  it('--proc 없이 다시 한 점검에서 러너 환경 변수가 읽히면 켜지 않는다', { skip: process.pid <= 10 }, () => {
+    const spawn = (file, args) => args.includes('--proc')
+      ? { status: 1, stdout: '', stderr: PROC_FAIL }
+      : { status: 0, stdout: [...PASS_LINES, 'runnerMem=blocked', 'runnerEnv=read'].join('\n'), stderr: '' }
+    const s = initToolSandbox({ exists: () => true, spawn })
+    assert.equal(s.enabled, false)
+    assert.match(s.reason, /runnerEnv=read/)
+  })
+
+  it('/proc 문구가 아닌 실패는 다시 하지 않는다', () => {
+    let n = 0
+    const s = initToolSandbox({ exists: () => true, spawn: () => { n++; return { status: 1, stdout: '', stderr: 'bwrap: pivot_root: Operation not permitted' } } })
+    assert.equal(s.enabled, false)
+    assert.equal(n, 1)
+    assert.equal(isProcMountFailure('감싼 셸 실행 실패: exit 1 ' + PROC_FAIL), true)
+    assert.equal(isProcMountFailure('bwrap: pivot_root: Operation not permitted'), false)
   })
 
   it('AGENT_RUNNER_TOOL_SANDBOX=off 면 점검도 하지 않는다', () => {
