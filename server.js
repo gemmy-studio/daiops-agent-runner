@@ -23,6 +23,7 @@ import { sweepOrphanedBuffers } from './event-buffer.js'
 import { admissionStats } from './tool-cpu-lane.js'
 import { initToolCgroup, toolCgroupState } from './tool-cgroup.js'
 import { initToolSandbox, toolSandboxState } from './tool-sandbox.js'
+import { previewInstallRequest } from './tools/install-system-package.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -454,6 +455,19 @@ const server = createServer(async (req, res) => {
 
   // POST /v1/secrets/refresh — cloud가 시크릿 변경 시 호출 → 재-materialize + 프록시 맵/파일 갱신.
   // (syncSecretsToSandbox가 호출. 프록시가 다음 요청부터 새 값/allowed_hosts 반영.)
+  // POST /v1/system-packages/preview — 설치 요청 결재 카드에 딸려 오는 꾸러미와 받을 크기를 보인다(0.42.0).
+  // 위 verifyAuth 를 지난 뒤다. 바꾸는 일이 없고 승인도 아니다. 설치와 같은 줄에서 돈다(dpkg 잠금)
+  if (req.method === 'POST' && url.pathname === '/v1/system-packages/preview') {
+    try {
+      const body = JSON.parse(await parseBody(req))
+      sendJson(res, 200, await previewInstallRequest({ packages: body?.packages }))
+    } catch (err) {
+      console.error('[agent-runner] /v1/system-packages/preview error', err instanceof Error ? err.message : err)
+      if (!res.headersSent) sendJson(res, 400, { ok: false, error: 'bad request' })
+    }
+    return
+  }
+
   if (req.method === 'POST' && url.pathname === '/v1/secrets/refresh') {
     if (!verifyAuth(req)) {
       sendJson(res, 401, { error: 'Unauthorized' })

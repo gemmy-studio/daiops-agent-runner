@@ -47,9 +47,13 @@ export const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
  * 이미 깔린 것의 판 바뀜은 `-s` 의 올림 거절이 막는다. 여기는 「새로 들어오면 안 되는 것」만 맡는다
  */
 const DENIED_PATTERNS = [
-  /^bubblewrap$/, /^apt($|-)/, /^dpkg($|-)/, /^libc6($|-)/, /^libc-bin$/, /^nodejs$/, /^node-/, /^python3(\.\d+)?(-minimal)?$/,
+  /^bubblewrap$/, /^apt$/, /^apt-utils$/, /^dpkg$/, /^libc6$/, /^libc-bin$/, /^nodejs$/, /^python3(\.\d+)?(-minimal)?$/,
   /^bash$/, /^coreutils$/, /^openssl$/, /^login$/, /^passwd$/, /^sudo$/, /^util-linux$/,
   /^systemd/, /^init($|-)/, /^sysvinit/, /^libpam-/, /^snoopy$/, /^linux-image-/, /^apparmor/,
+  // apt, dpkg 훅을 까는 꾸러미. 깔리면 그 뒤 모든 apt 실행 때 감싸기 밖 root 로 돈다. needrestart 는 도는 프로세스의
+  // 환경 변수로 인터프리터를 띄워 root 상승 CVE(CVE-2024-48990 등)가 났고 감싼 셸 프로세스가 그 입력이 된다(보안 검토 12-7)
+  /^needrestart$/, /^apt-listchanges$/, /^apt-listbugs$/, /^etckeeper$/, /^unattended-upgrades$/, /^debsums$/,
+  /^apt-config-/, /^apticron/, /^molly-guard$/,
 ]
 export const isDeniedPackage = (name) => DENIED_PATTERNS.some((re) => re.test(name))
 
@@ -113,6 +117,8 @@ const APT_GET = '/usr/bin/apt-get'
 const DPKG_QUERY = '/usr/bin/dpkg-query'
 const POLICY_RC_D = '/usr/sbin/policy-rc.d'
 const APT_LISTS = '/var/lib/apt/lists'
+/** 설치 뒤 바뀌면 안 되는 곳. 훅이 들어오면 다음 apt 실행 때 감싸기 밖 root 로 돈다(보안 검토 12-7). 거절 목록이 1차, 이것이 2차 */
+export const HOOK_PATHS = ['/etc/apt/apt.conf.d', '/etc/dpkg/dpkg.cfg.d', '/etc/ld.so.preload']
 /** 감싼 셸이 못 쓰는 러너 상태 아래(RUNNER_READONLY_DIRS). 설치 기록과 임시 폴더 */
 const STATE_DIR = process.env.AGENT_RUNNER_STATE_DIR || '/workspace/.agent-runner'
 export const SYSTEM_PACKAGES_FILE = () => path.join(STATE_DIR, 'system-packages.json')
@@ -139,6 +145,24 @@ function serialize(fn) {
 
 const tail = (s, n = 600) => String(s).trim().slice(-n)
 const fail = (msg) => ({ content: `InstallSystemPackage: ${msg}`, is_error: true })
+
+/** 훅 자리의 지문(파일 이름, 크기, 내용). 디렉터리는 한 단계만 본다(apt.conf.d, dpkg.cfg.d 는 평평하다) */
+export function hookFingerprint(paths = HOOK_PATHS) {
+  const parts = []
+  for (const p of paths) {
+    let entries
+    try { entries = readdirSync(p).sort() } catch {
+      try { parts.push(`${p}=${readFileSync(p, 'utf8')}`) } catch { parts.push(`${p}=<없음>`) }
+      continue
+    }
+    for (const name of entries) {
+      let body = ''
+      try { body = readFileSync(path.join(p, name), 'utf8') } catch { body = '<읽지 못함>' }
+      parts.push(`${p}/${name}=${body}`)
+    }
+  }
+  return parts.join('\n')
+}
 
 /** 기록 파일에 더한다(정본은 앱 agent_config, 이것은 보조). 쓰기 실패는 설치 결과를 바꾸지 않는다 */
 function recordInstalled(requested, installed) {
@@ -185,11 +209,34 @@ export async function previewInstall(names, deps = {}) {
   if (denied.length > 0) return { ok: false, error: `these would come in as dependencies and are not allowed: ${denied.join(', ')}` }
   if (installs.length === 0) return { ok: true, installs: [], downloadBytes: 0 }
   const uris = await run(APT_GET, ['install', '--print-uris', '-qq', '--no-install-recommends', '--', ...names], { env })
-  const downloadBytes = uris.code === 0 ? sumDownloadBytes(uris.stdout) : 0
+  // 크기를 못 재면 거절한다. 0 바이트로 보면 상한을 그냥 지난다(보안 검토 12-7 권장)
+  if (uris.code !== 0) return { ok: false, error: `download size could not be measured: ${tail(uris.stdout + uris.stderr, 300)}` }
+  const downloadBytes = sumDownloadBytes(uris.stdout)
   if (downloadBytes > MAX_DOWNLOAD_BYTES) {
     return { ok: false, error: `download is ${Math.round(downloadBytes / 1024 / 1024)} MB, over the ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB limit` }
   }
   return { ok: true, installs, downloadBytes }
+}
+
+/**
+ * 결재 카드용 미리 보기(러너 엔드포인트). 같은 이름 검사, 설치 줄 안에서 돈다. 미리 보기는 승인이 아니다(보안 검토 12-7 물음 4)
+ * @returns {Promise<{ ok: true, installs: {name: string, version: string}[], downloadBytes: number } | { ok: false, error: string }>}
+ */
+export function previewInstallRequest(input, deps = {}) {
+  const v = validatePackageNames(input)
+  if (!v.ok) return Promise.resolve({ ok: false, error: v.error })
+  return serialize(async () => {
+    let tmpdir = deps.tmpdir
+    if (!tmpdir) {
+      mkdirSync(APT_TMP_ROOT(), { recursive: true })
+      tmpdir = mkdtempSync(path.join(APT_TMP_ROOT(), 'preview-'))
+    }
+    try {
+      return await previewInstall(v.names, { ...deps, tmpdir })
+    } finally {
+      if (!deps.tmpdir) { try { rmSync(tmpdir, { recursive: true, force: true }) } catch { /* 같음 */ } }
+    }
+  })
 }
 
 /**
@@ -218,7 +265,15 @@ export async function runInstallSystemPackage(input, _ctx = {}, deps = {}) {
         return { content: `Already installed: ${v.names.join(', ')}` }
       }
       const pinned = preview.installs.map((p) => `${p.name}=${p.version}`)
+      const fingerprint = deps.hookFingerprint ?? hookFingerprint
+      const before = fingerprint()
       const res = await run(APT_GET, ['install', '-y', '-qq', '--no-install-recommends', '--no-remove', '--no-upgrade', '--', ...pinned], { env: aptEnv(tmpdir) })
+      if (fingerprint() !== before) {
+        // 거절 목록을 지나 훅을 깐 꾸러미. 이번에 깐 것을 지운다(정확히 무엇이 훅을 넣었는지는 따지지 않는다)
+        await run(APT_GET, ['purge', '-y', '-qq', '--', ...preview.installs.map((p) => p.name)], { env: aptEnv(tmpdir) })
+        const after = fingerprint()
+        return fail(`these packages change how apt or dpkg runs and were removed${after !== before ? ' (removal was incomplete; the platform team has been notified)' : ''}`)
+      }
       if (res.code !== 0) return fail(`apt-get failed (exit ${res.code}): ${tail(res.stdout + res.stderr)}`)
       const installed = await queryInstalled(run, tmpdir, v.names)
       recordInstalled(v.names, installed)

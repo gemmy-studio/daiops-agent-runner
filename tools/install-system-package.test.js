@@ -7,7 +7,7 @@ import path from 'node:path'
 process.env.AGENT_RUNNER_STATE_DIR = mkdtempSync(path.join(os.tmpdir(), 'isp-state-'))
 const {
   validatePackageNames, parseSimulation, sumDownloadBytes, aptEnv, isDeniedPackage,
-  runInstallSystemPackage, SYSTEM_PACKAGES_FILE, MAX_DOWNLOAD_BYTES,
+  runInstallSystemPackage, SYSTEM_PACKAGES_FILE, MAX_DOWNLOAD_BYTES, previewInstallRequest,
 } = await import('./install-system-package.js')
 const { evaluateSystemPackageInstall } = await import('../handler.js')
 
@@ -49,6 +49,11 @@ describe('validatePackageNames', () => {
       assert.equal(isDeniedPackage(n), true, n)
     }
     for (const n of ['ffmpeg', 'python3-numpy', 'libpq-dev', 'imagemagick', 'aptitude-doc-en']) assert.equal(isDeniedPackage(n), false, n)
+  })
+
+  it('apt, dpkg 훅을 까는 꾸러미는 거절(12-7), 보안 이유 없는 이웃은 막지 않는다(dpkg-dev, node-*)', () => {
+    for (const n of ['needrestart', 'apt-listchanges', 'apt-listbugs', 'etckeeper', 'unattended-upgrades', 'debsums']) assert.equal(isDeniedPackage(n), true, n)
+    for (const n of ['dpkg-dev', 'build-essential', 'node-lodash', 'apt-transport-https']) assert.equal(isDeniedPackage(n), false, n)
   })
 })
 
@@ -112,6 +117,28 @@ describe('runInstallSystemPackage', () => {
     assert.match((await runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)).content, /dependencies and are not allowed: systemd/)
   })
 
+  it('크기를 못 재면(--print-uris 실패) 거절(12-7)', async () => {
+    const { f, d } = deps([
+      ['apt-get install -s', { stdout: SIM_FFMPEG }],
+      ['apt-get install --print-uris', { code: 100, stdout: 'E: x' }],
+    ])
+    assert.match((await runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)).content, /download size could not be measured/)
+    assert.ok(!f.calls.some((c) => c.args.includes('-y')))
+  })
+
+  it('설치가 apt, dpkg 훅 자리를 바꾸면 이번에 깐 것을 지우고 실패(12-7)', async () => {
+    let n = 0
+    const { f, d } = deps([
+      ['apt-get install -s', { stdout: SIM_FFMPEG }],
+      ['apt-get install --print-uris', { stdout: "'u' a.deb 10 x\n" }],
+    ], { hookFingerprint: () => (f.calls.some((c) => c.args.includes('-y') && c.args[0] === 'install') && !f.calls.some((c) => c.args[0] === 'purge') ? `changed${++n}` : 'same') })
+    const r = await runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)
+    assert.equal(r.is_error, true)
+    assert.match(r.content, /change how apt or dpkg runs and were removed$/)
+    const purge = f.calls.find((c) => c.args[0] === 'purge')
+    assert.deepEqual(purge.args.slice(purge.args.indexOf('--') + 1), ['libavutil57', 'ffmpeg'])
+  })
+
   it('받을 크기 상한', async () => {
     const { d } = deps([
       ['apt-get install -s', { stdout: SIM_FFMPEG }],
@@ -150,6 +177,26 @@ describe('runInstallSystemPackage', () => {
     const d = { run, hasLists: () => true, policyRcD: async () => 101, tmpdir: '/x' }
     await Promise.all([1, 2, 3].map(() => runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)))
     assert.equal(maxActive, 1)
+  })
+})
+
+describe('previewInstallRequest(결재 카드 미리 보기)', () => {
+  it('같은 이름 검사를 거치고, 바꾸는 명령은 부르지 않는다', async () => {
+    const { f, d } = deps([
+      ['apt-get install -s', { stdout: SIM_FFMPEG }],
+      ['apt-get install --print-uris', { stdout: "'u' a.deb 1234 x\n" }],
+    ])
+    assert.deepEqual(await previewInstallRequest({ packages: ['-o'] }, d), { ok: false, error: "'-o' is not a package name (names only, no options, versions or paths)" })
+    const r = await previewInstallRequest({ packages: ['ffmpeg'] }, d)
+    assert.deepEqual(r, { ok: true, installs: [{ name: 'libavutil57', version: '7:5.1.6-0+deb12u1' }, { name: 'ffmpeg', version: '7:5.1.6-0+deb12u1' }], downloadBytes: 1234 })
+    assert.ok(!f.calls.some((c) => c.args.includes('-y') || c.args[0] === 'purge'))
+  })
+
+  it('러너 엔드포인트는 인증 뒤에 있다', () => {
+    const src = readFileSync(new URL('../server.js', import.meta.url), 'utf8')
+    const auth = src.indexOf('if (!verifyAuth(req)) {')
+    const route = src.indexOf("url.pathname === '/v1/system-packages/preview'")
+    assert.ok(auth > 0 && route > auth)
   })
 })
 
