@@ -14,7 +14,9 @@
   `~/.profile`, `~/.local` 의 `.pth` 를 써서 감싸기 밖 `bash -lc`, `python3` 이 실행하던 길을 막는다. `pip --user` 는 이제
   `/workspace/.home/.local` 로 가서 재구성 백업에 실린다. 이전에 `/root/.local` 에 깔린 것은 감싼 셸에서 보이지 않는다
 - **앱 스크립트 폴더(`.daiops/.harness-sync`, `.harness-seed`)를 감싼 셸에서 읽기 전용, 파일 도구 거절**. 감쌀 때마다 미리 만든다
-- 부팅 점검에 `rootHome`, `appStaging`(쓰기 blocked), `home`(moved) 항목
+- **맨 위 `/node_modules` 를 부팅 때 빈 폴더로 만들어 감싼 셸에서 읽기 전용**(11절). 감싸기 밖 node(/opt 아래 스크립트)가
+  번들에 없는 모듈을 찾아 올라가는 마지막 자리라, 감싼 셸이 심은 모듈이 실행될 수 있었다
+- 부팅 점검에 `rootHome`, `appStaging`, `rootNodeModules`(쓰기 blocked), `home`(moved) 항목
 
 ## [0.41.4] - 2026-11-27
 

@@ -69,6 +69,12 @@ export const APP_STAGING_DIRS = ['/workspace/.daiops/.harness-sync', '/workspace
  * pip --user 도 여기로 가서 재구성 백업에 함께 실린다
  */
 export const WRAPPED_HOME = '/workspace/.home'
+/**
+ * 감싸기 밖 node(러너 감시, knowledge-core, document cli 는 모두 /opt 아래)가 모듈을 찾아 올라가는 마지막 자리. /opt 는 읽기 전용이지만
+ * 맨 위 /node_modules 는 감싼 셸이 만들 수 있어, 번들에 없는 선택 의존을 require 하면 그것이 실행됐다(보안 검토 11-27 11절 probe13).
+ * 부팅 때 빈 폴더로 만들어 읽기 전용으로 덮는다
+ */
+export const ROOT_NODE_MODULES = '/node_modules'
 /** bwrap 이 --proc 때 읽기 전용으로 덮는 곳(bubblewrap cover_proc_dirs). 바깥 /proc 를 쓸 때 직접 덮는다 */
 export const PROC_COVER_DIRS = ['/proc/sys', '/proc/sysrq-trigger', '/proc/irq', '/proc/bus']
 /** 백그라운드 잡 로그와 종료 코드(`tools/bash.js`). 러너 상태 안이지만 잡이 써야 한다 */
@@ -115,6 +121,7 @@ export function buildSandboxArgs({ protectedPaths = [], background = false, moun
   // 시스템 폴더는 부모 사슬 다음, 러너 폴더보다 먼저. /opt 를 덮은 뒤 /opt/agent-runner 를 다시 덮어도 같은 읽기 전용이다
   for (const dir of SYSTEM_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
   args.push('--ro-bind-try', '/root', '/root')
+  args.push('--ro-bind-try', ROOT_NODE_MODULES, ROOT_NODE_MODULES)
   for (const dir of RUNNER_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
   for (const dir of APP_STAGING_DIRS) args.push('--ro-bind-try', dir, dir)
   // 나중 마운트가 이긴다: 잡 폴더만 다시 쓰기로 연다. 잡 메타는 러너 상태(읽기 전용) 쪽 jobs-meta 에 있다
@@ -151,7 +158,7 @@ function ensureProtectedDirs(protectedPaths) {
   }
   try { mkdirSync(JOBS_DIR(), { recursive: true }) } catch { /* 같음 */ }
   // 없으면 덮을 자리가 없어 감싼 셸이 먼저 만들고 심을 수 있다
-  for (const dir of [...APP_STAGING_DIRS, WRAPPED_HOME]) {
+  for (const dir of [...APP_STAGING_DIRS, WRAPPED_HOME, ROOT_NODE_MODULES]) {
     try { mkdirSync(dir, { recursive: true }) } catch { /* 같음 */ }
   }
   try { mkdirSync(resolveJobsMetaDir(), { recursive: true }) } catch { /* 같음 */ }
@@ -176,6 +183,7 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
     // 감싸기 밖 bash, python 이 읽는 곳(10절)
     ['rootHome', `/root/${tag}`],
     ['appStaging', `${APP_STAGING_DIRS[0]}/${tag}`],
+    ['rootNodeModules', `${ROOT_NODE_MODULES}/${tag}`],
   ].filter(([, f]) => existsSync(path.dirname(f)))
   // 보호 폴더의 부모를 옮길 수 있으면 같은 이름으로 가짜를 세울 수 있다(「가」). 옮겨지면 바로 되돌린다
   const parent = path.dirname(protectedDir)

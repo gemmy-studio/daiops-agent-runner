@@ -16,6 +16,7 @@ import {
   SYSTEM_READONLY_DIRS,
   APP_STAGING_DIRS,
   WRAPPED_HOME,
+  ROOT_NODE_MODULES,
   ancestorsOf,
   isProcMountFailure,
   toolSandboxRefusal,
@@ -36,7 +37,7 @@ function fakeSpawn(stdoutLines, { status = 0, error } = {}) {
 }
 
 // parentMove, jobsMeta 는 그 폴더가 있을 때만 기대에 든다(root 로 돌면 /workspace 아래가 실제로 생긴다). 늘 넣어 둔다
-const PASS_LINES = ['runner=blocked', 'runnerState=blocked', 'protected=blocked', 'jobsMeta=blocked', 'bwrapDir=blocked', 'etc=blocked', 'rootHome=blocked', 'appStaging=blocked', 'home=moved', 'tmp=written', 'umount=blocked', 'parentMove=blocked', 'runnerPid=hidden']
+const PASS_LINES = ['runner=blocked', 'runnerState=blocked', 'protected=blocked', 'jobsMeta=blocked', 'bwrapDir=blocked', 'etc=blocked', 'rootHome=blocked', 'appStaging=blocked', 'rootNodeModules=blocked', 'home=moved', 'tmp=written', 'umount=blocked', 'parentMove=blocked', 'runnerPid=hidden']
 
 describe('buildSandboxArgs', () => {
   it('러너 폴더와 보호 경로를 읽기 전용으로 덮고, 잡 폴더만 다시 연다', () => {
@@ -81,6 +82,8 @@ describe('buildSandboxArgs', () => {
     assert.match(joined, new RegExp(`--setenv HOME ${WRAPPED_HOME}`))
     assert.ok(WRAPPED_HOME.startsWith('/workspace/'))
     assert.match(joined, /--ro-bind-try \/root \/root/)
+    // 감싸기 밖 node 가 /opt 아래 스크립트에서 모듈을 찾아 올라가는 마지막 자리(11절 probe13)
+    assert.match(joined, new RegExp(`--ro-bind-try ${ROOT_NODE_MODULES} ${ROOT_NODE_MODULES}`))
     for (const dir of APP_STAGING_DIRS) assert.match(joined, new RegExp(`--ro-bind-try ${dir.replace(/\./g, '\\.')} `))
     // 앱 스크립트 폴더의 부모(/workspace/.daiops)는 쓰기로 다시 붙여 옮기기를 막는다
     const binds = []
