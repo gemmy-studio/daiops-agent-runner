@@ -4,6 +4,7 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 
 import {
   buildSandboxArgs,
@@ -12,6 +13,7 @@ import {
   wrapToolSpawn,
   toolSandboxState,
   RUNNER_READONLY_DIRS,
+  ancestorsOf,
   _resetToolSandboxForTest,
 } from './tool-sandbox.js'
 
@@ -27,7 +29,8 @@ function fakeSpawn(stdoutLines, { status = 0, error } = {}) {
   return { spawn, calls }
 }
 
-const PASS_LINES = ['runner=blocked', 'runnerState=blocked', 'protected=blocked', 'tmp=written', 'umount=blocked', 'runnerPid=hidden']
+// parentMove, jobsMeta 는 그 폴더가 있을 때만 기대에 든다(root 로 돌면 /workspace 아래가 실제로 생긴다). 늘 넣어 둔다
+const PASS_LINES = ['runner=blocked', 'runnerState=blocked', 'protected=blocked', 'jobsMeta=blocked', 'tmp=written', 'umount=blocked', 'parentMove=blocked', 'runnerPid=hidden']
 
 describe('buildSandboxArgs', () => {
   it('러너 폴더와 보호 경로를 읽기 전용으로 덮고, 잡 폴더만 다시 연다', () => {
@@ -37,9 +40,30 @@ describe('buildSandboxArgs', () => {
     assert.match(joined, /--ro-bind-try \/workspace\/\.daiops\/skills \/workspace\/\.daiops\/skills/)
     assert.match(joined, /--ro-bind-try \/workspace\/schema\/persona\.yaml/)
     // 잡 폴더는 러너 상태보다 뒤에 와야 이긴다
-    const jobsAt = args.indexOf('--bind-try')
+    const jobsAt = args.indexOf('/workspace/.agent-runner/jobs')
     assert.ok(jobsAt > args.lastIndexOf('/workspace/.agent-runner'), joined)
     assert.equal(args.at(-1), '--')
+  })
+
+  // 보안 검토 11-26 「가」: 덮은 폴더의 부모를 옮기고 같은 이름으로 새로 만들면 밖은 가짜를 본다
+  it('보호 경로와 러너 폴더의 부모 사슬을 제자리에 쓰기로 다시 붙인다(옮기기 EBUSY), 덮기보다 먼저', () => {
+    const args = buildSandboxArgs({ protectedPaths: [SKILLS, '/workspace/schema/persona.yaml'] })
+    const binds = []
+    for (let i = 0; i < args.length; i++) if (args[i] === '--bind-try') binds.push(args[i + 1])
+    for (const dir of ['/opt', '/workspace', '/workspace/.daiops', '/workspace/schema']) {
+      assert.ok(binds.includes(dir), dir)
+      assert.ok(args.indexOf(dir) < args.indexOf('/opt/agent-runner'), `${dir} 는 읽기 전용 덮기보다 먼저`)
+    }
+    assert.ok(!binds.includes('/'))
+  })
+
+  it('ancestorsOf 는 얕은 것부터, 대상 자신과 / 는 빼고', () => {
+    assert.deepEqual(ancestorsOf(['/a/b/c', '/a/b', '/x/y']), ['/a', '/x'])
+    assert.deepEqual(ancestorsOf(['/workspace/.daiops/skills']), ['/workspace', '/workspace/.daiops'])
+  })
+
+  it('.. 가 든 보호 항목은 건너뛴다', () => {
+    assert.ok(!buildSandboxArgs({ protectedPaths: ['/workspace/../etc/'] }).join(' ').includes('/etc'))
   })
 
   it('권한을 내리고 user, pid namespace 를 새로 만든다', () => {
@@ -74,6 +98,29 @@ describe('runSelfCheck', () => {
       assert.match(r.reason, new RegExp(`${name}=${bad}`))
     })
   }
+
+  it('부모 옮기기와 잡 메타 쓰기도 본다(보호 폴더 부모, 메타 폴더가 있을 때)', async () => {
+    const { mkdtempSync, mkdirSync: mk } = await import('node:fs')
+    const os = await import('node:os')
+    const root = mkdtempSync(path.join(os.tmpdir(), 'selfcheck-'))
+    const protectedDir = path.join(root, 'daiops', 'skills')
+    const jobsMetaDir = path.join(root, 'jobs-meta')
+    mk(protectedDir, { recursive: true }); mk(jobsMetaDir)
+    const run = (extra) => {
+      const fake = fakeSpawn([...PASS_LINES, ...extra])
+      const r = runSelfCheck('/usr/bin/bwrap', { spawn: fake.spawn, runnerPid: 4242, protectedDir, jobsMetaDir })
+      return { r, script: fake.calls[0].args.at(-1) }
+    }
+    const ok = run([])
+    assert.equal(ok.r.pass, true, ok.r.reason)
+    assert.match(ok.script, /mv '.*daiops'/)
+    assert.match(ok.script, /jobs-meta/)
+    // 뒤에 온 줄이 이긴다(같은 이름은 덮어씀)
+    assert.match(run(['parentMove=done']).r.reason, /parentMove=done/)
+    assert.match(run(['jobsMeta=written']).r.reason, /jobsMeta=written/)
+    const noParent = fakeSpawn(PASS_LINES.filter((l) => !l.startsWith('parentMove=')))
+    assert.match(runSelfCheck('/usr/bin/bwrap', { spawn: noParent.spawn, runnerPid: 4242, protectedDir, jobsMetaDir }).reason, /parentMove=없음/)
+  })
 
   it('감싼 셸이 아예 안 뜨면 실패', () => {
     const r = runSelfCheck('/usr/bin/bwrap', { spawn: fakeSpawn([], { status: 1 }).spawn, runnerPid: 4242, protectedDir: '/tmp' })

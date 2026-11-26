@@ -14,7 +14,7 @@ import { existsSync, openSync, closeSync, writeFileSync, mkdirSync } from 'node:
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { resolvePath, resolveCwd, buildToolEnv } from './_common.js'
-import { ensureJobKeepalive, resolveJobsDir } from '../job-keepalive.js'
+import { ensureJobKeepalive, resolveJobsDir, resolveJobsMetaDir } from '../job-keepalive.js'
 import { admitTool, buildSpawnArgs, MIN_FREE_BYTES } from '../tool-cpu-lane.js'
 import { attachToToolCgroup } from '../tool-cgroup.js'
 import { wrapToolSpawn } from '../tool-sandbox.js'
@@ -207,15 +207,18 @@ export async function runBash(input, ctx = {}) {
  */
 function runBackground(input, ctx, cwd) {
   const jobsDir = resolveJobsDir()
+  // 메타는 감싼 셸이 못 쓰는 폴더에 둔다(job-keepalive.js resolveJobsMetaDir)
+  const metaDir = resolveJobsMetaDir()
   try {
     mkdirSync(jobsDir, { recursive: true })
+    mkdirSync(metaDir, { recursive: true })
   } catch (err) {
     return { content: `Bash: failed to create jobs dir '${jobsDir}': ${err.message}`, is_error: true }
   }
 
   const jobId = randomUUID()
   const logPath = path.join(jobsDir, `${jobId}.log`)
-  const metaPath = path.join(jobsDir, `${jobId}.meta.json`)
+  const metaPath = path.join(metaDir, `${jobId}.meta.json`)
   const exitPath = path.join(jobsDir, `${jobId}.exit`)
 
   let logFd
@@ -263,8 +266,6 @@ function runBackground(input, ctx, cwd) {
     cwd,
     startedAt: new Date().toISOString(),
     status: 'running',
-    log: logPath,
-    exit: exitPath,
   }
   try {
     writeFileSync(metaPath, JSON.stringify(meta, null, 2))

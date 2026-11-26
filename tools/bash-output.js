@@ -8,6 +8,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { resolveJobsDir } from './bash.js'
+import { resolveJobsMetaDir, JOB_ID_RE, readJobFileSafe } from '../job-keepalive.js'
 
 const MAX_OUTPUT_BYTES = 64 * 1024
 
@@ -32,8 +33,11 @@ export async function runBashOutput(input) {
   if (!jobId || typeof jobId !== 'string') {
     return { content: 'BashOutput: job_id is required', is_error: true }
   }
+  if (!JOB_ID_RE.test(jobId)) {
+    return { content: `BashOutput: job '${jobId}' not found`, is_error: true }
+  }
   const jobsDir = resolveJobsDir()
-  const metaPath = path.join(jobsDir, `${jobId}.meta.json`)
+  const metaPath = path.join(resolveJobsMetaDir(), `${jobId}.meta.json`)
   if (!existsSync(metaPath)) {
     return { content: `BashOutput: job '${jobId}' not found`, is_error: true }
   }
@@ -44,13 +48,12 @@ export async function runBashOutput(input) {
     return { content: `BashOutput: failed to read job meta: ${err.message}`, is_error: true }
   }
 
-  const logPath = meta.log ?? path.join(jobsDir, `${jobId}.log`)
-  const exitPath = meta.exit ?? path.join(jobsDir, `${jobId}.exit`)
+  // 경로는 메타가 아니라 잡 폴더 + 잡 번호로만 만든다. 로그, 종료 코드는 감싼 셸이 쓰는 자리라 링크, FIFO 를 거른다
+  const logPath = path.join(jobsDir, `${jobId}.log`)
+  const exitPath = path.join(jobsDir, `${jobId}.exit`)
 
-  let log = ''
-  try {
-    log = readFileSync(logPath, 'utf8')
-  } catch { /* 로그 아직 없음/읽기 실패 — 빈 출력으로 처리 */ }
+  // 끝 쪽만 넉넉히 읽고(여러 바이트 글자 대비 4배) 글자 수로 자른다(종전과 같은 기준)
+  let log = readJobFileSafe(logPath, MAX_OUTPUT_BYTES * 4) ?? ''
   let truncated = false
   if (log.length > MAX_OUTPUT_BYTES) {
     log = log.slice(log.length - MAX_OUTPUT_BYTES)
@@ -88,12 +91,10 @@ export async function runBashOutput(input) {
 
 /** @param {string} exitPath @returns {number | null} */
 function readExitCode(exitPath) {
-  try {
-    const n = parseInt(readFileSync(exitPath, 'utf8').trim(), 10)
-    return Number.isNaN(n) ? null : n
-  } catch {
-    return null // exit 파일 읽기 실패 — code unknown
-  }
+  const text = readJobFileSafe(exitPath, 64)
+  if (text === null) return null // 읽기 실패, 링크, 보통 파일 아님 — code unknown
+  const n = parseInt(text.trim(), 10)
+  return Number.isNaN(n) ? null : n
 }
 
 /** signal 0 = liveness probe(시그널 미전송). ESRCH 면 없음, 그 밖(EPERM 등)은 살아 있다고 본다 */

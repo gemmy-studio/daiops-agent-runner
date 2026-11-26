@@ -7,7 +7,7 @@
 
 import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
-import { resolveJobsDir } from './bash.js'
+import { resolveJobsMetaDir, JOB_ID_RE } from '../job-keepalive.js'
 
 const SIGKILL_GRACE_MS = 2000
 
@@ -32,8 +32,10 @@ export async function runKillShell(input) {
   if (!jobId || typeof jobId !== 'string') {
     return { content: 'KillShell: job_id is required', is_error: true }
   }
-  const jobsDir = resolveJobsDir()
-  const metaPath = path.join(jobsDir, `${jobId}.meta.json`)
+  if (!JOB_ID_RE.test(jobId)) {
+    return { content: `KillShell: job '${jobId}' not found`, is_error: true }
+  }
+  const metaPath = path.join(resolveJobsMetaDir(), `${jobId}.meta.json`)
   if (!existsSync(metaPath)) {
     return { content: `KillShell: job '${jobId}' not found`, is_error: true }
   }
@@ -46,6 +48,10 @@ export async function runKillShell(input) {
   const pid = meta.pid
   if (typeof pid !== 'number') {
     return { content: `KillShell: job '${jobId}' has no pid`, is_error: true }
+  }
+  const refusal = killTargetRefusal(pid)
+  if (refusal) {
+    return { content: `KillShell: refusing to signal pid ${pid} (${refusal})`, is_error: true }
   }
 
   const alive = () => {
@@ -73,4 +79,34 @@ export async function runKillShell(input) {
   }
 
   return { content: `KillShell: stopped job '${jobId}' (pid ${pid}) via SIGTERM${escalated ? '+SIGKILL' : ''}` }
+}
+
+/**
+ * 신호를 보내면 안 되는 대상이면 사유, 아니면 null. 메타는 러너만 쓰는 폴더에 있지만(0.41.1) 옛 판 메타, 번호 재사용에
+ * 대비해 한 번 더 본다: 0, 1, 음수(kill(0)=러너 자기 그룹, kill(-1)=전부), 러너 자신, 러너와 같은 프로세스 그룹.
+ * 잡은 detached 로 떠 자기 그룹의 리더라 러너 그룹과 같을 수 없다.
+ * @param {number} pid
+ * @param {{ selfPid?: number, groupOf?: (pid: number | 'self') => number | null }} [deps]
+ * @returns {string | null}
+ */
+export function killTargetRefusal(pid, { selfPid = process.pid, groupOf = processGroupOf } = {}) {
+  if (!Number.isInteger(pid) || pid <= 1) return 'not a job pid'
+  if (pid === selfPid) return 'runner itself'
+  const own = groupOf('self')
+  const target = groupOf(pid)
+  if (own !== null && target !== null && own === target) return 'runner process group'
+  return null
+}
+
+/** /proc/<pid>/stat 의 5번째 칸(pgrp). /proc 가 없으면(macOS 등) null */
+function processGroupOf(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    // 2번째 칸(comm)은 괄호 안에 공백이 들어갈 수 있어 마지막 ')' 뒤부터 센다
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    const pgrp = Number(rest[2])
+    return Number.isInteger(pgrp) ? pgrp : null
+  } catch {
+    return null
+  }
 }

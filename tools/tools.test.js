@@ -11,7 +11,7 @@ import { runGlob } from './glob.js'
 import { runGrep } from './grep.js'
 import { runBash } from './bash.js'
 import { runBashOutput } from './bash-output.js'
-import { runKillShell } from './kill-shell.js'
+import { runKillShell, killTargetRefusal } from './kill-shell.js'
 import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, runBuiltinTool, isBuiltinTool } from './index.js'
 import { buildToolEnv } from './_common.js'
 
@@ -412,12 +412,14 @@ describe('runBash — run_in_background (잡 레지스트리)', () => {
       assert.equal(parsed.status, 'running')
       assert.ok(typeof parsed.pid === 'number')
 
-      // 메타 파일 즉시 존재
-      const metaRaw = await fs.readFile(path.join(jobsDir, `${parsed.job_id}.meta.json`), 'utf8')
+      // 메타 파일 즉시 존재. 잡 폴더가 아니라 메타 폴더(<jobs>-meta)에 있다(감싼 셸이 못 쓰게)
+      assert.equal(await fs.access(path.join(jobsDir, `${parsed.job_id}.meta.json`)).then(() => true, () => false), false)
+      const metaRaw = await fs.readFile(path.join(`${jobsDir}-meta`, `${parsed.job_id}.meta.json`), 'utf8')
       const meta = JSON.parse(metaRaw)
       assert.equal(meta.job_id, parsed.job_id)
       assert.equal(meta.status, 'running')
       assert.equal(meta.cmd, 'echo bg-out; echo bg-err >&2')
+      assert.equal(meta.log, undefined, '경로는 메타에 두지 않는다')
 
       // 로그 파일이 채워질 때까지 잠시 대기 (detached 비동기 완료)
       const logPath = path.join(jobsDir, `${parsed.job_id}.log`)
@@ -432,6 +434,7 @@ describe('runBash — run_in_background (잡 레지스트리)', () => {
       if (prev === undefined) delete process.env.AGENT_RUNNER_JOBS_DIR
       else process.env.AGENT_RUNNER_JOBS_DIR = prev
       await fs.rm(jobsDir, { recursive: true, force: true })
+      await fs.rm(`${jobsDir}-meta`, { recursive: true, force: true })
     }
   })
 
@@ -454,7 +457,13 @@ describe('BashOutput / KillShell — 백그라운드 잡 제어', () => {
       if (prev === undefined) delete process.env.AGENT_RUNNER_JOBS_DIR
       else process.env.AGENT_RUNNER_JOBS_DIR = prev
       await fs.rm(jobsDir, { recursive: true, force: true })
+      await fs.rm(`${jobsDir}-meta`, { recursive: true, force: true })
     }
+  }
+  /** 러너가 쓰는 자리(<jobs>-meta)에 메타를 둔다 */
+  async function writeMeta(jobsDir, jobId, meta) {
+    await fs.mkdir(`${jobsDir}-meta`, { recursive: true })
+    await fs.writeFile(path.join(`${jobsDir}-meta`, `${jobId}.meta.json`), JSON.stringify(meta))
   }
 
   it('짧은 잡 완료 → BashOutput이 exit code + 로그 반환 (비0은 is_error)', async () => {
@@ -499,9 +508,9 @@ describe('BashOutput / KillShell — 백그라운드 잡 제어', () => {
   // 래퍼는 sentinel 파일을 만들고 숫자를 나중에 쓴다. 그 사이에 읽으면 정상 종료가 「exit code unavailable」로 보였다(G6, 부하 시험)
   it('sentinel 이 비어 있고 잡이 살아 있으면 아직 running', async () => {
     await withJobsDir(async (jobsDir) => {
-      const job_id = 'writing-exit'
+      const job_id = '00000000-0000-4000-8000-000000000001'
       await fs.writeFile(path.join(jobsDir, `${job_id}.exit`), '')
-      await fs.writeFile(path.join(jobsDir, `${job_id}.meta.json`), JSON.stringify({ pid: process.pid }))
+      await writeMeta(jobsDir, job_id, ({ pid: process.pid }))
       const out = await runBashOutput({ job_id })
       assert.ok(out.content.includes('status=running'), out.content)
     })
@@ -509,9 +518,9 @@ describe('BashOutput / KillShell — 백그라운드 잡 제어', () => {
 
   it('sentinel 이 비어 있고 잡이 없으면 exited(코드 모름)', async () => {
     await withJobsDir(async (jobsDir) => {
-      const job_id = 'dead-empty-exit'
+      const job_id = '00000000-0000-4000-8000-000000000002'
       await fs.writeFile(path.join(jobsDir, `${job_id}.exit`), '')
-      await fs.writeFile(path.join(jobsDir, `${job_id}.meta.json`), JSON.stringify({ pid: 2 ** 22 + 7 }))
+      await writeMeta(jobsDir, job_id, ({ pid: 2 ** 22 + 7 }))
       const out = await runBashOutput({ job_id })
       assert.ok(out.content.includes('status=exited (exit code unavailable)'), out.content)
       assert.equal(out.is_error, undefined)
@@ -520,10 +529,80 @@ describe('BashOutput / KillShell — 백그라운드 잡 제어', () => {
 
   it('sentinel 이 없고 잡이 없으면 exited(코드 모름)', async () => {
     await withJobsDir(async (jobsDir) => {
-      const job_id = 'dead-no-exit'
-      await fs.writeFile(path.join(jobsDir, `${job_id}.meta.json`), JSON.stringify({ pid: 2 ** 22 + 7 }))
+      const job_id = '00000000-0000-4000-8000-000000000003'
+      await writeMeta(jobsDir, job_id, ({ pid: 2 ** 22 + 7 }))
       const out = await runBashOutput({ job_id })
       assert.ok(out.content.includes('status=exited (exit code unavailable)'), out.content)
+    })
+  })
+
+  // 보안 검토 11-26 「나」「다」: 감싼 셸은 잡 폴더에 쓸 수 있다. 거기 둔 가짜 메타, 링크, FIFO 로 러너를 부리지 못해야 한다
+  it('잡 폴더에 둔 가짜 메타는 무시한다(KillShell 이 그 pid 에 신호를 보내지 않음)', async () => {
+    await withJobsDir(async (jobsDir) => {
+      const job_id = '00000000-0000-4000-8000-0000000000aa'
+      await fs.writeFile(path.join(jobsDir, `${job_id}.meta.json`), JSON.stringify({ pid: process.pid, log: '/proc/self/environ' }))
+      const k = await runKillShell({ job_id })
+      assert.equal(k.is_error, true)
+      assert.match(k.content, /not found/)
+      assert.match((await runBashOutput({ job_id })).content, /not found/)
+    })
+  })
+
+  it('메타에 적힌 log, exit 경로는 쓰지 않는다', async () => {
+    await withJobsDir(async (jobsDir) => {
+      const job_id = '00000000-0000-4000-8000-0000000000ab'
+      await writeMeta(jobsDir, job_id, { pid: 2 ** 22 + 7, log: '/proc/self/environ', exit: '/proc/self/environ' })
+      const out = await runBashOutput({ job_id })
+      assert.ok(!out.content.includes('PATH='), out.content)
+    })
+  })
+
+  it('로그 자리의 심볼릭 링크는 따라가지 않는다', async () => {
+    await withJobsDir(async (jobsDir) => {
+      const job_id = '00000000-0000-4000-8000-0000000000ac'
+      const secret = path.join(jobsDir, '..', `secret-${process.pid}.txt`)
+      await fs.writeFile(secret, 'TOP-SECRET')
+      try {
+        await writeMeta(jobsDir, job_id, { pid: 2 ** 22 + 7 })
+        await fs.symlink(secret, path.join(jobsDir, `${job_id}.log`))
+        const out = await runBashOutput({ job_id })
+        assert.ok(!out.content.includes('TOP-SECRET'), out.content)
+      } finally {
+        await fs.rm(secret, { force: true })
+      }
+    })
+  })
+
+  it('로그 자리의 FIFO 에서 멈추지 않는다', { skip: process.platform === 'win32' }, async () => {
+    await withJobsDir(async (jobsDir) => {
+      const job_id = '00000000-0000-4000-8000-0000000000ad'
+      await writeMeta(jobsDir, job_id, { pid: 2 ** 22 + 7 })
+      const { execFileSync } = await import('node:child_process')
+      execFileSync('mkfifo', [path.join(jobsDir, `${job_id}.log`), path.join(jobsDir, `${job_id}.exit`)])
+      const out = await runBashOutput({ job_id })
+      assert.match(out.content, /status=exited/)
+    })
+  })
+
+  it('UUID 꼴이 아닌 job_id(경로 오르기 포함)는 찾지 않는다', async () => {
+    await withJobsDir(async () => {
+      for (const job_id of ['../jobs-meta/x', '..', 'a/b']) {
+        assert.match((await runBashOutput({ job_id })).content, /not found/)
+        assert.match((await runKillShell({ job_id })).content, /not found/)
+      }
+    })
+  })
+
+  it('KillShell 은 0, 1, 러너 자신, 러너 그룹에는 신호를 보내지 않는다', async () => {
+    for (const pid of [0, 1, -1, process.pid]) assert.ok(killTargetRefusal(pid), String(pid))
+    assert.equal(killTargetRefusal(4242, { selfPid: 1, groupOf: (p) => (p === 'self' ? 10 : 4242) }), null)
+    assert.match(killTargetRefusal(4242, { selfPid: 1, groupOf: () => 10 }), /group/)
+    await withJobsDir(async (jobsDir) => {
+      const job_id = '00000000-0000-4000-8000-0000000000ae'
+      await writeMeta(jobsDir, job_id, { pid: process.pid })
+      const k = await runKillShell({ job_id })
+      assert.equal(k.is_error, true)
+      assert.match(k.content, /refusing/)
     })
   })
 

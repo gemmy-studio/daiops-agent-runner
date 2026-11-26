@@ -10,7 +10,7 @@
  * 인증: Bearer AGENT_RUNNER_TOKEN + x-workspace-id (Design B, turn-manager proxy 모드와 동일).
  */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, openSync, fstatSync, readSync, closeSync, existsSync, constants as fsConstants } from 'node:fs'
 import path from 'node:path'
 
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000 // 5분 — 기본 idle(15~30분) 대비 충분히 잦음
@@ -29,6 +29,55 @@ export function resolveJobsDir() {
 }
 
 /**
+ * 잡 메타(<id>.meta.json) 폴더. 잡 폴더와 **따로** 둔다(0.41.1, 보안 검토 11-26).
+ * 잡 폴더는 감싼 셸이 로그와 종료 코드를 써야 해 쓰기로 열려 있다. 메타가 거기 있으면 감싼 셸이 가짜 메타를 써서
+ * 러너가 그 pid 에 신호를 보내거나(KillShell) 그 경로를 대신 읽게(BashOutput) 만들 수 있었다. 기본값은 읽기 전용
+ * 러너 상태(`/workspace/.agent-runner/jobs-meta`)라 감싼 셸이 쓰지 못한다. 테스트는 잡 폴더 옆 `<jobs>-meta`.
+ * @returns {string}
+ */
+export function resolveJobsMetaDir() {
+  if (process.env.AGENT_RUNNER_JOBS_META_DIR) return process.env.AGENT_RUNNER_JOBS_META_DIR
+  return process.env.AGENT_RUNNER_JOBS_DIR ? `${process.env.AGENT_RUNNER_JOBS_DIR}-meta` : '/workspace/.agent-runner/jobs-meta'
+}
+
+/** 러너가 만든 job_id 꼴(randomUUID). 경로에 들어가므로 이 꼴만 받는다 */
+export const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/**
+ * 잡 폴더 안 파일을 읽는다. 감싼 셸이 이 자리에 심볼릭 링크(예: /proc/self/environ)나 FIFO(읽으면 러너가 멈춤)를
+ * 둘 수 있으므로 링크는 따라가지 않고, 막히지 않게 열고, 보통 파일만 읽는다. 아니면 null.
+ * @param {string} file
+ * @param {number} [maxBytes]
+ * @returns {string | null}
+ */
+export function readJobFileSafe(file, maxBytes = Infinity) {
+  let fd
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK)
+  } catch {
+    return null
+  }
+  try {
+    const st = fstatSync(fd)
+    if (!st.isFile()) return null
+    const size = st.size
+    const start = Number.isFinite(maxBytes) && size > maxBytes ? size - maxBytes : 0
+    const buf = Buffer.alloc(size - start)
+    let off = 0
+    while (off < buf.length) {
+      const n = readSync(fd, buf, off, buf.length - off, start + off)
+      if (n === 0) break
+      off += n
+    }
+    return buf.subarray(0, off).toString('utf8')
+  } catch {
+    return null
+  } finally {
+    try { closeSync(fd) } catch { /* 닫힘 */ }
+  }
+}
+
+/**
  * jobs 디렉토리에 keepalive가 필요한 활성 잡이 있는지.
  * 조건(AND): meta.pid 존재 + exit sentinel 없음 + startedAt 2h 이내 + pid 살아있음.
  * @param {number} [now]
@@ -36,28 +85,27 @@ export function resolveJobsDir() {
  */
 export async function hasActiveJobs(now = Date.now()) {
   const jobsDir = resolveJobsDir()
+  const metaDir = resolveJobsMetaDir()
   let entries
   try {
-    entries = await fs.readdir(jobsDir)
+    entries = await fs.readdir(metaDir)
   } catch {
     return false // 디렉토리 없음 = 잡 없음
   }
   for (const name of entries) {
     if (!name.endsWith('.meta.json')) continue
+    const jobId = name.replace(/\.meta\.json$/, '')
+    if (!JOB_ID_RE.test(jobId)) continue
     let meta
     try {
-      meta = JSON.parse(await fs.readFile(path.join(jobsDir, name), 'utf8'))
+      meta = JSON.parse(await fs.readFile(path.join(metaDir, name), 'utf8'))
     } catch {
       continue
     }
     if (typeof meta.pid !== 'number') continue
 
-    // 이미 종료(exit sentinel) → 스킵
-    const jobId = meta.job_id ?? name.replace(/\.meta\.json$/, '')
-    const exitPath = meta.exit ?? path.join(jobsDir, `${jobId}.exit`)
-    let exited = false
-    try { await fs.access(exitPath); exited = true } catch { /* sentinel 없음 */ }
-    if (exited) continue
+    // 이미 종료(exit sentinel) → 스킵. 경로는 메타가 아니라 잡 번호로 만든다
+    if (existsSync(path.join(jobsDir, `${jobId}.exit`))) continue
 
     // 2h 상한 초과 → 스킵 (stuck 방지)
     const started = meta.startedAt ? Date.parse(meta.startedAt) : NaN

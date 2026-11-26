@@ -28,11 +28,17 @@ async function withJobsDir(fn) {
     if (prev === undefined) delete process.env.AGENT_RUNNER_JOBS_DIR
     else process.env.AGENT_RUNNER_JOBS_DIR = prev
     await fs.rm(dir, { recursive: true, force: true })
+    await fs.rm(`${dir}-meta`, { recursive: true, force: true })
   }
 }
 
-async function writeJob(dir, jobId, meta, { exit } = {}) {
-  await fs.writeFile(path.join(dir, `${jobId}.meta.json`), JSON.stringify({ job_id: jobId, ...meta }))
+/** 이름표를 러너가 만드는 꼴(UUID)로 바꾼다. 메타는 잡 폴더가 아니라 `<jobs>-meta` 에 쓴다(resolveJobsMetaDir) */
+const jobUuid = (name) => `00000000-0000-4000-8000-${Buffer.from(name).toString('hex').padEnd(12, '0').slice(0, 12)}`
+
+async function writeJob(dir, name, meta, { exit } = {}) {
+  const jobId = jobUuid(name)
+  await fs.mkdir(`${dir}-meta`, { recursive: true })
+  await fs.writeFile(path.join(`${dir}-meta`, `${jobId}.meta.json`), JSON.stringify({ job_id: jobId, ...meta }))
   if (exit !== undefined) await fs.writeFile(path.join(dir, `${jobId}.exit`), String(exit))
 }
 
@@ -62,6 +68,22 @@ describe('hasActiveJobs', () => {
   it('죽은 pid → 스킵', async () => {
     await withJobsDir(async (dir) => {
       await writeJob(dir, 'dead', { pid: DEAD_PID, startedAt: new Date().toISOString(), status: 'running' })
+      assert.equal(await hasActiveJobs(), false)
+    })
+  })
+
+  it('잡 폴더(감싼 셸이 쓰는 곳)에 둔 메타는 보지 않는다', async () => {
+    await withJobsDir(async (dir) => {
+      const jobId = jobUuid('planted')
+      await fs.writeFile(path.join(dir, `${jobId}.meta.json`), JSON.stringify({ job_id: jobId, pid: process.pid, startedAt: new Date().toISOString() }))
+      assert.equal(await hasActiveJobs(), false)
+    })
+  })
+
+  it('UUID 꼴이 아닌 메타 이름은 건너뛴다', async () => {
+    await withJobsDir(async (dir) => {
+      await fs.mkdir(`${dir}-meta`, { recursive: true })
+      await fs.writeFile(path.join(`${dir}-meta`, 'x.meta.json'), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }))
       assert.equal(await hasActiveJobs(), false)
     })
   })

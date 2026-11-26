@@ -37,14 +37,15 @@
  *    보호 **폴더**는 감싸기 전에 만들어 둔다. 파일은 명령 문자열 판정이 계속 본다.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, renameSync } from 'node:fs'
+import { resolveJobsDir, resolveJobsMetaDir } from './job-keepalive.js'
 import path from 'node:path'
 
 const BWRAP_CANDIDATES = ['/usr/bin/bwrap', '/bin/bwrap']
 /** 러너 프로그램(구운 판)과 러너 상태(로그, 이벤트 버퍼, 감시 스크립트, 판 올림 사본). 예외 없이 읽기 전용 */
 export const RUNNER_READONLY_DIRS = ['/opt/agent-runner', '/workspace/.agent-runner']
 /** 백그라운드 잡 로그와 종료 코드(`tools/bash.js`). 러너 상태 안이지만 잡이 써야 한다 */
-const JOBS_DIR = () => process.env.AGENT_RUNNER_JOBS_DIR ?? '/workspace/.agent-runner/jobs'
+const JOBS_DIR = resolveJobsDir
 
 const state = {
   mode: 'auto',
@@ -71,16 +72,34 @@ export function buildSandboxArgs({ protectedPaths = [], background = false } = {
     '--cap-drop', 'ALL',
   ]
   if (!background) args.push('--die-with-parent')
+  const protectedTargets = protectedPaths
+    .map((p) => String(p).replace(/\/+$/, ''))
+    .filter((t) => t.startsWith('/') && !t.split('/').includes('..'))
+  // 덮은 폴더 자체는 옮길 수 없지만(EBUSY) 그 부모는 옮겨진다. 부모를 옮기고 같은 이름으로 새로 만들면 밖(러너, 앱)은
+  // 가짜를 본다(보안 검토 11-26 「가」). 부모 사슬을 제자리에 다시 붙여(쓰기 그대로) 마운트 지점으로 만들면 옮기기가 EBUSY 다.
+  // 권한을 모두 내린 user namespace 라 감싼 셸은 이 마운트를 풀지 못한다. 얕은 것부터 붙인다(나중 마운트가 위에 얹힌다)
+  for (const dir of ancestorsOf([...RUNNER_READONLY_DIRS, ...protectedTargets])) args.push('--bind-try', dir, dir)
   for (const dir of RUNNER_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
-  // 나중 마운트가 이긴다: 잡 폴더만 다시 쓰기로 연다
+  // 나중 마운트가 이긴다: 잡 폴더만 다시 쓰기로 연다. 잡 메타는 러너 상태(읽기 전용) 쪽 jobs-meta 에 있다
   const jobs = JOBS_DIR()
   args.push('--bind-try', jobs, jobs)
-  for (const p of protectedPaths) {
-    const target = String(p).replace(/\/+$/, '')
-    if (target.startsWith('/')) args.push('--ro-bind-try', target, target)
-  }
+  for (const target of protectedTargets) args.push('--ro-bind-try', target, target)
   args.push('--')
   return args
+}
+
+/** 경로들의 부모 사슬(`/` 제외, 대상 자신 제외), 얕은 것부터. 예: /workspace/.daiops/skills → /workspace, /workspace/.daiops */
+export function ancestorsOf(paths) {
+  const targets = new Set(paths)
+  const out = new Set()
+  for (const p of paths) {
+    let dir = path.dirname(p)
+    while (dir !== '/' && dir !== '.') {
+      if (!targets.has(dir)) out.add(dir)
+      dir = path.dirname(dir)
+    }
+  }
+  return [...out].sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))
 }
 
 /** 보호 폴더(`/` 로 끝나는 항목)를 감싸기 전에 만든다. 없으면 덮을 자리가 없어 감싼 셸이 새로 만들 수 있다 */
@@ -91,6 +110,7 @@ function ensureProtectedDirs(protectedPaths) {
     }
   }
   try { mkdirSync(JOBS_DIR(), { recursive: true }) } catch { /* 같음 */ }
+  try { mkdirSync(resolveJobsMetaDir(), { recursive: true }) } catch { /* 같음 */ }
 }
 
 /**
@@ -98,18 +118,25 @@ function ensureProtectedDirs(protectedPaths) {
  * @param {string} bwrap
  * @param {{ spawn?: typeof spawnSync, protectedDir?: string, runnerPid?: number }} [deps]
  */
-export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/workspace/.daiops/skills', runnerPid = process.pid } = {}) {
+export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/workspace/.daiops/skills', runnerPid = process.pid, jobsMetaDir = resolveJobsMetaDir() } = {}) {
   const tag = `.daiops-sandbox-selfcheck-${process.pid}`
   const mustFail = [
     ['runner', `/opt/agent-runner/${tag}`],
     ['runnerState', `/workspace/.agent-runner/${tag}`],
     ['protected', `${protectedDir}/${tag}`],
+    // 잡 메타 폴더(러너 상태 안)를 감싼 셸이 쓰면 가짜 메타로 러너를 부릴 수 있다(보안 검토 11-26 「나」「다」)
+    ['jobsMeta', `${jobsMetaDir}/${tag}`],
   ].filter(([, f]) => existsSync(path.dirname(f)))
+  // 보호 폴더의 부모를 옮길 수 있으면 같은 이름으로 가짜를 세울 수 있다(「가」). 옮겨지면 바로 되돌린다
+  const parent = path.dirname(protectedDir)
+  const moved = `${parent}.daiops-sandbox-moved-${process.pid}`
+  const checkParent = parent !== '/' && existsSync(parent)
   const okFile = `/tmp/${tag}`
   const lines = [
     ...mustFail.map(([name, f]) => `touch '${f}' 2>/dev/null && echo "${name}=written" || echo "${name}=blocked"`),
     `touch '${okFile}' && echo "tmp=written" || echo "tmp=blocked"`,
     `umount '${protectedDir}' 2>/dev/null && echo "umount=done" || echo "umount=blocked"`,
+    ...(checkParent ? [`mv '${parent}' '${moved}' 2>/dev/null && { mv '${moved}' '${parent}'; echo "parentMove=done"; } || echo "parentMove=blocked"`] : []),
     // 새 pid namespace 의 번호는 1부터라 러너 번호가 작으면 겹칠 수 있다. 10 넘을 때만 본다
     runnerPid > 10 ? `kill -0 ${runnerPid} 2>/dev/null && echo "runnerPid=visible" || echo "runnerPid=hidden"` : 'echo "runnerPid=skipped"',
   ]
@@ -133,11 +160,16 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
       if (existsSync(f)) { leaked.push(f); try { rmSync(f, { force: true }) } catch { /* 남으면 다음 점검이 다시 본다 */ } }
     }
     try { rmSync(okFile, { force: true }) } catch { /* 없음 */ }
+    // 감싼 셸이 옮기고 되돌리기 전에 죽었으면 밖에서 되돌린다
+    if (checkParent && !existsSync(parent) && existsSync(moved)) {
+      try { renameSync(moved, parent); leaked.push(`${parent}(옮겨졌다 되돌림)`) } catch { leaked.push(`${parent} 가 ${moved} 로 옮겨짐`) }
+    }
   }
   const expected = {
     ...Object.fromEntries(mustFail.map(([name]) => [name, 'blocked'])),
     tmp: 'written',
     umount: 'blocked',
+    ...(checkParent ? { parentMove: 'blocked' } : {}),
     ...(runnerPid > 10 ? { runnerPid: 'hidden' } : {}),
   }
   const wrong = Object.entries(expected).filter(([k, v]) => result[k] !== v).map(([k, v]) => `${k}=${result[k] ?? '없음'}(기대 ${v})`)
