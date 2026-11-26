@@ -13,6 +13,7 @@ import {
   wrapToolSpawn,
   toolSandboxState,
   RUNNER_READONLY_DIRS,
+  SYSTEM_READONLY_DIRS,
   ancestorsOf,
   isProcMountFailure,
   toolSandboxRefusal,
@@ -33,7 +34,7 @@ function fakeSpawn(stdoutLines, { status = 0, error } = {}) {
 }
 
 // parentMove, jobsMeta 는 그 폴더가 있을 때만 기대에 든다(root 로 돌면 /workspace 아래가 실제로 생긴다). 늘 넣어 둔다
-const PASS_LINES = ['runner=blocked', 'runnerState=blocked', 'protected=blocked', 'jobsMeta=blocked', 'tmp=written', 'umount=blocked', 'parentMove=blocked', 'runnerPid=hidden']
+const PASS_LINES = ['runner=blocked', 'runnerState=blocked', 'protected=blocked', 'jobsMeta=blocked', 'bwrapDir=blocked', 'etc=blocked', 'tmp=written', 'umount=blocked', 'parentMove=blocked', 'runnerPid=hidden']
 
 describe('buildSandboxArgs', () => {
   it('러너 폴더와 보호 경로를 읽기 전용으로 덮고, 잡 폴더만 다시 연다', () => {
@@ -60,13 +61,25 @@ describe('buildSandboxArgs', () => {
     assert.ok(!binds.includes('/'))
   })
 
+  // 보안 검토 11-26 6-3: 감싼 셸이 /usr/bin/bwrap 을 바꿔치기해 감싸기를 벗어났다
+  it('시스템 폴더를 읽기 전용으로 덮는다, 부모 사슬보다 뒤, 러너 폴더보다 앞', () => {
+    const args = buildSandboxArgs({ protectedPaths: [SKILLS] })
+    const ro = []
+    for (let i = 0; i < args.length; i++) if (args[i] === '--ro-bind-try') ro.push(i)
+    const roAt = (dir) => ro.find((i) => args[i + 1] === dir && args[i + 2] === dir)
+    for (const dir of SYSTEM_READONLY_DIRS) assert.ok(roAt(dir) !== undefined, dir)
+    assert.ok(roAt('/opt') > args.indexOf('/workspace'), '부모 사슬(쓰기 다시 붙이기) 뒤')
+    assert.ok(roAt('/opt') < roAt('/opt/agent-runner'), '러너 폴더 덮기 앞')
+  })
+
   it('ancestorsOf 는 얕은 것부터, 대상 자신과 / 는 빼고', () => {
     assert.deepEqual(ancestorsOf(['/a/b/c', '/a/b', '/x/y']), ['/a', '/x'])
     assert.deepEqual(ancestorsOf(['/workspace/.daiops/skills']), ['/workspace', '/workspace/.daiops'])
   })
 
   it('.. 가 든 보호 항목은 건너뛴다', () => {
-    assert.ok(!buildSandboxArgs({ protectedPaths: ['/workspace/../etc/'] }).join(' ').includes('/etc'))
+    // /etc 는 이제 늘 시스템 폴더로 덮이므로, .. 가 든 항목 자체가 인자에 없는지로 본다
+    assert.ok(!buildSandboxArgs({ protectedPaths: ['/workspace/../etc/'] }).some((a) => a.includes('..')))
   })
 
   it('권한을 내리고 user, pid namespace 를 새로 만든다', () => {
@@ -93,7 +106,7 @@ describe('runSelfCheck', () => {
     assert.equal(calls[0].file, '/usr/bin/bwrap')
   })
 
-  for (const [name, bad] of [['protected', 'written'], ['umount', 'done'], ['runnerPid', 'visible'], ['tmp', 'blocked']]) {
+  for (const [name, bad] of [['protected', 'written'], ['umount', 'done'], ['runnerPid', 'visible'], ['tmp', 'blocked'], ['bwrapDir', 'written'], ['etc', 'written']]) {
     it(`${name}=${bad} 이면 실패하고 사유에 남긴다`, () => {
       const lines = PASS_LINES.map((l) => (l.startsWith(`${name}=`) ? `${name}=${bad}` : l))
       const r = runSelfCheck('/usr/bin/bwrap', { spawn: fakeSpawn(lines).spawn, runnerPid: 4242, protectedDir: '/tmp' })

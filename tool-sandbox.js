@@ -50,6 +50,13 @@ import path from 'node:path'
 const BWRAP_CANDIDATES = ['/usr/bin/bwrap', '/bin/bwrap']
 /** 러너 프로그램(구운 판)과 러너 상태(로그, 이벤트 버퍼, 감시 스크립트, 판 올림 사본). 예외 없이 읽기 전용 */
 export const RUNNER_READONLY_DIRS = ['/opt/agent-runner', '/workspace/.agent-runner']
+/**
+ * 시스템 폴더. 감싼 셸은 uid 0 이고 `--bind / /` 라 권한을 다 내려도 주인 검사로 이 폴더의 파일을 지우고 바꿀 수 있었다.
+ * /usr/bin/bwrap 을 새 파일 + mv 로 바꿔치기하면 다음 Bash 부터 감싸기를 벗어났고, node, 공유 라이브러리, ld.so.preload,
+ * PATH 의 openssl 도 같은 뿌리였다(보안 검토 11-26 6-3). 그래서 읽기 전용으로 덮는다(대표 「권장대로」 11-27, 카드 59f56d7d-2611262309).
+ * 대가: 감싼 셸에서 apt-get install, npm install -g 가 안 된다. 시스템 pip 는 /root/.local 로 넘어가 되고 venv, npx 도 된다(11-26 실측)
+ */
+export const SYSTEM_READONLY_DIRS = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/opt']
 /** bwrap 이 --proc 때 읽기 전용으로 덮는 곳(bubblewrap cover_proc_dirs). 바깥 /proc 를 쓸 때 직접 덮는다 */
 export const PROC_COVER_DIRS = ['/proc/sys', '/proc/sysrq-trigger', '/proc/irq', '/proc/bus']
 /** 백그라운드 잡 로그와 종료 코드(`tools/bash.js`). 러너 상태 안이지만 잡이 써야 한다 */
@@ -92,6 +99,8 @@ export function buildSandboxArgs({ protectedPaths = [], background = false, moun
   // 가짜를 본다(보안 검토 11-26 「가」). 부모 사슬을 제자리에 다시 붙여(쓰기 그대로) 마운트 지점으로 만들면 옮기기가 EBUSY 다.
   // 권한을 모두 내린 user namespace 라 감싼 셸은 이 마운트를 풀지 못한다. 얕은 것부터 붙인다(나중 마운트가 위에 얹힌다)
   for (const dir of ancestorsOf([...RUNNER_READONLY_DIRS, ...protectedTargets])) args.push('--bind-try', dir, dir)
+  // 시스템 폴더는 부모 사슬 다음, 러너 폴더보다 먼저. /opt 를 덮은 뒤 /opt/agent-runner 를 다시 덮어도 같은 읽기 전용이다
+  for (const dir of SYSTEM_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
   for (const dir of RUNNER_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
   // 나중 마운트가 이긴다: 잡 폴더만 다시 쓰기로 연다. 잡 메타는 러너 상태(읽기 전용) 쪽 jobs-meta 에 있다
   const jobs = JOBS_DIR()
@@ -142,6 +151,9 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
     ['protected', `${protectedDir}/${tag}`],
     // 잡 메타 폴더(러너 상태 안)를 감싼 셸이 쓰면 가짜 메타로 러너를 부릴 수 있다(보안 검토 11-26 「나」「다」)
     ['jobsMeta', `${jobsMetaDir}/${tag}`],
+    // bwrap 이 든 폴더와 /etc 에 새 파일을 만들 수 있으면 bwrap 바꿔치기, ld.so.preload 로 감싸기를 벗어난다(6-4 (2))
+    ['bwrapDir', `${path.dirname(bwrap)}/${tag}`],
+    ['etc', `/etc/${tag}`],
   ].filter(([, f]) => existsSync(path.dirname(f)))
   // 보호 폴더의 부모를 옮길 수 있으면 같은 이름으로 가짜를 세울 수 있다(「가」). 옮겨지면 바로 되돌린다
   const parent = path.dirname(protectedDir)
