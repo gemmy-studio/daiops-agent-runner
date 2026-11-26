@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.41.2] - 2026-11-26
+
+> **배포 순서**: 0.41.1 과 같다(순서 제약 없음, 정책 스냅샷 v9 그대로).
+
+### Fixed
+- **새 /proc 를 못 붙이는 환경에서도 감싸기를 켠다.** 0.41.1 이 Daytona 미리보기에서 `bwrap: Can't mount proc on /newroot/proc:
+  Invalid argument` 로 꺼졌다. Codex linux-sandbox 와 같은 문구 판정으로 `--proc` 없이 다시 점검하고, 그때는 바깥 /proc 가
+  보이므로 러너 메모리, 환경 변수 읽기가 막히는지(`runnerMem`, `runnerEnv`)까지 통과해야 켠다. `/health.toolSandbox.mountProc` 로 보인다.
+  로컬 docker 에서 이 모드로 보안 세션 재현 셋과 러너 메모리, 환경 변수, 신호 시험이 모두 막힘
+- 바깥 /proc 를 쓸 때 bwrap `--proc` 가 하던 덮기(cover_proc_dirs)가 빠지므로 `/proc/sys`, `/proc/sysrq-trigger`, `/proc/irq`,
+  `/proc/bus` 를 읽기 전용으로 덮고, 부팅 점검이 mountinfo 로 `/proc/sys` 가 ro 인지 본다(`procSys`). `runnerMem`, `runnerEnv` 는
+  러너가 pid 1 이어도 본다(바깥 번호라 겹치지 않음). 보안 세션 재확인 A, B(acccf82)
+
 ## [0.41.1] - 2026-11-26
 
 > **배포 순서**: 0.41.0 과 같다(순서 제약 없음, 정책 스냅샷 v9 그대로). 보안 세션 재확인 통과(11-26).
