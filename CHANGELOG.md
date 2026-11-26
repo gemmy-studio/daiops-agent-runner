@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.41.5] - 2026-11-27
+
+> **배포 순서**: 앱의 `python3 -I`(감싸기 밖 python 격리)와 함께 간다. 순서 제약은 없지만 둘 다 들어가야 10절 두 길이 모두 닫힌다.
+> 0.41.3, 0.41.4 는 따로 내지 않고 이 판에 함께 실린다. 미리보기에서 selfCheck 의 `rootHome`, `appStaging` blocked, `home` moved 를 본다.
+
+### Security
+- **감싼 셸 HOME 을 `/workspace/.home` 으로 옮기고 `/root` 를 읽기 전용으로**(보안 검토 11-27 10절). 감싼 셸이 `~/.bashrc`,
+  `~/.profile`, `~/.local` 의 `.pth` 를 써서 감싸기 밖 `bash -lc`, `python3` 이 실행하던 길을 막는다. `pip --user` 는 이제
+  `/workspace/.home/.local` 로 가서 재구성 백업에 실린다. 이전에 `/root/.local` 에 깔린 것은 감싼 셸에서 보이지 않는다
+- **앱 스크립트 폴더(`.daiops/.harness-sync`, `.harness-seed`)를 감싼 셸에서 읽기 전용, 파일 도구 거절**. 감쌀 때마다 미리 만든다
+- 부팅 점검에 `rootHome`, `appStaging`(쓰기 blocked), `home`(moved) 항목
+
 ## [0.41.4] - 2026-11-27
 
 > **배포 순서**: 순서 제약 없음(정책 스냅샷 v9 그대로). 0.41.3 은 따로 내지 않고 이 판에 함께 실린다.
