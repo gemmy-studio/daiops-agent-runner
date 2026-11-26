@@ -50,6 +50,8 @@ import path from 'node:path'
 const BWRAP_CANDIDATES = ['/usr/bin/bwrap', '/bin/bwrap']
 /** 러너 프로그램(구운 판)과 러너 상태(로그, 이벤트 버퍼, 감시 스크립트, 판 올림 사본). 예외 없이 읽기 전용 */
 export const RUNNER_READONLY_DIRS = ['/opt/agent-runner', '/workspace/.agent-runner']
+/** bwrap 이 --proc 때 읽기 전용으로 덮는 곳(bubblewrap cover_proc_dirs). 바깥 /proc 를 쓸 때 직접 덮는다 */
+export const PROC_COVER_DIRS = ['/proc/sys', '/proc/sysrq-trigger', '/proc/irq', '/proc/bus']
 /** 백그라운드 잡 로그와 종료 코드(`tools/bash.js`). 러너 상태 안이지만 잡이 써야 한다 */
 const JOBS_DIR = resolveJobsDir
 
@@ -93,6 +95,9 @@ export function buildSandboxArgs({ protectedPaths = [], background = false, moun
   const jobs = JOBS_DIR()
   args.push('--bind-try', jobs, jobs)
   for (const target of protectedTargets) args.push('--ro-bind-try', target, target)
+  // --proc 가 하던 덮기(bwrap cover_proc_dirs)가 바깥 /proc 를 쓸 때는 빠진다. 감싼 셸의 uid 0 은 바깥 root 와 같은 번호라
+  // sysctl 쓰기 판정을 통과할 수 있으므로 같은 넷을 읽기 전용으로 덮는다(보안 세션 11-26 재확인 A)
+  if (!mountProc) for (const p of PROC_COVER_DIRS) args.push('--ro-bind-try', p, p)
   args.push('--')
   return args
 }
@@ -149,9 +154,12 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
     // 새 pid namespace 의 번호는 1부터라 러너 번호가 작으면 겹칠 수 있다. 10 넘을 때만 본다
     runnerPid > 10 ? `kill -0 ${runnerPid} 2>/dev/null && echo "runnerPid=visible" || echo "runnerPid=hidden"` : 'echo "runnerPid=skipped"',
     // 바깥 /proc 를 쓰면 러너의 /proc/<pid> 가 보인다. 메모리, 환경 변수는 user namespace 밖이라 읽히지 않아야 한다
-    ...(!mountProc && runnerPid > 10 ? [
+    // 바깥 /proc 의 번호는 바깥 번호라 새 namespace 번호와 겹치지 않는다. 러너가 pid 1 이어도 본다(재확인 B)
+    ...(!mountProc ? [
       `head -c 1 /proc/${runnerPid}/mem >/dev/null 2>&1 && echo "runnerMem=read" || echo "runnerMem=blocked"`,
       `head -c 1 /proc/${runnerPid}/environ >/dev/null 2>&1 && echo "runnerEnv=read" || echo "runnerEnv=blocked"`,
+      // 맨 위 마운트(마지막 줄)의 옵션이 ro 로 시작해야 한다
+      `awk '$5=="/proc/sys"{o=$6} END{print (o ~ /^ro/ ? "procSys=ro" : "procSys=" (o == "" ? "none" : "rw"))}' /proc/self/mountinfo`,
     ] : []),
   ]
   const result = {}
@@ -185,7 +193,7 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
     umount: 'blocked',
     ...(checkParent ? { parentMove: 'blocked' } : {}),
     ...(runnerPid > 10 ? { runnerPid: 'hidden' } : {}),
-    ...(!mountProc && runnerPid > 10 ? { runnerMem: 'blocked', runnerEnv: 'blocked' } : {}),
+    ...(!mountProc ? { runnerMem: 'blocked', runnerEnv: 'blocked', procSys: 'ro' } : {}),
   }
   const wrong = Object.entries(expected).filter(([k, v]) => result[k] !== v).map(([k, v]) => `${k}=${result[k] ?? '없음'}(기대 ${v})`)
   if (leaked.length > 0) wrong.push(`새어 나감: ${leaked.join(', ')}`)

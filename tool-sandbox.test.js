@@ -15,6 +15,7 @@ import {
   RUNNER_READONLY_DIRS,
   ancestorsOf,
   isProcMountFailure,
+  PROC_COVER_DIRS,
   _resetToolSandboxForTest,
 } from './tool-sandbox.js'
 
@@ -179,24 +180,43 @@ describe('initToolSandbox, wrapToolSpawn', () => {
     const spawn = (file, args) => {
       calls.push(args)
       if (args.includes('--proc')) return { status: 1, stdout: '', stderr: PROC_FAIL }
-      const lines = [...PASS_LINES, 'runnerMem=blocked', 'runnerEnv=blocked'].map((l) => (l.startsWith('runnerPid=') && process.pid <= 10 ? 'runnerPid=skipped' : l))
+      const lines = [...PASS_LINES, 'runnerMem=blocked', 'runnerEnv=blocked', 'procSys=ro'].map((l) => (l.startsWith('runnerPid=') && process.pid <= 10 ? 'runnerPid=skipped' : l))
       return { status: 0, stdout: lines.join('\n'), stderr: '' }
     }
     const s = initToolSandbox({ exists: (p) => p === '/usr/bin/bwrap', spawn })
     assert.equal(s.enabled, true, s.reason)
     assert.equal(s.mountProc, false)
     assert.equal(calls.length, 2)
-    if (process.pid > 10) assert.match(calls[1].at(-1), /\/proc\/\d+\/environ/)
-    assert.ok(!wrapToolSpawn(plain).args.includes('--proc'), '감쌀 때도 --proc 없이')
+    assert.match(calls[1].at(-1), /\/proc\/\d+\/environ/)
+    const wrapped = wrapToolSpawn(plain).args
+    assert.ok(!wrapped.includes('--proc'), '감쌀 때도 --proc 없이')
+    for (const p of PROC_COVER_DIRS) assert.ok(wrapped.join(' ').includes(`--ro-bind-try ${p} ${p}`), p)
   })
 
-  it('--proc 없이 다시 한 점검에서 러너 환경 변수가 읽히면 켜지 않는다', { skip: process.pid <= 10 }, () => {
+  it('--proc 없이 다시 한 점검에서 러너 환경 변수가 읽히면 켜지 않는다', () => {
     const spawn = (file, args) => args.includes('--proc')
       ? { status: 1, stdout: '', stderr: PROC_FAIL }
-      : { status: 0, stdout: [...PASS_LINES, 'runnerMem=blocked', 'runnerEnv=read'].join('\n'), stderr: '' }
+      : { status: 0, stdout: [...PASS_LINES, 'runnerMem=blocked', 'runnerEnv=read', 'procSys=ro'].join('\n'), stderr: '' }
     const s = initToolSandbox({ exists: () => true, spawn })
     assert.equal(s.enabled, false)
     assert.match(s.reason, /runnerEnv=read/)
+  })
+
+  // 재확인 B: 바깥 /proc 번호는 겹치지 않으니 러너가 pid 1 이어도 메모리, 환경 변수 점검을 건너뛰지 않는다
+  it('바깥 /proc 모드에서는 러너가 pid 1 이어도 runnerMem, runnerEnv, procSys 를 본다', () => {
+    const { spawn, calls } = fakeSpawn([...PASS_LINES.filter((l) => !l.startsWith('runnerPid=')), 'runnerPid=skipped'])
+    const r = runSelfCheck('/usr/bin/bwrap', { spawn, runnerPid: 1, protectedDir: '/tmp', mountProc: false })
+    assert.equal(r.pass, false)
+    assert.match(r.reason, /runnerMem=없음/)
+    assert.match(r.reason, /procSys=없음/)
+    assert.match(calls[0].args.at(-1), /\/proc\/1\/mem/)
+  })
+
+  it('바깥 /proc 모드에서 /proc/sys 가 쓰기로 붙어 있으면 켜지 않는다', () => {
+    const lines = [...PASS_LINES, 'runnerMem=blocked', 'runnerEnv=blocked', 'procSys=rw']
+    const r = runSelfCheck('/usr/bin/bwrap', { spawn: fakeSpawn(lines).spawn, runnerPid: 4242, protectedDir: '/tmp', mountProc: false })
+    assert.equal(r.pass, false)
+    assert.match(r.reason, /procSys=rw/)
   })
 
   it('/proc 문구가 아닌 실패는 다시 하지 않는다', () => {
