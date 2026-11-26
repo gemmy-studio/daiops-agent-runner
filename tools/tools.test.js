@@ -826,6 +826,12 @@ describe('러너 폴더 파일 도구 막기 (보안 검토 11/26 6-2)', async (
     }
   })
 
+  it('apt 가 받아 둔 .deb 와 debconf 답 자리도 거절한다(12-1)', () => {
+    for (const f of ['/var/cache/apt/archives/x.deb', '/var/cache/debconf/config.dat', '/var/lib/dpkg/info/procps.postinst']) {
+      assert.equal(isWriteDenied(f).denied, true, f)
+    }
+  })
+
   it('이름만 닮은 옆 폴더는 막지 않는다', () => {
     assert.equal(isWriteDenied('/workspace/.agent-runner-notes/a.md').denied, false)
     assert.equal(isWriteDenied('/opt/agent-runner2/a.js').denied, false)

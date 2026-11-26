@@ -58,6 +58,11 @@ export const RUNNER_READONLY_DIRS = ['/opt/agent-runner', '/workspace/.agent-run
  */
 export const SYSTEM_READONLY_DIRS = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/opt']
 /**
+ * apt, dpkg 가 감싸기 밖에서 root 로 읽는 상태 자리. 감싼 셸이 postinst 를 바꾸고 트리거를 더하면 밖에서 상관없는 꾸러미를
+ * 깔 때 심은 것이 uid 0 으로 돌았다(보안 검토 11-27 12-1 probe15). 꾸민 목록, 받아 둔 .deb, debconf 답도 같은 자리다
+ */
+export const PACKAGE_STATE_DIRS = ['/var/lib/dpkg', '/var/lib/apt/lists', '/var/cache/apt/archives', '/var/cache/debconf']
+/**
  * 앱이 감싸기 밖(Daytona executeCommand)에서 python 으로 돌리는 스크립트와 그 재료를 올리는 폴더(skill-sync.ts, harness-seed.ts).
  * 감싼 셸이 여기 json.py 를 심거나 sync.py 를 올리기 직전 바꿔치면 감싸기 밖에서 실행됐다(보안 검토 11-27 10절 probe12).
  * 감쌀 때마다 미리 만들어 읽기 전용으로 덮는다. 앱은 이 폴더를 지우지 않는다
@@ -120,6 +125,7 @@ export function buildSandboxArgs({ protectedPaths = [], background = false, moun
   for (const dir of ancestorsOf([...RUNNER_READONLY_DIRS, ...APP_STAGING_DIRS, ...protectedTargets])) args.push('--bind-try', dir, dir)
   // 시스템 폴더는 부모 사슬 다음, 러너 폴더보다 먼저. /opt 를 덮은 뒤 /opt/agent-runner 를 다시 덮어도 같은 읽기 전용이다
   for (const dir of SYSTEM_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
+  for (const dir of PACKAGE_STATE_DIRS) args.push('--ro-bind-try', dir, dir)
   args.push('--ro-bind-try', '/root', '/root')
   args.push('--ro-bind-try', ROOT_NODE_MODULES, ROOT_NODE_MODULES)
   for (const dir of RUNNER_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
@@ -184,6 +190,8 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
     ['rootHome', `/root/${tag}`],
     ['appStaging', `${APP_STAGING_DIRS[0]}/${tag}`],
     ['rootNodeModules', `${ROOT_NODE_MODULES}/${tag}`],
+    ['dpkgState', `/var/lib/dpkg/${tag}`],
+    ['aptArchives', `/var/cache/apt/archives/${tag}`],
   ].filter(([, f]) => existsSync(path.dirname(f)))
   // 보호 폴더의 부모를 옮길 수 있으면 같은 이름으로 가짜를 세울 수 있다(「가」). 옮겨지면 바로 되돌린다
   const parent = path.dirname(protectedDir)
