@@ -13,7 +13,7 @@ import { ApprovalManager } from './approval-manager.js'
 import { REQUEST_SECRET_TOOL, isValidSecretKey, isReservedKey, normalizeAllowedHosts } from './tools/request-secret.js'
 import { REMEMBER_TOOL, isValidRememberContent, REMEMBER_CONTENT_MAX, isRememberFailure, blockedRememberGuidance } from './tools/remember.js'
 import { FORGET_TOOL, REVISE_TOOL, isValidRuleText, MEMORY_RULE_MAX, resolveMemoryOps, readRuleTarget, formatRuleList } from './tools/memory-edit.js'
-import { INSTALL_SYSTEM_PACKAGE_TOOL_NAME, validatePackageNames } from './tools/install-system-package.js'
+import { INSTALL_SYSTEM_PACKAGE_TOOL_NAME, validatePackageNames, ensureApprovedSystemPackages } from './tools/install-system-package.js'
 import { appendEvent, ensureBuffer, getEventsSince, getBufferState, forceCleanup } from './event-buffer.js'
 import { postTerminalIngest } from './ingest-client.js'
 import { runAnthropicSdkStream } from './llm-wrapper.js'
@@ -1761,7 +1761,11 @@ export async function handleChat(rawParams, res, req) {
     const SDK_BUILTIN_TOOLS = ['Read', 'Edit', 'Glob', 'Grep', 'Bash', 'Write', 'BashOutput', 'KillShell', 'WebSearch', 'WebFetch']
     // OS 꾸러미 설치 요청(0.42.0)은 클라우드가 승인 목록 칸을 보낼 때만 보인다. 옛 클라우드, 사무실판은 기록과 다시 깔기가
     // 없어 깔아도 재구성 때 사라지므로 아예 보이지 않게 한다
-    if (Array.isArray(params.policy?.approvedSystemPackages)) SDK_BUILTIN_TOOLS.push(INSTALL_SYSTEM_PACKAGE_TOOL_NAME)
+    if (Array.isArray(params.policy?.approvedSystemPackages)) {
+      SDK_BUILTIN_TOOLS.push(INSTALL_SYSTEM_PACKAGE_TOOL_NAME)
+      // 승인 목록에서 빠진 꾸러미(재구성, 복직 뒤)를 뒤에서 다시 깐다. 턴을 기다리게 하지 않는다
+      void ensureApprovedSystemPackages(params.policy.approvedSystemPackages).catch(() => {})
+    }
     const userTools = Array.isArray(params.tools) && params.tools.length > 0
       ? params.tools
       : []

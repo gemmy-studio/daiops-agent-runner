@@ -23,7 +23,7 @@ import { sweepOrphanedBuffers } from './event-buffer.js'
 import { admissionStats } from './tool-cpu-lane.js'
 import { initToolCgroup, toolCgroupState } from './tool-cgroup.js'
 import { initToolSandbox, toolSandboxState } from './tool-sandbox.js'
-import { previewInstallRequest } from './tools/install-system-package.js'
+import { previewInstallRequest, systemPackagesState } from './tools/install-system-package.js'
 
 const PORT = parseInt(process.env.AGENT_RUNNER_PORT ?? '8430', 10)
 const HOST = process.env.AGENT_RUNNER_HOST ?? '0.0.0.0'
@@ -239,6 +239,14 @@ const server = createServer(async (req, res) => {
       toolSandbox: (() => {
         try {
           return toolSandboxState()
+        } catch {
+          return null
+        }
+      })(),
+      // 승인된 OS 꾸러미 다시 깔기 상태(0.42.0). 이름만 싣는다
+      systemPackages: (() => {
+        try {
+          return systemPackagesState()
         } catch {
           return null
         }

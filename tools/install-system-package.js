@@ -117,8 +117,12 @@ const APT_GET = '/usr/bin/apt-get'
 const DPKG_QUERY = '/usr/bin/dpkg-query'
 const POLICY_RC_D = '/usr/sbin/policy-rc.d'
 const APT_LISTS = '/var/lib/apt/lists'
-/** 설치 뒤 바뀌면 안 되는 곳. 훅이 들어오면 다음 apt 실행 때 감싸기 밖 root 로 돈다(보안 검토 12-7). 거절 목록이 1차, 이것이 2차 */
-export const HOOK_PATHS = ['/etc/apt/apt.conf.d', '/etc/dpkg/dpkg.cfg.d', '/etc/ld.so.preload']
+/**
+ * 설치 뒤 바뀌면 안 되는 곳. 훅이 들어오면 다음 apt 실행 때 감싸기 밖 root 로 돈다(보안 검토 12-7). 거절 목록이 1차, 이것이 2차.
+ * /etc/apt 는 트리 전체(sources.list.d, preferences.d, trusted.gpg.d 까지). 꾸러미가 저장소나 키를 더하면 다음 설치부터 공식 밖
+ * 꾸러미가 들어온다(12-8 권장)
+ */
+export const HOOK_PATHS = ['/etc/apt', '/etc/dpkg/dpkg.cfg.d', '/etc/ld.so.preload']
 /** 감싼 셸이 못 쓰는 러너 상태 아래(RUNNER_READONLY_DIRS). 설치 기록과 임시 폴더 */
 const STATE_DIR = process.env.AGENT_RUNNER_STATE_DIR || '/workspace/.agent-runner'
 export const SYSTEM_PACKAGES_FILE = () => path.join(STATE_DIR, 'system-packages.json')
@@ -146,22 +150,48 @@ function serialize(fn) {
 const tail = (s, n = 600) => String(s).trim().slice(-n)
 const fail = (msg) => ({ content: `InstallSystemPackage: ${msg}`, is_error: true })
 
-/** 훅 자리의 지문(파일 이름, 크기, 내용). 디렉터리는 한 단계만 본다(apt.conf.d, dpkg.cfg.d 는 평평하다) */
-export function hookFingerprint(paths = HOOK_PATHS) {
-  const parts = []
-  for (const p of paths) {
+/**
+ * 훅 자리의 사진: 경로 → 내용(Buffer). 폴더는 아래까지 다 본다. 없는 파일은 담지 않는다
+ * @returns {Map<string, Buffer>}
+ */
+export function snapshotHooks(paths = HOOK_PATHS) {
+  const out = new Map()
+  const walk = (p) => {
     let entries
-    try { entries = readdirSync(p).sort() } catch {
-      try { parts.push(`${p}=${readFileSync(p, 'utf8')}`) } catch { parts.push(`${p}=<없음>`) }
-      continue
+    try { entries = readdirSync(p, { withFileTypes: true }) } catch {
+      try { out.set(p, readFileSync(p)) } catch { /* 없음 */ }
+      return
     }
-    for (const name of entries) {
-      let body = ''
-      try { body = readFileSync(path.join(p, name), 'utf8') } catch { body = '<읽지 못함>' }
-      parts.push(`${p}/${name}=${body}`)
+    for (const e of entries) {
+      const child = path.join(p, e.name)
+      if (e.isDirectory()) walk(child)
+      else { try { out.set(child, readFileSync(child)) } catch { out.set(child, Buffer.from('<읽지 못함>')) } }
     }
   }
-  return parts.join('\n')
+  for (const p of paths) walk(p)
+  return out
+}
+
+/** 두 사진이 다른 경로들 */
+export function diffHooks(before, after) {
+  const changed = []
+  for (const [p, buf] of after) if (!before.has(p) || !before.get(p).equals(buf)) changed.push(p)
+  for (const p of before.keys()) if (!after.has(p)) changed.push(p)
+  return changed
+}
+
+/**
+ * 바뀐 훅 자리를 설치 전으로 되돌린다. 새 파일은 지우고, 바뀌거나 지워진 파일은 전 내용으로 쓴다.
+ * purge 를 부르기 전에 한다. apt 는 실행 시작 때 apt.conf.d 를, dpkg 는 dpkg.cfg.d 를 읽으므로, 되돌리지 않고 purge 하면
+ * 방금 들어온 훅이 그 실행에서 감싸기 밖 root 로 한 번 돈다(12-8 권장)
+ */
+export function restoreHooks(before, after = snapshotHooks()) {
+  for (const p of diffHooks(before, after)) {
+    try {
+      if (before.has(p)) { mkdirSync(path.dirname(p), { recursive: true }); writeFileSync(p, before.get(p)) }
+      else rmSync(p, { force: true })
+    } catch { /* 남은 것은 아래 다시 비교가 알린다 */ }
+  }
 }
 
 /** 기록 파일에 더한다(정본은 앱 agent_config, 이것은 보조). 쓰기 실패는 설치 결과를 바꾸지 않는다 */
@@ -247,8 +277,14 @@ export function previewInstallRequest(input, deps = {}) {
 export async function runInstallSystemPackage(input, _ctx = {}, deps = {}) {
   const v = validatePackageNames(input)
   if (!v.ok) return fail(v.error)
-  return serialize(async () => {
-    const run = deps.run ?? defaultRun
+  return serialize(() => installCore(v.names, deps))
+}
+
+/** 줄 안에서만 부른다(serialize). 이름은 검사를 지난 것 */
+async function installCore(names, deps = {}) {
+  const v = { names }
+  const run = deps.run ?? defaultRun
+  {
     let tmpdir = deps.tmpdir
     if (!tmpdir) {
       mkdirSync(APT_TMP_ROOT(), { recursive: true })
@@ -265,14 +301,17 @@ export async function runInstallSystemPackage(input, _ctx = {}, deps = {}) {
         return { content: `Already installed: ${v.names.join(', ')}` }
       }
       const pinned = preview.installs.map((p) => `${p.name}=${p.version}`)
-      const fingerprint = deps.hookFingerprint ?? hookFingerprint
-      const before = fingerprint()
+      const hooks = deps.hooks ?? { snapshot: snapshotHooks, restore: restoreHooks }
+      const before = hooks.snapshot()
       const res = await run(APT_GET, ['install', '-y', '-qq', '--no-install-recommends', '--no-remove', '--no-upgrade', '--', ...pinned], { env: aptEnv(tmpdir) })
-      if (fingerprint() !== before) {
-        // 거절 목록을 지나 훅을 깐 꾸러미. 이번에 깐 것을 지운다(정확히 무엇이 훅을 넣었는지는 따지지 않는다)
+      if (diffHooks(before, hooks.snapshot()).length > 0) {
+        // 거절 목록을 지나 훅이나 저장소를 바꾼 꾸러미. 훅 자리를 먼저 되돌리고(purge 실행이 새 훅을 돌리지 않게) 이번에 깐 것을 지운다
+        hooks.restore(before)
         await run(APT_GET, ['purge', '-y', '-qq', '--', ...preview.installs.map((p) => p.name)], { env: aptEnv(tmpdir) })
-        const after = fingerprint()
-        return fail(`these packages change how apt or dpkg runs and were removed${after !== before ? ' (removal was incomplete; the platform team has been notified)' : ''}`)
+        // purge 가 훅 자리를 다시 바꿨으면(설정 파일 지움 등) 한 번 더 되돌린다
+        hooks.restore(before)
+        const left = diffHooks(before, hooks.snapshot())
+        return fail(`these packages change how apt or dpkg runs and were removed${left.length > 0 ? ' (restore was incomplete; the platform team has been notified)' : ''}`)
       }
       if (res.code !== 0) return fail(`apt-get failed (exit ${res.code}): ${tail(res.stdout + res.stderr)}`)
       const installed = await queryInstalled(run, tmpdir, v.names)
@@ -286,10 +325,60 @@ export async function runInstallSystemPackage(input, _ctx = {}, deps = {}) {
     } finally {
       if (!deps.tmpdir) { try { rmSync(tmpdir, { recursive: true, force: true }) } catch { /* 다음 회차가 덮어쓴다 */ } }
     }
+  }
+}
+
+/** 깔려 있는(ii) 꾸러미와 판. 지워졌지만 설정이 남은(rc) 것은 깔린 것으로 보지 않는다 */
+async function queryInstalled(run, tmpdir, names) {
+  const q = await run(DPKG_QUERY, ['-W', '-f', '${Package}\t${Version}\t${db:Status-Abbrev}\n', '--', ...names], { env: aptEnv(tmpdir), timeoutMs: 10_000 })
+  return String(q.stdout).split('\n').filter(Boolean)
+    .map((l) => { const [name, version, status] = l.split('\t'); return { name, version, status: status ?? 'ii ' } })
+    .filter((p) => p.status.startsWith('ii'))
+    .map(({ name, version }) => ({ name, version }))
+}
+
+const ensureState = { status: 'idle', key: null, missing: [], failed: [], at: null }
+/** /health 에 싣는 다시 깔기 상태 */
+export function systemPackagesState() {
+  return { ...ensureState, missing: [...ensureState.missing], failed: [...ensureState.failed] }
+}
+
+/**
+ * 클라우드가 대화 요청마다 보내는 그 직원의 승인 목록(`policy.approvedSystemPackages`)에서 빠진 꾸러미를 뒤에서 다시 깐다.
+ * 재구성, 복직으로 새 작업 환경이 되면 첫 대화에서 채워진다(기획 4절, ADR 69 §3 「설치한 꾸러미는 잃는다」 해소). 같은 목록은
+ * 부팅마다 한 번만 본다. 같은 이름 검사, 같은 -s 규칙, 같은 줄(AI 팀원의 설치 요청은 이것이 끝날 때까지 기다린다)
+ */
+export function ensureApprovedSystemPackages(list, deps = {}) {
+  const names = [...new Set((Array.isArray(list) ? list : []).map((n) => String(n).trim()))]
+    .filter((n) => PACKAGE_NAME.test(n) && !isDeniedPackage(n))
+    .sort()
+  const key = names.join(' ')
+  if (names.length === 0 || key === ensureState.key) return Promise.resolve(systemPackagesState())
+  ensureState.key = key
+  ensureState.status = 'running'
+  return serialize(async () => {
+    const run = deps.run ?? defaultRun
+    try {
+      const installed = new Set((await queryInstalled(run, deps.tmpdir ?? '/tmp', names)).map((p) => p.name))
+      const missing = names.filter((n) => !installed.has(n))
+      ensureState.missing = missing
+      ensureState.failed = []
+      for (let i = 0; i < missing.length; i += MAX_PACKAGES) {
+        const chunk = missing.slice(i, i + MAX_PACKAGES)
+        const r = await installCore(chunk, deps)
+        if (r.is_error) ensureState.failed.push(...chunk.map((name) => ({ name, error: String(r.content).slice(0, 300) })))
+      }
+      ensureState.status = ensureState.failed.length > 0 ? 'failed' : 'ok'
+    } catch (err) {
+      ensureState.status = 'failed'
+      ensureState.failed = [{ name: '*', error: err instanceof Error ? err.message : String(err) }]
+    }
+    ensureState.at = new Date().toISOString()
+    return systemPackagesState()
   })
 }
 
-async function queryInstalled(run, tmpdir, names) {
-  const q = await run(DPKG_QUERY, ['-W', '-f', '${Package}\t${Version}\n', '--', ...names], { env: aptEnv(tmpdir), timeoutMs: 10_000 })
-  return String(q.stdout).split('\n').filter(Boolean).map((l) => { const [name, version] = l.split('\t'); return { name, version } })
+/** 시험용 */
+export function resetSystemPackagesStateForTest() {
+  Object.assign(ensureState, { status: 'idle', key: null, missing: [], failed: [], at: null })
 }

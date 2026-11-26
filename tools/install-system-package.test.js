@@ -7,7 +7,7 @@ import path from 'node:path'
 process.env.AGENT_RUNNER_STATE_DIR = mkdtempSync(path.join(os.tmpdir(), 'isp-state-'))
 const {
   validatePackageNames, parseSimulation, sumDownloadBytes, aptEnv, isDeniedPackage,
-  runInstallSystemPackage, SYSTEM_PACKAGES_FILE, MAX_DOWNLOAD_BYTES, previewInstallRequest,
+  runInstallSystemPackage, SYSTEM_PACKAGES_FILE, MAX_DOWNLOAD_BYTES, previewInstallRequest, ensureApprovedSystemPackages, resetSystemPackagesStateForTest,
 } = await import('./install-system-package.js')
 const { evaluateSystemPackageInstall } = await import('../handler.js')
 
@@ -126,17 +126,48 @@ describe('runInstallSystemPackage', () => {
     assert.ok(!f.calls.some((c) => c.args.includes('-y')))
   })
 
-  it('설치가 apt, dpkg 훅 자리를 바꾸면 이번에 깐 것을 지우고 실패(12-7)', async () => {
-    let n = 0
+  it('설치가 apt, dpkg 훅 자리를 바꾸면 purge 전에 되돌리고, 이번에 깐 것을 지우고 실패(12-7, 12-8)', async () => {
+    const order = []
+    let state = new Map([['/etc/apt/apt.conf.d/70debconf', Buffer.from('a')]])
+    const hooks = {
+      snapshot: () => new Map(state),
+      restore: (before) => { order.push('restore'); state = new Map(before) },
+    }
     const { f, d } = deps([
       ['apt-get install -s', { stdout: SIM_FFMPEG }],
       ['apt-get install --print-uris', { stdout: "'u' a.deb 10 x\n" }],
-    ], { hookFingerprint: () => (f.calls.some((c) => c.args.includes('-y') && c.args[0] === 'install') && !f.calls.some((c) => c.args[0] === 'purge') ? `changed${++n}` : 'same') })
+    ], { hooks })
+    const run0 = d.run
+    d.run = async (file, args, opts) => {
+      if (args[0] === 'install' && args.includes('-y')) state.set('/etc/apt/apt.conf.d/99evil', Buffer.from('DPkg::Pre-Invoke'))
+      if (args[0] === 'purge') order.push('purge')
+      return run0(file, args, opts)
+    }
     const r = await runInstallSystemPackage({ packages: ['ffmpeg'], reason: 'x' }, {}, d)
     assert.equal(r.is_error, true)
     assert.match(r.content, /change how apt or dpkg runs and were removed$/)
+    assert.deepEqual(order.slice(0, 2), ['restore', 'purge'], '되돌리기가 purge 보다 먼저')
     const purge = f.calls.find((c) => c.args[0] === 'purge')
     assert.deepEqual(purge.args.slice(purge.args.indexOf('--') + 1), ['libavutil57', 'ffmpeg'])
+  })
+
+  it('훅 사진: 새 파일, 바뀐 파일, 지워진 파일을 잡고 되돌린다(실제 파일)', async () => {
+    const { snapshotHooks, diffHooks, restoreHooks } = await import('./install-system-package.js')
+    const { mkdtempSync: mk, writeFileSync: w, mkdirSync: md, existsSync: ex, readFileSync: rd, rmSync: rm } = await import('node:fs')
+    const root = mk(path.join(os.tmpdir(), 'hooks-'))
+    md(path.join(root, 'apt/sources.list.d'), { recursive: true })
+    w(path.join(root, 'apt/apt.conf'), 'keep')
+    w(path.join(root, 'apt/sources.list.d/debian.sources'), 'deb')
+    const paths = [path.join(root, 'apt')]
+    const before = snapshotHooks(paths)
+    w(path.join(root, 'apt/sources.list.d/evil.list'), 'deb http://evil/ x')
+    w(path.join(root, 'apt/apt.conf'), 'changed')
+    rm(path.join(root, 'apt/sources.list.d/debian.sources'))
+    assert.equal(diffHooks(before, snapshotHooks(paths)).length, 3)
+    restoreHooks(before, snapshotHooks(paths))
+    assert.equal(diffHooks(before, snapshotHooks(paths)).length, 0)
+    assert.equal(ex(path.join(root, 'apt/sources.list.d/evil.list')), false)
+    assert.equal(rd(path.join(root, 'apt/apt.conf'), 'utf8'), 'keep')
   })
 
   it('받을 크기 상한', async () => {
@@ -200,6 +231,33 @@ describe('previewInstallRequest(결재 카드 미리 보기)', () => {
   })
 })
 
+describe('ensureApprovedSystemPackages(다시 깔기)', () => {
+  it('승인 목록에서 빠진 것만 같은 규칙으로 깔고, 같은 목록은 다시 보지 않는다', async () => {
+    resetSystemPackagesStateForTest()
+    const { f, d } = deps([
+      ['dpkg-query -W', { stdout: 'jq\t1.6\tii \nffmpeg\t7:5\trc \n' }],
+      ['apt-get install -s', { stdout: SIM_FFMPEG }],
+      ['apt-get install --print-uris', { stdout: "'u' a.deb 10 x\n" }],
+    ])
+    const st = await ensureApprovedSystemPackages(['jq', 'ffmpeg', 'bubblewrap', '-o'], d)
+    assert.equal(st.status, 'ok')
+    assert.deepEqual(st.missing, ['ffmpeg'], 'rc(설정만 남음)는 빠진 것, 거절 목록과 틀린 이름은 버림')
+    const install = f.calls.find((c) => c.args[0] === 'install' && c.args.includes('-y'))
+    assert.ok(install.args.includes('ffmpeg=7:5.1.6-0+deb12u1') && install.args.includes('--no-remove'))
+    const n = f.calls.length
+    await ensureApprovedSystemPackages(['ffmpeg', 'jq'], d)
+    assert.equal(f.calls.length, n, '같은 목록(순서 무관)은 다시 보지 않는다')
+  })
+
+  it('하나가 실패해도 상태에 남기고 던지지 않는다', async () => {
+    resetSystemPackagesStateForTest()
+    const { d } = deps([['apt-get install -s', { stdout: 'Inst libc6 [1] (2 D [amd64])\n' }]])
+    const st = await ensureApprovedSystemPackages(['imagemagick'], d)
+    assert.equal(st.status, 'failed')
+    assert.equal(st.failed[0].name, 'imagemagick')
+  })
+})
+
 describe('evaluateSystemPackageInstall(결재)', () => {
   const input = { packages: ['ffmpeg'], reason: 'video' }
   it('승인 목록에 다 있으면 통과, 하나라도 없으면 결재', () => {
@@ -222,7 +280,7 @@ describe('evaluateSystemPackageInstall(결재)', () => {
 describe('노출', () => {
   it('클라우드가 승인 목록 칸을 보낼 때만 도구가 보인다', () => {
     const src = readFileSync(new URL('../handler.js', import.meta.url), 'utf8')
-    assert.match(src, /if \(Array\.isArray\(params\.policy\?\.approvedSystemPackages\)\) SDK_BUILTIN_TOOLS\.push\(INSTALL_SYSTEM_PACKAGE_TOOL_NAME\)/)
+    assert.match(src, /if \(Array\.isArray\(params\.policy\?\.approvedSystemPackages\)\) \{\n\s+SDK_BUILTIN_TOOLS\.push\(INSTALL_SYSTEM_PACKAGE_TOOL_NAME\)/)
     assert.match(src, /if \(toolName === INSTALL_SYSTEM_PACKAGE_TOOL_NAME\) return evaluateSystemPackageInstall\(policy, input, hasUiChannel\)/)
   })
 })
