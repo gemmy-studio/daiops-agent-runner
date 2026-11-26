@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-11-27
+
+> **배포 순서**: 러너가 먼저 가도 된다. 도구는 클라우드가 `policy.approvedSystemPackages` 를 보낼 때만 보인다. 제거는 이미지에
+> `/usr/share/daiops/base-packages.txt` 가 있어야 되고, 없으면 거절한다(앱이 이미지 굽기에 넣는다).
+
+### Changed
+- `InstallSystemPackage` 는 승인 목록에 있어도 **매번 결재**(대표 11-27 「프로그램 설치 얘기니 매번 승인을 하자」)
+- 결과 끝 줄 `[system-packages] installed=…` 표지. 이미 깔려 있던 이름은 빼고 `Already installed:` 로 따로 알린다
+
+### Added
+- **`RemoveSystemPackage` 도구**(대표 11-27 「제거도 동일해」). 승인 목록 안 이름만, 매번 결재. 기본 이미지 꾸러미는 지우지 않고,
+  `purge -s` 에 이름 밖 꾸러미(역의존)나 설치, 올림이 나오면 거절, policy-rc.d 101 확인, 훅 자리 바뀌면 되돌림. 끝 줄 `removed=` 표지
+- 결재 길이 없을 때의 거절 안내 문구(`install-needs-approval`, `remove-needs-approval`, `remove-not-installed-by-request`)
+
 ## [0.42.1] - 2026-11-27
 
 > 0.42.0 태그 CI 가 knip 에서 멈춰 이미지와 Release 가 나오지 않았다. 내용은 0.42.0 과 같고 안 쓰는 export 셋만 뗐다.

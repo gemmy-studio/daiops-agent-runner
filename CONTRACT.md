@@ -171,6 +171,21 @@ Response: SSE stream. event 종류는 `event-buffer.js` / cloud `sdk-event-mappe
   를 키 정렬 JSON 으로 적어 sha256. 공용 시험 자료 `test-fixtures/mcp-tool-fingerprint-vectors.json` 은 클라우드
   `src/lib/security/__tests__/fixtures/` 의 같은 파일을 복사한 것이다. **한쪽을 고치면 다른 쪽도 같은 판에서 고치고 자료를 다시 복사한다**
 
+#### OS 꾸러미 설치, 제거 (0.42.0, 0.43.0)
+
+- `policy.approvedSystemPackages`: string[] 이 **배열로 올 때만** `InstallSystemPackage` · `RemoveSystemPackage` 가 보인다. 그 직원이
+  이 길로 깐 꾸러미 이름 목록이다. 러너는 첫 대화에서 빠진 것을 결재 없이 다시 깐다(재구성 뒤 되살리기)
+- 설치, 제거 모두 **매번** `plan_request`(0.43.0, 대표 11-27). 결재 길이 없으면 거절. 제거는 이름이 모두 목록 안일 때만 결재로
+  올리고 아니면 `remove-not-installed-by-request` 로 거절. 누가 결재할 수 있는지는 클라우드가 정한다
+- 성공한 도구 결과의 끝 줄에 표지가 붙는다. 클라우드는 이 줄로 목록을 고친다:
+  - `[system-packages] installed=a,b`: 이번에 **새로** 깐 이름만(이미 깔려 있던 이름은 빠진다)
+  - `[system-packages] removed=a,b`: 목록에서 뺄 이름(깔려 있지 않았던 이름 포함)
+  - 실패(`is_error`)에는 붙지 않는다
+- 제거는 기본 이미지 꾸러미 목록 `/usr/share/daiops/base-packages.txt`(이미지 굽기 **맨 끝**에 `dpkg-query` 의 깔린 꾸러미 전부)에
+  든 이름을 지우지 않는다. 파일이 없으면 아무것도 지우지 않는다
+- `POST /v1/system-packages/preview` body `{ packages }`: 결재 카드용 미리 보기 `{ ok, installs: [{name, version}], downloadBytes }` 또는
+  `{ ok: false, error }`. 바꾸지 않고 승인도 아니다
+
 ### 2-3. `POST /v1/approval/{id}` (Bearer auth)
 
 Request:
