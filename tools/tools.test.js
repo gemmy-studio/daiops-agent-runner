@@ -813,3 +813,27 @@ describe('경로 ~ 확장', () => {
     }
   })
 })
+
+describe('러너 폴더 파일 도구 막기 (보안 검토 11/26 6-2)', async () => {
+  const { isWriteDenied } = await import('./_common.js')
+  const { RUNNER_READONLY_DIRS } = await import('../tool-sandbox.js')
+
+  it('감싼 셸이 읽기 전용으로 묶는 러너 폴더는 Write, Edit 도 거절한다', () => {
+    for (const dir of RUNNER_READONLY_DIRS) {
+      assert.equal(isWriteDenied(dir).denied, true, dir)
+      assert.equal(isWriteDenied(`${dir}/server.js`).denied, true, dir)
+      assert.equal(isWriteDenied(`${dir}/jobs-meta/x.meta.json`).denied, true, dir)
+    }
+  })
+
+  it('이름만 닮은 옆 폴더는 막지 않는다', () => {
+    assert.equal(isWriteDenied('/workspace/.agent-runner-notes/a.md').denied, false)
+    assert.equal(isWriteDenied('/opt/agent-runner2/a.js').denied, false)
+  })
+
+  it('Write 가 러너 코드를 덮지 못한다', async () => {
+    const r = await runWrite({ file_path: '/opt/agent-runner/server.js', content: 'x' }, {})
+    assert.equal(r.is_error, true)
+    assert.match(r.content, /denied prefix '\/opt\/agent-runner'/)
+  })
+})

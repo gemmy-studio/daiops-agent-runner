@@ -82,10 +82,16 @@ export function buildToolEnv(extra = {}) {
   return applyInjectionProxyEnv(base)
 }
 
-/** 절대 deny되는 쓰기 prefix — 시스템 디렉토리 보호. */
+/**
+ * 절대 deny되는 쓰기 prefix — 시스템 디렉토리 보호.
+ * `/opt/agent-runner`(러너 프로그램)와 `/workspace/.agent-runner`(러너 상태, 잡 메타)도 넣는다. Write, Edit 는 러너
+ * 프로세스 안에서 돌아 감싸기(bubblewrap)를 거치지 않으므로 여기서 막아야 한다. 종전에는 full 등급이 러너 코드를 고쳐
+ * 다음 부팅에 실행시킬 수 있었고, 모든 등급이 잡 메타를 꾸밀 수 있었다(보안 검토 11/26 6-2, 감싼 셸의 RUNNER_READONLY_DIRS 와 같은 목록)
+ */
 const WRITE_DENIED_PREFIXES = Object.freeze([
   '/etc', '/usr', '/bin', '/sbin', '/lib', '/lib64',
   '/boot', '/proc', '/sys', '/dev', '/var/lib', '/var/run',
+  '/opt/agent-runner', '/workspace/.agent-runner',
 ])
 
 /** 정확히 일치하면 deny되는 경로. */
