@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.41.6] - 2026-11-27
+
+> **배포 순서**: 순서 제약 없음. 설치 요청 길(0.42.0)과 출근 때 다시 깔기는 이 판 뒤에만 켠다.
+
+### Security
+- **감싼 셸에서 apt, dpkg 상태 자리를 읽기 전용으로**(보안 검토 11-27 12-1). `/var/lib/dpkg`, `/var/lib/apt/lists`,
+  `/var/cache/apt/archives`, `/var/cache/debconf`. 감싼 셸이 postinst 와 트리거를 바꿔 감싸기 밖 dpkg 실행 때 root 로 돌던 길을 막는다
+- Write, Edit 가 `/var/cache` 에 쓰지 못한다(`/var/lib` 는 이미 거절)
+- 부팅 점검에 `dpkgState`, `aptArchives` 항목
+
 ## [0.41.5] - 2026-11-27
 
 > **배포 순서**: 앱의 `python3 -I`(감싸기 밖 python 격리)와 함께 간다. 순서 제약은 없지만 둘 다 들어가야 10절 두 길이 모두 닫힌다.
