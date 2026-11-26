@@ -15,6 +15,7 @@ import {
   RUNNER_READONLY_DIRS,
   ancestorsOf,
   isProcMountFailure,
+  toolSandboxRefusal,
   PROC_COVER_DIRS,
   _resetToolSandboxForTest,
 } from './tool-sandbox.js'
@@ -226,6 +227,33 @@ describe('initToolSandbox, wrapToolSpawn', () => {
     assert.equal(n, 1)
     assert.equal(isProcMountFailure('감싼 셸 실행 실패: exit 1 ' + PROC_FAIL), true)
     assert.equal(isProcMountFailure('bwrap: pivot_root: Operation not permitted'), false)
+  })
+
+  // 대표 결정 11-26: bubblewrap 이 있는데 점검이 실패하면(고장) 터미널을 막는다. 없으면(옛 샌드박스) 그대로 돈다
+  it('bubblewrap 이 있는데 점검이 실패하면 blocking 이고 거절 안내를 낸다', () => {
+    const s = initToolSandbox({ exists: () => true, spawn: fakeSpawn(['protected=written']).spawn })
+    assert.equal(s.enabled, false)
+    assert.equal(s.blocking, true)
+    assert.match(toolSandboxRefusal(), /Bash is unavailable/)
+  })
+
+  it('bubblewrap 이 없으면 막지 않는다(옛 샌드박스)', () => {
+    const s = initToolSandbox({ exists: () => false })
+    assert.equal(s.blocking, false)
+    assert.equal(toolSandboxRefusal(), null)
+  })
+
+  it('끄기 스위치면 막지 않는다', () => {
+    process.env.AGENT_RUNNER_TOOL_SANDBOX = 'off'
+    const s = initToolSandbox({ exists: () => true, spawn: fakeSpawn(['protected=written']).spawn })
+    assert.equal(s.blocking, false)
+    assert.equal(toolSandboxRefusal(), null)
+  })
+
+  it('점검을 통과하면 막지 않는다', () => {
+    const lines = PASS_LINES.map((l) => (l.startsWith('runnerPid=') && process.pid <= 10 ? 'runnerPid=skipped' : l))
+    initToolSandbox({ exists: (p) => p === '/usr/bin/bwrap', spawn: fakeSpawn(lines).spawn })
+    assert.equal(toolSandboxRefusal(), null)
   })
 
   it('AGENT_RUNNER_TOOL_SANDBOX=off 면 점검도 하지 않는다', () => {

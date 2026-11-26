@@ -399,6 +399,25 @@ describe('runBash', () => {
   })
 })
 
+describe('runBash — 감싸기 고장 때 거절(대표 결정 11-26)', () => {
+  it('blocking 이면 포그라운드와 백그라운드 모두 실행하지 않는다', async () => {
+    const { initToolSandbox, _resetToolSandboxForTest } = await import('../tool-sandbox.js')
+    const marker = path.join(os.tmpdir(), `bash-blocked-${process.pid}`)
+    _resetToolSandboxForTest()
+    try {
+      initToolSandbox({ exists: () => true, spawn: () => ({ status: 0, stdout: 'protected=written', stderr: '' }) })
+      for (const bg of [false, true]) {
+        const r = await runBash({ command: `touch ${marker}`, run_in_background: bg })
+        assert.equal(r.is_error, true)
+        assert.match(r.content, /Bash is unavailable/)
+      }
+      assert.equal(await fs.access(marker).then(() => true, () => false), false)
+    } finally {
+      _resetToolSandboxForTest()
+    }
+  })
+})
+
 describe('runBash — run_in_background (잡 레지스트리)', () => {
   it('즉시 job_id 반환 + 로그·메타 파일 생성, 작업은 비동기로 완료', async () => {
     const jobsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bash-jobs-'))

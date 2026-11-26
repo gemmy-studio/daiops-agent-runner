@@ -60,6 +60,8 @@ const state = {
   enabled: false,
   /** 새 /proc 를 붙이는가. 붙이지 못하는 환경(11-26 Daytona 미리보기: EINVAL)에서는 false 로 다시 점검한다 */
   mountProc: true,
+  /** bubblewrap 이 있는데 점검을 통과하지 못했다. 이때는 터미널 명령을 거절한다(대표 결정 11-26, 카드 484ffe02-2611261824) */
+  blocking: false,
   bwrap: null,
   selfCheck: null,
   reason: 'not initialized',
@@ -232,6 +234,9 @@ export function initToolSandbox(deps = {}) {
   state.selfCheck = check.result
   if (!check.pass) {
     state.reason = check.reason
+    // bubblewrap 은 있는데 감싸기가 서지 않는다 = 고장. 감싸지 않고 돌리면 러너와 업무 방식 파일이 다시 열리므로 막는다.
+    // bubblewrap 이 없는 옛 샌드박스(위)는 재구성 전까지 그대로 돈다(옛 직원 전부가 멈추지 않게)
+    state.blocking = true
     return state
   }
   state.enabled = true
@@ -259,6 +264,18 @@ export function wrapToolSpawn(spawnArgs, opts = {}) {
   return { file: state.bwrap, args: [...buildSandboxArgs({ protectedPaths, background: opts.background }), spawnArgs.file, ...spawnArgs.args] }
 }
 
+/**
+ * 터미널 명령을 거절해야 하면 AI 팀원에게 돌려줄 안내, 아니면 null. 안내는 영어(직원이 읽는 도구 결과)이고
+ * 사유는 `/health.toolSandbox.reason` 에 있다.
+ */
+export function toolSandboxRefusal() {
+  if (!state.blocking) return null
+  return 'Bash is unavailable: the command sandbox failed its startup self-check on this workspace, so shell commands are '
+    + 'blocked to protect the runner and work-method files. Do not try to work around this. Tell the user that terminal '
+    + 'commands are temporarily unavailable and that the platform team has been notified; continue with tools that do not '
+    + 'need the shell where possible.'
+}
+
 /** `/health.toolSandbox` */
 export function toolSandboxState() {
   return { ...state, selfCheck: state.selfCheck ? { ...state.selfCheck } : null }
@@ -266,5 +283,5 @@ export function toolSandboxState() {
 
 export function _resetToolSandboxForTest() {
   initialized = false
-  Object.assign(state, { mode: 'auto', enabled: false, mountProc: true, bwrap: null, selfCheck: null, reason: 'not initialized', wrapped: 0 })
+  Object.assign(state, { mode: 'auto', enabled: false, mountProc: true, blocking: false, bwrap: null, selfCheck: null, reason: 'not initialized', wrapped: 0 })
 }

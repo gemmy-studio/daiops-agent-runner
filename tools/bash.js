@@ -17,7 +17,7 @@ import { resolvePath, resolveCwd, buildToolEnv } from './_common.js'
 import { ensureJobKeepalive, resolveJobsDir, resolveJobsMetaDir } from '../job-keepalive.js'
 import { admitTool, buildSpawnArgs, MIN_FREE_BYTES } from '../tool-cpu-lane.js'
 import { attachToToolCgroup } from '../tool-cgroup.js'
-import { wrapToolSpawn } from '../tool-sandbox.js'
+import { wrapToolSpawn, toolSandboxRefusal } from '../tool-sandbox.js'
 import { logWarn } from '../logger.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -62,6 +62,9 @@ export async function runBash(input, ctx = {}) {
     return { content: 'Bash: command is required', is_error: true }
   }
   if (ctx.signal?.aborted) return { content: 'Bash: aborted before start', is_error: true }
+  // 감싸기가 고장이면 감싸지 않고 돌리지 않는다(tool-sandbox.js blocking)
+  const refusal = toolSandboxRefusal()
+  if (refusal) return { content: refusal, is_error: true }
 
   const cwd = resolvePath(resolveCwd(ctx), '/')
   if (!existsSync(cwd)) {

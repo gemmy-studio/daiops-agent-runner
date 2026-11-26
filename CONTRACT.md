@@ -88,8 +88,10 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
   "toolSandbox": {
     "mode": "auto",
     "enabled": true,
+    "mountProc": false,
+    "blocking": false,
     "bwrap": "/usr/bin/bwrap",
-    "selfCheck": { "runner": "blocked", "runnerState": "blocked", "protected": "blocked", "tmp": "written", "umount": "blocked", "runnerPid": "hidden" },
+    "selfCheck": { "runner": "blocked", "runnerState": "blocked", "protected": "blocked", "jobsMeta": "blocked", "tmp": "written", "umount": "blocked", "parentMove": "blocked", "runnerPid": "hidden", "runnerMem": "blocked", "runnerEnv": "blocked", "procSys": "ro" },
     "reason": null,
     "wrapped": 12
   },
@@ -113,7 +115,7 @@ secret/remember/memory는 approval과 동일한 in-flight resolve 패턴이라 �
   - `vcpu`: 실제 파생된 vCPU(`AGENT_RUNNER_VCPU` → cgroup `cpu.max` → `os.cpus()` 순).
   - `memoryLimitBytes` / `minFreeBytes`: 판정에 쓰인 상한과 확보 임계값. 상한을 못 읽으면 `null`.
 - `toolCgroup`: **커널 집행 계층 상태**(`tool-cgroup.js`). 도구 자식 프로세스를 별도 cgroup v2 서브그룹에 넣어 `cpu.weight`·`memory.high`·`memory.max`를 커널이 집행하게 한다. 쓰기 위임이 없는 환경에서는 비활성되고 nice + admission이 방어를 담당한다(기능 저하 없음, 보장만 약해짐).
-- `toolSandbox`: **도구 명령 감싸기 상태**(`tool-sandbox.js`, 2026-11-25 보안 2차-가 2-2, 2-3). Bash 자식 프로세스를 bubblewrap 으로 감싸 러너 프로그램(`/opt/agent-runner`), 러너 상태(`/workspace/.agent-runner`, 잡 폴더 제외), 보호 경로(`policy.protectedPaths`)를 읽기 전용으로 덮고 권한을 내린다. 부팅 때 감싼 셸로 스스로 점검해 통과해야 켜진다(`selfCheck`). 통과하지 못하거나 bubblewrap 이 없으면 감싸지 않고 `reason` 에 사유를 싣는다.
+- `toolSandbox`: **도구 명령 감싸기 상태**(`tool-sandbox.js`, 2026-11-25 보안 2차-가 2-2, 2-3). Bash 자식 프로세스를 bubblewrap 으로 감싸 러너 프로그램(`/opt/agent-runner`), 러너 상태(`/workspace/.agent-runner`, 잡 폴더 제외), 보호 경로(`policy.protectedPaths`)를 읽기 전용으로 덮고 권한을 내린다. 부팅 때 감싼 셸로 스스로 점검해 통과해야 켜진다(`selfCheck`). 통과하지 못하거나 bubblewrap 이 없으면 감싸지 않고 `reason` 에 사유를 싣는다. `mountProc: false` 는 새 /proc 를 못 붙여 바깥 /proc 를 쓰는 모드(0.41.2, Daytona). `blocking: true` 는 bubblewrap 이 있는데 점검이 실패한 고장 상태로, 이때 Bash 는 실행하지 않고 거절한다(0.41.3, 대표 결정 11-26). bubblewrap 이 없는 옛 샌드박스와 `AGENT_RUNNER_TOOL_SANDBOX=off` 는 막지 않는다.
   - `enabled`: 활성 여부. `reason`: **비활성 사유(비활성이면 항상 문자열)** — 조용한 실패를 막기 위해 반드시 실린다. 활성이면 `null`.
   - `cpuWeight`: 도구 그룹의 `cpu.weight`(기본 20 — 루트 기본 100 대비 약 1/5 몫). 이 값 쓰기가 실패하면 부분 적용 상태로 두지 않고 전체를 비활성한다.
   - `memoryHigh` / `memoryMax`: 상한의 60% / 80%. `high`는 **소프트**(초과 시 회수 압력으로 감속, 죽이지 않음), `max`는 **하드**(초과 시 이 그룹 내에서 OOM kill → 희생자가 도구 자식으로 한정되고 러너 본체는 보호된다). 컨테이너 상한을 모르면 둘 다 `null`이고 CPU 가중치만 적용된다.
