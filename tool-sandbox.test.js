@@ -14,6 +14,8 @@ import {
   toolSandboxState,
   RUNNER_READONLY_DIRS,
   SYSTEM_READONLY_DIRS,
+  APP_STAGING_DIRS,
+  WRAPPED_HOME,
   ancestorsOf,
   isProcMountFailure,
   toolSandboxRefusal,
@@ -34,7 +36,7 @@ function fakeSpawn(stdoutLines, { status = 0, error } = {}) {
 }
 
 // parentMove, jobsMeta 는 그 폴더가 있을 때만 기대에 든다(root 로 돌면 /workspace 아래가 실제로 생긴다). 늘 넣어 둔다
-const PASS_LINES = ['runner=blocked', 'runnerState=blocked', 'protected=blocked', 'jobsMeta=blocked', 'bwrapDir=blocked', 'etc=blocked', 'tmp=written', 'umount=blocked', 'parentMove=blocked', 'runnerPid=hidden']
+const PASS_LINES = ['runner=blocked', 'runnerState=blocked', 'protected=blocked', 'jobsMeta=blocked', 'bwrapDir=blocked', 'etc=blocked', 'rootHome=blocked', 'appStaging=blocked', 'home=moved', 'tmp=written', 'umount=blocked', 'parentMove=blocked', 'runnerPid=hidden']
 
 describe('buildSandboxArgs', () => {
   it('러너 폴더와 보호 경로를 읽기 전용으로 덮고, 잡 폴더만 다시 연다', () => {
@@ -72,6 +74,20 @@ describe('buildSandboxArgs', () => {
     assert.ok(roAt('/opt') < roAt('/opt/agent-runner'), '러너 폴더 덮기 앞')
   })
 
+  // 보안 검토 11-27 10절: 감싼 셸이 ~/.bashrc, ~/.local 의 .pth, 앱 스크립트 폴더의 json.py 로 감싸기 밖 실행을 심었다
+  it('HOME 을 작업 폴더 아래로 옮기고 /root 와 앱 스크립트 폴더를 읽기 전용으로 덮는다', () => {
+    const args = buildSandboxArgs({ protectedPaths: [SKILLS] })
+    const joined = args.join(' ')
+    assert.match(joined, new RegExp(`--setenv HOME ${WRAPPED_HOME}`))
+    assert.ok(WRAPPED_HOME.startsWith('/workspace/'))
+    assert.match(joined, /--ro-bind-try \/root \/root/)
+    for (const dir of APP_STAGING_DIRS) assert.match(joined, new RegExp(`--ro-bind-try ${dir.replace(/\./g, '\\.')} `))
+    // 앱 스크립트 폴더의 부모(/workspace/.daiops)는 쓰기로 다시 붙여 옮기기를 막는다
+    const binds = []
+    for (let i = 0; i < args.length; i++) if (args[i] === '--bind-try') binds.push(args[i + 1])
+    assert.ok(binds.includes('/workspace/.daiops'))
+  })
+
   it('ancestorsOf 는 얕은 것부터, 대상 자신과 / 는 빼고', () => {
     assert.deepEqual(ancestorsOf(['/a/b/c', '/a/b', '/x/y']), ['/a', '/x'])
     assert.deepEqual(ancestorsOf(['/workspace/.daiops/skills']), ['/workspace', '/workspace/.daiops'])
@@ -106,7 +122,7 @@ describe('runSelfCheck', () => {
     assert.equal(calls[0].file, '/usr/bin/bwrap')
   })
 
-  for (const [name, bad] of [['protected', 'written'], ['umount', 'done'], ['runnerPid', 'visible'], ['tmp', 'blocked'], ['bwrapDir', 'written'], ['etc', 'written']]) {
+  for (const [name, bad] of [['protected', 'written'], ['umount', 'done'], ['runnerPid', 'visible'], ['tmp', 'blocked'], ['bwrapDir', 'written'], ['etc', 'written'], ['rootHome', 'written'], ['home', 'same']]) {
     it(`${name}=${bad} 이면 실패하고 사유에 남긴다`, () => {
       const lines = PASS_LINES.map((l) => (l.startsWith(`${name}=`) ? `${name}=${bad}` : l))
       const r = runSelfCheck('/usr/bin/bwrap', { spawn: fakeSpawn(lines).spawn, runnerPid: 4242, protectedDir: '/tmp' })

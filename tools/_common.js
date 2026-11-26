@@ -92,6 +92,8 @@ const WRITE_DENIED_PREFIXES = Object.freeze([
   '/etc', '/usr', '/bin', '/sbin', '/lib', '/lib64',
   '/boot', '/proc', '/sys', '/dev', '/var/lib', '/var/run',
   '/opt/agent-runner', '/workspace/.agent-runner',
+  // 앱이 감싸기 밖에서 python 으로 돌리는 스크립트 폴더. Write 로 json.py 를 심으면 밖에서 import 됐다(보안 검토 11/27 10절)
+  '/workspace/.daiops/.harness-sync', '/workspace/.daiops/.harness-seed',
 ])
 
 /** 정확히 일치하면 deny되는 경로. */

@@ -57,6 +57,18 @@ export const RUNNER_READONLY_DIRS = ['/opt/agent-runner', '/workspace/.agent-run
  * 대가: 감싼 셸에서 apt-get install, npm install -g 가 안 된다. 시스템 pip 는 /root/.local 로 넘어가 되고 venv, npx 도 된다(11-26 실측)
  */
 export const SYSTEM_READONLY_DIRS = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/opt']
+/**
+ * 앱이 감싸기 밖(Daytona executeCommand)에서 python 으로 돌리는 스크립트와 그 재료를 올리는 폴더(skill-sync.ts, harness-seed.ts).
+ * 감싼 셸이 여기 json.py 를 심거나 sync.py 를 올리기 직전 바꿔치면 감싸기 밖에서 실행됐다(보안 검토 11-27 10절 probe12).
+ * 감쌀 때마다 미리 만들어 읽기 전용으로 덮는다. 앱은 이 폴더를 지우지 않는다
+ */
+export const APP_STAGING_DIRS = ['/workspace/.daiops/.harness-sync', '/workspace/.daiops/.harness-seed']
+/**
+ * 감싼 셸의 HOME. 종전 /root 는 감싸기 밖과 같아서, 감싼 셸이 ~/.bashrc, ~/.profile, ~/.local/.../*.pth 를 쓰면 감싸기 밖의
+ * bash -lc, python3 이 그것을 실행했다(10절 probe11). /root 는 읽기 전용으로 덮고 HOME 을 작업 폴더 아래로 옮긴다.
+ * pip --user 도 여기로 가서 재구성 백업에 함께 실린다
+ */
+export const WRAPPED_HOME = '/workspace/.home'
 /** bwrap 이 --proc 때 읽기 전용으로 덮는 곳(bubblewrap cover_proc_dirs). 바깥 /proc 를 쓸 때 직접 덮는다 */
 export const PROC_COVER_DIRS = ['/proc/sys', '/proc/sysrq-trigger', '/proc/irq', '/proc/bus']
 /** 백그라운드 잡 로그와 종료 코드(`tools/bash.js`). 러너 상태 안이지만 잡이 써야 한다 */
@@ -90,6 +102,7 @@ export function buildSandboxArgs({ protectedPaths = [], background = false, moun
     '--unshare-user', '--uid', '0', '--gid', '0',
     '--unshare-pid',
     '--cap-drop', 'ALL',
+    '--setenv', 'HOME', WRAPPED_HOME,
   ]
   if (!background) args.push('--die-with-parent')
   const protectedTargets = protectedPaths
@@ -98,10 +111,12 @@ export function buildSandboxArgs({ protectedPaths = [], background = false, moun
   // 덮은 폴더 자체는 옮길 수 없지만(EBUSY) 그 부모는 옮겨진다. 부모를 옮기고 같은 이름으로 새로 만들면 밖(러너, 앱)은
   // 가짜를 본다(보안 검토 11-26 「가」). 부모 사슬을 제자리에 다시 붙여(쓰기 그대로) 마운트 지점으로 만들면 옮기기가 EBUSY 다.
   // 권한을 모두 내린 user namespace 라 감싼 셸은 이 마운트를 풀지 못한다. 얕은 것부터 붙인다(나중 마운트가 위에 얹힌다)
-  for (const dir of ancestorsOf([...RUNNER_READONLY_DIRS, ...protectedTargets])) args.push('--bind-try', dir, dir)
+  for (const dir of ancestorsOf([...RUNNER_READONLY_DIRS, ...APP_STAGING_DIRS, ...protectedTargets])) args.push('--bind-try', dir, dir)
   // 시스템 폴더는 부모 사슬 다음, 러너 폴더보다 먼저. /opt 를 덮은 뒤 /opt/agent-runner 를 다시 덮어도 같은 읽기 전용이다
   for (const dir of SYSTEM_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
+  args.push('--ro-bind-try', '/root', '/root')
   for (const dir of RUNNER_READONLY_DIRS) args.push('--ro-bind-try', dir, dir)
+  for (const dir of APP_STAGING_DIRS) args.push('--ro-bind-try', dir, dir)
   // 나중 마운트가 이긴다: 잡 폴더만 다시 쓰기로 연다. 잡 메타는 러너 상태(읽기 전용) 쪽 jobs-meta 에 있다
   const jobs = JOBS_DIR()
   args.push('--bind-try', jobs, jobs)
@@ -135,6 +150,10 @@ function ensureProtectedDirs(protectedPaths) {
     }
   }
   try { mkdirSync(JOBS_DIR(), { recursive: true }) } catch { /* 같음 */ }
+  // 없으면 덮을 자리가 없어 감싼 셸이 먼저 만들고 심을 수 있다
+  for (const dir of [...APP_STAGING_DIRS, WRAPPED_HOME]) {
+    try { mkdirSync(dir, { recursive: true }) } catch { /* 같음 */ }
+  }
   try { mkdirSync(resolveJobsMetaDir(), { recursive: true }) } catch { /* 같음 */ }
 }
 
@@ -154,6 +173,9 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
     // bwrap 이 든 폴더와 /etc 에 새 파일을 만들 수 있으면 bwrap 바꿔치기, ld.so.preload 로 감싸기를 벗어난다(6-4 (2))
     ['bwrapDir', `${path.dirname(bwrap)}/${tag}`],
     ['etc', `/etc/${tag}`],
+    // 감싸기 밖 bash, python 이 읽는 곳(10절)
+    ['rootHome', `/root/${tag}`],
+    ['appStaging', `${APP_STAGING_DIRS[0]}/${tag}`],
   ].filter(([, f]) => existsSync(path.dirname(f)))
   // 보호 폴더의 부모를 옮길 수 있으면 같은 이름으로 가짜를 세울 수 있다(「가」). 옮겨지면 바로 되돌린다
   const parent = path.dirname(protectedDir)
@@ -163,6 +185,7 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
   const lines = [
     ...mustFail.map(([name, f]) => `touch '${f}' 2>/dev/null && echo "${name}=written" || echo "${name}=blocked"`),
     `touch '${okFile}' && echo "tmp=written" || echo "tmp=blocked"`,
+    `[ "$HOME" = '${WRAPPED_HOME}' ] && echo "home=moved" || echo "home=same"`,
     `umount '${protectedDir}' 2>/dev/null && echo "umount=done" || echo "umount=blocked"`,
     ...(checkParent ? [`mv '${parent}' '${moved}' 2>/dev/null && { mv '${moved}' '${parent}'; echo "parentMove=done"; } || echo "parentMove=blocked"`] : []),
     // 새 pid namespace 의 번호는 1부터라 러너 번호가 작으면 겹칠 수 있다. 10 넘을 때만 본다
@@ -204,6 +227,7 @@ export function runSelfCheck(bwrap, { spawn = spawnSync, protectedDir = '/worksp
   const expected = {
     ...Object.fromEntries(mustFail.map(([name]) => [name, 'blocked'])),
     tmp: 'written',
+    home: 'moved',
     umount: 'blocked',
     ...(checkParent ? { parentMove: 'blocked' } : {}),
     ...(runnerPid > 10 ? { runnerPid: 'hidden' } : {}),

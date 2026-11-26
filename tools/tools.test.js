@@ -816,10 +816,10 @@ describe('경로 ~ 확장', () => {
 
 describe('러너 폴더 파일 도구 막기 (보안 검토 11/26 6-2)', async () => {
   const { isWriteDenied } = await import('./_common.js')
-  const { RUNNER_READONLY_DIRS } = await import('../tool-sandbox.js')
+  const { RUNNER_READONLY_DIRS, APP_STAGING_DIRS } = await import('../tool-sandbox.js')
 
-  it('감싼 셸이 읽기 전용으로 묶는 러너 폴더는 Write, Edit 도 거절한다', () => {
-    for (const dir of RUNNER_READONLY_DIRS) {
+  it('감싼 셸이 읽기 전용으로 묶는 러너 폴더와 앱 스크립트 폴더는 Write, Edit 도 거절한다', () => {
+    for (const dir of [...RUNNER_READONLY_DIRS, ...APP_STAGING_DIRS]) {
       assert.equal(isWriteDenied(dir).denied, true, dir)
       assert.equal(isWriteDenied(`${dir}/server.js`).denied, true, dir)
       assert.equal(isWriteDenied(`${dir}/jobs-meta/x.meta.json`).denied, true, dir)
